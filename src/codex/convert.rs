@@ -1,0 +1,312 @@
+use crate::openai::types::{
+    ChatCompletionRequest, ChatContent, ChatContentPart, ChatMessage, ChatTool,
+};
+use serde_json::{Value, json};
+
+pub fn normalize_model(model: &str) -> String {
+    model
+        .strip_prefix("openai-codex/")
+        .unwrap_or(model)
+        .to_owned()
+}
+
+pub fn to_codex_request(request: &ChatCompletionRequest) -> Value {
+    let (instructions, input) = split_messages(&request.messages);
+    let mut body = json!({
+        "model": normalize_model(&request.model),
+        "store": false,
+        "stream": true,
+        "instructions": instructions,
+        "input": input,
+        "text": { "verbosity": text_verbosity(request) },
+        "include": ["reasoning.encrypted_content"],
+        "tool_choice": convert_tool_choice(request.tool_choice.as_ref()).unwrap_or_else(|| json!("auto")),
+        "parallel_tool_calls": true
+    });
+
+    insert_optional(
+        &mut body,
+        "temperature",
+        request.temperature.map(Value::from),
+    );
+    insert_optional(
+        &mut body,
+        "service_tier",
+        request.service_tier.clone().map(Value::from),
+    );
+    if let Some(tools) = request.tools.as_ref().filter(|tools| !tools.is_empty()) {
+        body["tools"] = Value::Array(tools.iter().map(convert_tool).collect());
+    }
+
+    if let Some(effort) = request.reasoning_effort.as_deref() {
+        body["reasoning"] = json!({
+            "effort": clamp_reasoning_effort(&request.model, effort),
+            "summary": "auto"
+        });
+    }
+
+    body
+}
+
+fn split_messages(messages: &[ChatMessage]) -> (String, Vec<Value>) {
+    messages
+        .iter()
+        .enumerate()
+        .fold((Vec::new(), Vec::new()), |mut acc, (index, message)| {
+            match message.role.as_str() {
+                "system" | "developer" => {
+                    if let Some(text) = message_text(message) {
+                        acc.0.push(text);
+                    }
+                }
+                "user" => acc.1.push(json!({
+                    "role": "user",
+                    "content": content_to_input_parts(message.content.as_ref())
+                })),
+                "assistant" => append_assistant_message(&mut acc.1, message, index),
+                "tool" => {
+                    if let Some(call_id) = message.tool_call_id.as_deref() {
+                        acc.1.push(json!({
+                            "type": "function_call_output",
+                            "call_id": call_id,
+                            "output": message_text(message).unwrap_or_default()
+                        }));
+                    }
+                }
+                _ => {}
+            }
+            acc
+        })
+        .map_first(|parts| parts.join("\n\n"))
+}
+
+fn append_assistant_message(input: &mut Vec<Value>, message: &ChatMessage, index: usize) {
+    if let Some(text) = message_text(message).filter(|text| !text.is_empty()) {
+        input.push(json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": text, "annotations": []}],
+            "status": "completed",
+            "id": format!("msg_{index}")
+        }));
+    }
+
+    for tool_call in message.tool_calls.iter().flatten() {
+        input.push(json!({
+            "type": "function_call",
+            "call_id": &tool_call.id,
+            "name": &tool_call.function.name,
+            "arguments": &tool_call.function.arguments
+        }));
+    }
+}
+
+fn content_to_input_parts(content: Option<&ChatContent>) -> Vec<Value> {
+    match content {
+        Some(ChatContent::Text(text)) => vec![json!({ "type": "input_text", "text": text })],
+        Some(ChatContent::Parts(parts)) => parts.iter().filter_map(convert_content_part).collect(),
+        None => Vec::new(),
+    }
+}
+
+fn convert_content_part(part: &ChatContentPart) -> Option<Value> {
+    match part.kind.as_str() {
+        "text" => part
+            .text
+            .as_ref()
+            .map(|text| json!({ "type": "input_text", "text": text })),
+        "image_url" => part.image_url.as_ref().map(|image| {
+            json!({
+                "type": "input_image",
+                "detail": image.detail.as_deref().unwrap_or("auto"),
+                "image_url": image.url
+            })
+        }),
+        _ => None,
+    }
+}
+
+fn convert_tool(tool: &ChatTool) -> Value {
+    json!({
+        "type": "function",
+        "name": &tool.function.name,
+        "description": tool.function.description.clone().unwrap_or_default(),
+        "parameters": tool.function.parameters.clone().unwrap_or_else(|| json!({ "type": "object" })),
+        "strict": tool.function.strict
+    })
+}
+
+fn convert_tool_choice(tool_choice: Option<&Value>) -> Option<Value> {
+    let choice = tool_choice?;
+    if choice.is_string() {
+        return Some(choice.clone());
+    }
+
+    let kind = choice.get("type").and_then(Value::as_str)?;
+    if kind != "function" {
+        return Some(choice.clone());
+    }
+
+    let name = choice
+        .get("name")
+        .or_else(|| choice.pointer("/function/name"))?
+        .as_str()?;
+
+    Some(json!({
+        "type": "function",
+        "name": name
+    }))
+}
+
+fn message_text(message: &ChatMessage) -> Option<String> {
+    match message.content.as_ref()? {
+        ChatContent::Text(text) => Some(text.clone()),
+        ChatContent::Parts(parts) => {
+            let text = parts
+                .iter()
+                .filter_map(|part| match part.kind.as_str() {
+                    "text" => part.text.as_deref(),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            Some(text)
+        }
+    }
+}
+
+fn text_verbosity(request: &ChatCompletionRequest) -> String {
+    request
+        .extra
+        .get("text_verbosity")
+        .and_then(Value::as_str)
+        .unwrap_or("medium")
+        .to_owned()
+}
+
+fn clamp_reasoning_effort(model: &str, effort: &str) -> String {
+    let id = normalize_model(model);
+    if (id.starts_with("gpt-5.2") || id.starts_with("gpt-5.3") || id.starts_with("gpt-5.4"))
+        && effort == "minimal"
+    {
+        "low".to_owned()
+    } else if id == "gpt-5.1" && effort == "xhigh" {
+        "high".to_owned()
+    } else {
+        effort.to_owned()
+    }
+}
+
+fn insert_optional(body: &mut Value, key: &str, value: Option<Value>) {
+    if let Some(value) = value {
+        body[key] = value;
+    }
+}
+
+trait TupleMapFirst<A, B> {
+    fn map_first<C>(self, map: impl FnOnce(A) -> C) -> (C, B);
+}
+
+impl<A, B> TupleMapFirst<A, B> for (A, B) {
+    fn map_first<C>(self, map: impl FnOnce(A) -> C) -> (C, B) {
+        (map(self.0), self.1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::openai::types::ChatCompletionRequest;
+
+    fn request(value: Value) -> ChatCompletionRequest {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn strips_openai_codex_prefix() {
+        assert_eq!(normalize_model("openai-codex/gpt-5.4"), "gpt-5.4");
+        assert_eq!(normalize_model("gpt-5.4"), "gpt-5.4");
+    }
+
+    #[test]
+    fn converts_chat_messages_to_responses_body() {
+        let body = to_codex_request(&request(json!({
+            "model": "openai-codex/gpt-5.4",
+            "messages": [
+                {"role": "system", "content": "be terse"},
+                {"role": "user", "content": "hello"}
+            ],
+            "temperature": 0.2
+        })));
+
+        assert_eq!(body["model"], "gpt-5.4");
+        assert_eq!(body["instructions"], "be terse");
+        assert_eq!(body["temperature"], 0.2);
+        assert_eq!(body["input"][0]["content"][0]["type"], "input_text");
+    }
+
+    #[test]
+    fn converts_assistant_tool_calls_and_tool_results() {
+        let body = to_codex_request(&request(json!({
+            "model": "gpt-5.4",
+            "messages": [
+                {"role": "assistant", "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": "{\"q\":\"x\"}"}
+                }]},
+                {"role": "tool", "tool_call_id": "call_1", "content": "done"}
+            ]
+        })));
+
+        assert_eq!(body["input"][0]["type"], "function_call");
+        assert_eq!(body["input"][1]["type"], "function_call_output");
+    }
+
+    #[test]
+    fn clamps_minimal_reasoning_for_new_codex_models() {
+        let body = to_codex_request(&request(json!({
+            "model": "gpt-5.4",
+            "messages": [],
+            "reasoning_effort": "minimal"
+        })));
+
+        assert_eq!(body["reasoning"]["effort"], "low");
+    }
+
+    #[test]
+    fn does_not_forward_unsupported_chat_completion_token_limit() {
+        let body = to_codex_request(&request(json!({
+            "model": "gpt-5.4",
+            "messages": [],
+            "max_completion_tokens": 42
+        })));
+
+        assert!(body.get("max_output_tokens").is_none());
+    }
+
+    #[test]
+    fn maps_chat_tool_choice_to_responses_tool_choice() {
+        let body = to_codex_request(&request(json!({
+            "model": "gpt-5.4",
+            "messages": [],
+            "tool_choice": {"type": "function", "function": {"name": "lookup"}}
+        })));
+
+        assert_eq!(
+            body["tool_choice"],
+            json!({"type": "function", "name": "lookup"})
+        );
+    }
+
+    #[test]
+    fn preserves_string_tool_choice() {
+        let body = to_codex_request(&request(json!({
+            "model": "gpt-5.4",
+            "messages": [],
+            "tool_choice": "required"
+        })));
+
+        assert_eq!(body["tool_choice"], "required");
+    }
+}
