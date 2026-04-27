@@ -1,31 +1,24 @@
+//! HTTP server state, router wiring, and endpoint tests.
+
 use crate::{
-    Error,
-    codex::client::CodexClient,
-    config::now_unix,
-    error::Result,
-    openai::{response::ModelList, types::ChatCompletionRequest},
-    status::StatusClient,
-    timefmt::{
-        format_status_time_local, format_unix_timestamp_local, remaining_seconds_for_status_time,
-    },
+    codex::client::CodexClient, error::Result, openai::response::ModelList, status::StatusClient,
     token::TokenManager,
 };
 use axum::{
-    Json, Router,
-    extract::State,
-    http::HeaderMap,
-    response::{
-        IntoResponse, Response,
-        sse::{Event, KeepAlive, Sse},
-    },
+    Router,
     routing::{get, post},
 };
-use futures_util::{Stream, StreamExt, stream};
 use reqwest::Client;
-use serde_json::json;
-use std::{convert::Infallible, net::SocketAddr, pin::Pin, sync::Arc};
+use std::{net::SocketAddr, sync::Arc};
 use tokio::net::TcpListener;
 
+mod auth;
+mod handlers;
+mod status_response;
+
+pub use auth::authorize;
+
+/// Shared application state used by all HTTP route handlers.
 #[derive(Clone)]
 pub struct AppState {
     token_manager: TokenManager,
@@ -36,6 +29,7 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Builds application state from the configured token manager, upstream client, and model list.
     pub fn new(
         token_manager: TokenManager,
         codex: CodexClient,
@@ -53,172 +47,39 @@ impl AppState {
     }
 }
 
+/// Binds the local listener and serves the Axum router until shutdown.
 pub async fn serve(addr: SocketAddr, state: AppState) -> Result<()> {
     let listener = TcpListener::bind(addr).await?;
     axum::serve(listener, router(state)).await?;
     Ok(())
 }
 
+/// Builds the HTTP router for all supported endpoints.
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route("/health", get(health))
-        .route("/v1/auth/refresh", post(manual_refresh))
-        .route("/v1/status", get(status))
-        .route("/v1/models", get(models))
-        .route("/v1/chat/completions", post(chat_completions))
+        .route("/health", get(handlers::health))
+        .route("/v1/auth/refresh", post(handlers::manual_refresh))
+        .route("/v1/status", get(handlers::status))
+        .route("/v1/models", get(handlers::models))
+        .route("/v1/chat/completions", post(handlers::chat_completions))
         .with_state(state)
-}
-
-async fn health() -> impl IntoResponse {
-    Json(json!({"status": "ok"}))
-}
-
-async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    match authorize(&headers, state.api_key.as_deref()) {
-        Ok(()) => Json(state.models).into_response(),
-        Err(error) => error.into_response(),
-    }
-}
-
-async fn manual_refresh(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
-        return error.into_response();
-    }
-
-    match state.token_manager.refresh().await {
-        Ok(credentials) => Json(json!({
-            "account_id": credentials.account_id,
-            "expires_at": credentials.expires_at,
-        }))
-        .into_response(),
-        Err(error) => error.into_response(),
-    }
-}
-
-async fn status(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
-        return error.into_response();
-    }
-
-    let credentials = match state.token_manager.credentials().await {
-        Ok(credentials) => credentials,
-        Err(error) => return error.into_response(),
-    };
-
-    let snapshot = state.status.fetch_status(&credentials).await;
-    let now = now_unix();
-
-    Json(json!({
-        "account_id": credentials.account_id,
-        "token": {
-            "expires_at": credentials.expires_at,
-            "remaining_seconds": credentials.expires_at.saturating_sub(now_unix()),
-            "expires_at_local": format_unix_timestamp_local(credentials.expires_at),
-        },
-        "account": snapshot.account.as_ref().map(|account| {
-            json!({
-                "name": account.name,
-                "email": account.email,
-                "structure": account.structure,
-                "plan": account.plan,
-                "has_active_subscription": account.has_active_subscription,
-                "subscription_expires_at": account.subscription_expires_at,
-                "subscription_expires_at_local": account.subscription_expires_at.as_deref().and_then(format_status_time_local),
-                "subscription_remaining_seconds": account.subscription_expires_at.as_deref().and_then(|value| remaining_seconds_for_status_time(value, now)),
-            })
-        }),
-        "credits_balance": snapshot.credits_balance,
-        "rate_limits": snapshot.rate_limits.iter().map(|window| json!({
-            "name": window.name,
-            "remaining_percent": window.remaining_percent,
-            "reset_at": window.reset_at,
-            "reset_at_local": window.reset_at.as_deref().and_then(format_status_time_local),
-            "reset_in_seconds": window.reset_at.as_deref().and_then(|value| remaining_seconds_for_status_time(value, now)),
-        })).collect::<Vec<_>>(),
-        "warnings": snapshot.warnings,
-    }))
-    .into_response()
-}
-
-async fn chat_completions(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(request): Json<ChatCompletionRequest>,
-) -> Response {
-    if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
-        return error.into_response();
-    }
-
-    let credentials = match state.token_manager.credentials().await {
-        Ok(credentials) => credentials,
-        Err(error) => return error.into_response(),
-    };
-
-    if request.wants_stream() {
-        match state.codex.stream_chat(request, &credentials).await {
-            Ok(stream) => sse_response(stream).into_response(),
-            Err(error) => error.into_response(),
-        }
-    } else {
-        match state.codex.complete_chat(request, &credentials).await {
-            Ok(response) => Json(response).into_response(),
-            Err(error) => error.into_response(),
-        }
-    }
-}
-
-pub fn authorize(headers: &HeaderMap, api_key: Option<&str>) -> Result<()> {
-    let Some(expected) = api_key else {
-        return Ok(());
-    };
-
-    let bearer = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "));
-    let x_api_key = headers
-        .get("x-api-key")
-        .and_then(|value| value.to_str().ok());
-
-    if bearer == Some(expected) || x_api_key == Some(expected) {
-        Ok(())
-    } else {
-        Err(Error::Unauthorized)
-    }
-}
-
-fn sse_response(
-    stream: Pin<
-        Box<dyn Stream<Item = Result<crate::openai::response::ChatCompletionChunk>> + Send>,
-    >,
-) -> Sse<impl Stream<Item = std::result::Result<Event, Infallible>>> {
-    let mapped = stream.map(|item| {
-        let event = match item {
-            Ok(chunk) => Event::default().data(serde_json::to_string(&chunk).unwrap_or_default()),
-            Err(error) => Event::default().data(
-                json!({"error": {"message": error.to_string(), "type": "upstream_error"}})
-                    .to_string(),
-            ),
-        };
-        Ok(event)
-    });
-
-    let done = stream::once(async { Ok(Event::default().data("[DONE]")) });
-    Sse::new(mapped.chain(done)).keep_alive(KeepAlive::default())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
+        Error,
         config::{AuthStore, Credentials, now_unix},
         oauth::CodexOAuthClient,
         openai::response::ModelList,
     };
     use axum::{
+        Json,
         body::to_bytes,
         extract::Form,
-        http::{HeaderValue, StatusCode},
+        http::{HeaderMap, HeaderValue, StatusCode},
+        routing::{get, post},
     };
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     use reqwest::Client;
@@ -365,7 +226,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-api-key", HeaderValue::from_static("secret"));
 
-        let response = manual_refresh(State(state), headers).await;
+        let response = handlers::manual_refresh(axum::extract::State(state), headers).await;
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
@@ -386,7 +247,8 @@ mod tests {
         let store = AuthStore::new(dir.path().join("auth.json"));
         let state = test_state(store, spawn_refresh_server().await, Some("secret".into()));
 
-        let response = manual_refresh(State(state), HeaderMap::new()).await;
+        let response =
+            handlers::manual_refresh(axum::extract::State(state), HeaderMap::new()).await;
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
@@ -418,7 +280,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-api-key", HeaderValue::from_static("secret"));
 
-        let response = status(State(state), headers).await;
+        let response = handlers::status(axum::extract::State(state), headers).await;
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
