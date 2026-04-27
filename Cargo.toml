@@ -2,7 +2,21 @@
 name = "codexia"
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+rust-version = "1.85"
+description = "OpenAI-compatible local API gateway backed by Codex OAuth."
+license = "LGPL-3.0-only"
+readme = "README.md"
+repository = "https://github.com/RyanKung/codexia"
+homepage = "https://github.com/RyanKung/codexia"
+documentation = "https://docs.rs/codexia"
+keywords = ["openai", "codex", "oauth", "gateway", "cli"]
+categories = ["command-line-utilities", "api-bindings", "web-programming::http-server"]
+default-run = "codexia"
+include = ["src/**/*", "README.md", "LICENSE", "Cargo.toml", "Cargo.lock"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 async-stream = "0.3"

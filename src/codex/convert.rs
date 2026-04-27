@@ -186,7 +186,10 @@ fn text_verbosity(request: &ChatCompletionRequest) -> String {
 
 fn clamp_reasoning_effort(model: &str, effort: &str) -> String {
     let id = normalize_model(model);
-    if (id.starts_with("gpt-5.2") || id.starts_with("gpt-5.3") || id.starts_with("gpt-5.4"))
+    if (id.starts_with("gpt-5.2")
+        || id.starts_with("gpt-5.3")
+        || id.starts_with("gpt-5.4")
+        || id.starts_with("gpt-5.5"))
         && effort == "minimal"
     {
         "low".to_owned()
@@ -266,7 +269,7 @@ mod tests {
     #[test]
     fn clamps_minimal_reasoning_for_new_codex_models() {
         let body = to_codex_request(&request(json!({
-            "model": "gpt-5.4",
+            "model": "gpt-5.5",
             "messages": [],
             "reasoning_effort": "minimal"
         })));

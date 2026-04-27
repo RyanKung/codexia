@@ -12,6 +12,8 @@ pub const OPENCLAW_CODEX_MODELS: &[&str] = &[
     "gpt-5.3-codex-spark",
     "gpt-5.4",
     "gpt-5.4-mini",
+    "gpt-5.5",
+    "gpt-5.5-mini",
 ];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -119,6 +121,14 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(ids, expected);
+    }
+
+    #[test]
+    fn defaults_include_gpt_55_models() {
+        let ids = resolve_model_ids(None, ModelOptions::default());
+
+        assert!(ids.iter().any(|id| id == "gpt-5.5"));
+        assert!(ids.iter().any(|id| id == "gpt-5.5-mini"));
     }
 
     #[test]

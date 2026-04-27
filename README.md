@@ -21,7 +21,7 @@ OpenAI-compatible chat request:
 curl http://127.0.0.1:14550/v1/chat/completions \
   -H 'content-type: application/json' \
   -d '{
-    "model": "gpt-5.4",
+    "model": "gpt-5.5",
     "messages": [{"role": "user", "content": "hello"}]
   }'
 ```
@@ -128,12 +128,14 @@ gpt-5.3-codex
 gpt-5.3-codex-spark
 gpt-5.4
 gpt-5.4-mini
+gpt-5.5
+gpt-5.5-mini
 ```
 
 Override or extend the list with CLI flags or environment variables:
 
 ```bash
-cargo run -- serve --models gpt-5.4,gpt-5.4-mini
+cargo run -- serve --models gpt-5.5,gpt-5.5-mini
 CODEXIA_EXTRA_MODELS=my-model cargo run -- serve
 CODEXIA_MODELS_FILE=models.json cargo run -- serve
 ```
@@ -141,12 +143,12 @@ CODEXIA_MODELS_FILE=models.json cargo run -- serve
 `models.json` may be a JSON array or an object:
 
 ```json
-["gpt-5.4", "gpt-5.4-mini"]
+["gpt-5.5", "gpt-5.5-mini"]
 ```
 
 ```json
 {
-  "models": ["gpt-5.4"],
+  "models": ["gpt-5.5"],
   "extra_models": ["my-model"]
 }
 ```
@@ -169,4 +171,4 @@ with the terms that apply to your account and the upstream services.
 
 Copyright (c) 2026 Codexia contributors.
 
-Licensed under the MIT License. See [LICENSE](LICENSE).
+Licensed under the GNU Lesser General Public License v3.0 only. See [LICENSE](LICENSE).

@@ -64,7 +64,8 @@ Disclaimer:
   with the terms that apply to your account and the upstream services.
 
 Copyright:
-  Copyright (c) 2026 Codexia contributors. Licensed under the MIT License.";
+  Copyright (c) 2026 Codexia contributors. Licensed under the GNU Lesser
+  General Public License v3.0 only.";
 
 /// Top-level CLI parser.
 #[derive(Debug, Parser)]
