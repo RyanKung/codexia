@@ -22,6 +22,8 @@ pub mod openai;
 pub mod server;
 /// Account and rate-limit status fetchers.
 pub mod status;
+/// Shared time formatting helpers for CLI and HTTP output.
+pub mod timefmt;
 /// OAuth credential caching and refresh orchestration.
 pub mod token;
 

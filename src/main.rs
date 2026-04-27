@@ -4,7 +4,6 @@
 //! daemon management commands on top of the library modules exposed by
 //! `codexia`.
 
-use chrono::{DateTime, Local, TimeZone};
 use clap::{Parser, Subcommand};
 use codexia::{
     Error, Result,
@@ -15,6 +14,7 @@ use codexia::{
     oauth::{CodexOAuthClient, create_authorization_flow, parse_authorization_input},
     server::{AppState, serve},
     status::StatusClient,
+    timefmt::{format_duration, format_status_time_human},
     token::TokenManager,
 };
 use reqwest::Client;
@@ -406,7 +406,7 @@ async fn status(store: AuthStore, codex_base_url: String) -> Result<()> {
         if let Some(expires_at) = account.subscription_expires_at {
             println!(
                 "subscription_expires_at: {}",
-                format_status_time(&expires_at)
+                format_status_time_human(&expires_at)
             );
         }
     }
@@ -424,7 +424,7 @@ async fn status(store: AuthStore, codex_base_url: String) -> Result<()> {
                 window.name, window.remaining_percent
             );
             if let Some(reset_at) = window.reset_at {
-                line.push_str(&format!(", resets {}", format_status_time(&reset_at)));
+                line.push_str(&format!(", resets {}", format_status_time_human(&reset_at)));
             }
             println!("{line}");
         }
@@ -511,85 +511,12 @@ fn token_expiry_message(credentials: &Credentials) -> String {
     }
 }
 
-/// Formats a positive or negative duration into a compact textual form.
-fn format_duration(total_secs: i64) -> String {
-    let total_secs = total_secs.max(0);
-    let days = total_secs / 86_400;
-    let hours = (total_secs % 86_400) / 3_600;
-    let minutes = (total_secs % 3_600) / 60;
-    let seconds = total_secs % 60;
-
-    if days > 0 {
-        format!("{days}d {hours:02}h {minutes:02}m {seconds:02}s")
-    } else if hours > 0 {
-        format!("{hours}h {minutes:02}m {seconds:02}s")
-    } else if minutes > 0 {
-        format!("{minutes}m {seconds:02}s")
-    } else {
-        format!("{seconds}s")
-    }
-}
-
-/// Formats a status time that may arrive as either a Unix timestamp or RFC3339 string.
-fn format_status_time(value: &str) -> String {
-    if let Ok(timestamp) = value.parse::<i64>()
-        && let Some(datetime) = Local.timestamp_opt(timestamp, 0).single()
-    {
-        return format_datetime_with_remaining(datetime);
-    }
-
-    if let Ok(datetime) = DateTime::parse_from_rfc3339(value) {
-        return format_datetime_with_remaining(datetime.with_timezone(&Local));
-    }
-
-    value.to_owned()
-}
-
-/// Renders a local timestamp alongside the relative time until or since it.
-fn format_datetime_with_remaining(datetime: DateTime<Local>) -> String {
-    let remaining = datetime.timestamp().saturating_sub(now_unix());
-    format!(
-        "{} ({})",
-        datetime.format("%Y-%m-%d %H:%M:%S %:z"),
-        if remaining >= 0 {
-            format!("in {}", format_duration(remaining))
-        } else {
-            format!("{} ago", format_duration(-remaining))
-        }
-    )
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{format_duration, format_status_time};
-    use chrono::{Local, TimeZone, Utc};
+    use codexia::timefmt::format_duration;
 
     #[test]
-    fn formats_token_duration() {
-        assert_eq!(format_duration(0), "0s");
-        assert_eq!(format_duration(59), "59s");
-        assert_eq!(format_duration(60), "1m 00s");
-        assert_eq!(format_duration(3_661), "1h 01m 01s");
+    fn reuses_shared_duration_formatting() {
         assert_eq!(format_duration(90_061), "1d 01h 01m 01s");
-    }
-
-    #[test]
-    fn clamps_negative_duration_to_zero() {
-        assert_eq!(format_duration(-1), "0s");
-    }
-
-    #[test]
-    fn formats_unix_status_time() {
-        let rendered = format_status_time("0");
-        assert!(rendered.contains("1970-01-01"));
-    }
-
-    #[test]
-    fn formats_rfc3339_status_time() {
-        let datetime = Local.timestamp_opt(1_800_000_000, 0).single().unwrap();
-        let rfc3339 = datetime.with_timezone(&Utc).to_rfc3339();
-        let rendered = format_status_time(&rfc3339);
-        let expected_prefix = datetime.format("%Y-%m-%d %H:%M:%S %:z").to_string();
-        assert!(rendered.starts_with(&expected_prefix));
     }
 }

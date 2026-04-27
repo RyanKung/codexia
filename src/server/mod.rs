@@ -5,6 +5,9 @@ use crate::{
     error::Result,
     openai::{response::ModelList, types::ChatCompletionRequest},
     status::StatusClient,
+    timefmt::{
+        format_status_time_local, format_unix_timestamp_local, remaining_seconds_for_status_time,
+    },
     token::TokenManager,
 };
 use axum::{
@@ -17,7 +20,6 @@ use axum::{
     },
     routing::{get, post},
 };
-use chrono::{DateTime, Local, TimeZone};
 use futures_util::{Stream, StreamExt, stream};
 use reqwest::Client;
 use serde_json::json;
@@ -111,7 +113,7 @@ async fn status(State(state): State<AppState>, headers: HeaderMap) -> Response {
         "token": {
             "expires_at": credentials.expires_at,
             "remaining_seconds": credentials.expires_at.saturating_sub(now_unix()),
-            "expires_at_local": format_unix_timestamp(credentials.expires_at),
+            "expires_at_local": format_unix_timestamp_local(credentials.expires_at),
         },
         "account": snapshot.account.as_ref().map(|account| {
             json!({
@@ -121,7 +123,7 @@ async fn status(State(state): State<AppState>, headers: HeaderMap) -> Response {
                 "plan": account.plan,
                 "has_active_subscription": account.has_active_subscription,
                 "subscription_expires_at": account.subscription_expires_at,
-                "subscription_expires_at_local": account.subscription_expires_at.as_deref().and_then(format_status_time_value),
+                "subscription_expires_at_local": account.subscription_expires_at.as_deref().and_then(format_status_time_local),
                 "subscription_remaining_seconds": account.subscription_expires_at.as_deref().and_then(|value| remaining_seconds_for_status_time(value, now)),
             })
         }),
@@ -130,7 +132,7 @@ async fn status(State(state): State<AppState>, headers: HeaderMap) -> Response {
             "name": window.name,
             "remaining_percent": window.remaining_percent,
             "reset_at": window.reset_at,
-            "reset_at_local": window.reset_at.as_deref().and_then(format_status_time_value),
+            "reset_at_local": window.reset_at.as_deref().and_then(format_status_time_local),
             "reset_in_seconds": window.reset_at.as_deref().and_then(|value| remaining_seconds_for_status_time(value, now)),
         })).collect::<Vec<_>>(),
         "warnings": snapshot.warnings,
@@ -203,37 +205,6 @@ fn sse_response(
 
     let done = stream::once(async { Ok(Event::default().data("[DONE]")) });
     Sse::new(mapped.chain(done)).keep_alive(KeepAlive::default())
-}
-
-/// Formats a Unix timestamp into local wall-clock time for HTTP status responses.
-fn format_unix_timestamp(timestamp: i64) -> Option<String> {
-    Local
-        .timestamp_opt(timestamp, 0)
-        .single()
-        .map(|datetime| datetime.format("%Y-%m-%d %H:%M:%S %:z").to_string())
-}
-
-/// Formats a status time that may be a Unix timestamp or RFC3339 string.
-fn format_status_time_value(value: &str) -> Option<String> {
-    if let Ok(timestamp) = value.parse::<i64>() {
-        return format_unix_timestamp(timestamp);
-    }
-
-    DateTime::parse_from_rfc3339(value)
-        .ok()
-        .map(|datetime| datetime.with_timezone(&Local))
-        .map(|datetime| datetime.format("%Y-%m-%d %H:%M:%S %:z").to_string())
-}
-
-/// Computes the signed distance in seconds between now and a status timestamp.
-fn remaining_seconds_for_status_time(value: &str, now_unix: i64) -> Option<i64> {
-    if let Ok(timestamp) = value.parse::<i64>() {
-        return Some(timestamp.saturating_sub(now_unix));
-    }
-
-    DateTime::parse_from_rfc3339(value)
-        .ok()
-        .map(|datetime| datetime.timestamp().saturating_sub(now_unix))
 }
 
 #[cfg(test)]
