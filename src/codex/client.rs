@@ -42,6 +42,10 @@ impl CodexClient {
         DEFAULT_CODEX_BASE_URL
     }
 
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
     pub async fn complete_chat(
         &self,
         request: crate::openai::types::ChatCompletionRequest,

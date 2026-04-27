@@ -266,6 +266,9 @@ mod tests {
     use std::{collections::HashMap, sync::Arc};
     use tokio::{net::TcpListener, sync::Mutex};
 
+    type RefreshForm = HashMap<String, String>;
+    type RefreshFormState = Arc<Mutex<Option<RefreshForm>>>;
+
     fn jwt_with_payload(payload: Value) -> String {
         let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
         format!("header.{encoded}.sig")
@@ -278,8 +281,8 @@ mod tests {
     }
 
     async fn refresh_handler(
-        State(last_form): State<Arc<Mutex<Option<HashMap<String, String>>>>>,
-        Form(form): Form<HashMap<String, String>>,
+        State(last_form): State<RefreshFormState>,
+        Form(form): Form<RefreshForm>,
     ) -> Json<Value> {
         *last_form.lock().await = Some(form);
         Json(json!({
@@ -289,7 +292,7 @@ mod tests {
         }))
     }
 
-    async fn spawn_refresh_server() -> (String, Arc<Mutex<Option<HashMap<String, String>>>>) {
+    async fn spawn_refresh_server() -> (String, RefreshFormState) {
         let last_form = Arc::new(Mutex::new(None));
         let app = Router::new()
             .route("/token", post(refresh_handler))

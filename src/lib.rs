@@ -1,10 +1,29 @@
+//! Core library for `codexia`.
+//!
+//! The library owns the OAuth flow, token lifecycle, upstream Codex client,
+//! HTTP server, and status inspection helpers used by both the CLI binary and
+//! any embedding integration.
+
+/// Codex upstream request/response adapters and streaming support.
 pub mod codex;
+/// Local credential storage and time utilities.
 pub mod config;
+/// Background service installation and lifecycle management.
+pub mod daemon;
+/// Shared error types and result aliases.
 pub mod error;
+/// Model list resolution from defaults, CLI flags, and JSON files.
 pub mod models;
+/// OAuth authorization, token exchange, and callback parsing.
 pub mod oauth;
+/// OpenAI-compatible public request and response types.
 pub mod openai;
+/// HTTP server entrypoints and route handlers.
 pub mod server;
+/// Account and rate-limit status fetchers.
+pub mod status;
+/// OAuth credential caching and refresh orchestration.
 pub mod token;
 
+/// Shared crate error type.
 pub use error::{Error, Result};

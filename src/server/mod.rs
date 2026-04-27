@@ -1,21 +1,25 @@
 use crate::{
     Error,
     codex::client::CodexClient,
+    config::now_unix,
     error::Result,
     openai::{response::ModelList, types::ChatCompletionRequest},
+    status::StatusClient,
     token::TokenManager,
 };
 use axum::{
     Json, Router,
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::HeaderMap,
     response::{
         IntoResponse, Response,
         sse::{Event, KeepAlive, Sse},
     },
     routing::{get, post},
 };
+use chrono::{DateTime, Local, TimeZone};
 use futures_util::{Stream, StreamExt, stream};
+use reqwest::Client;
 use serde_json::json;
 use std::{convert::Infallible, net::SocketAddr, pin::Pin, sync::Arc};
 use tokio::net::TcpListener;
@@ -24,6 +28,7 @@ use tokio::net::TcpListener;
 pub struct AppState {
     token_manager: TokenManager,
     codex: CodexClient,
+    status: StatusClient,
     api_key: Option<Arc<str>>,
     models: ModelList,
 }
@@ -35,8 +40,10 @@ impl AppState {
         api_key: Option<String>,
         models: ModelList,
     ) -> Self {
+        let status = StatusClient::new(Client::new(), codex.base_url().to_owned());
         Self {
             token_manager,
+            status,
             codex,
             api_key: api_key.map(Arc::from),
             models,
@@ -54,6 +61,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/v1/auth/refresh", post(manual_refresh))
+        .route("/v1/status", get(status))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
         .with_state(state)
@@ -83,6 +91,51 @@ async fn manual_refresh(State(state): State<AppState>, headers: HeaderMap) -> Re
         .into_response(),
         Err(error) => error.into_response(),
     }
+}
+
+async fn status(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
+        return error.into_response();
+    }
+
+    let credentials = match state.token_manager.credentials().await {
+        Ok(credentials) => credentials,
+        Err(error) => return error.into_response(),
+    };
+
+    let snapshot = state.status.fetch_status(&credentials).await;
+    let now = now_unix();
+
+    Json(json!({
+        "account_id": credentials.account_id,
+        "token": {
+            "expires_at": credentials.expires_at,
+            "remaining_seconds": credentials.expires_at.saturating_sub(now_unix()),
+            "expires_at_local": format_unix_timestamp(credentials.expires_at),
+        },
+        "account": snapshot.account.as_ref().map(|account| {
+            json!({
+                "name": account.name,
+                "email": account.email,
+                "structure": account.structure,
+                "plan": account.plan,
+                "has_active_subscription": account.has_active_subscription,
+                "subscription_expires_at": account.subscription_expires_at,
+                "subscription_expires_at_local": account.subscription_expires_at.as_deref().and_then(format_status_time_value),
+                "subscription_remaining_seconds": account.subscription_expires_at.as_deref().and_then(|value| remaining_seconds_for_status_time(value, now)),
+            })
+        }),
+        "credits_balance": snapshot.credits_balance,
+        "rate_limits": snapshot.rate_limits.iter().map(|window| json!({
+            "name": window.name,
+            "remaining_percent": window.remaining_percent,
+            "reset_at": window.reset_at,
+            "reset_at_local": window.reset_at.as_deref().and_then(format_status_time_value),
+            "reset_in_seconds": window.reset_at.as_deref().and_then(|value| remaining_seconds_for_status_time(value, now)),
+        })).collect::<Vec<_>>(),
+        "warnings": snapshot.warnings,
+    }))
+    .into_response()
 }
 
 async fn chat_completions(
@@ -152,18 +205,35 @@ fn sse_response(
     Sse::new(mapped.chain(done)).keep_alive(KeepAlive::default())
 }
 
-#[allow(dead_code)]
-fn status_response(status: StatusCode, message: &str) -> Response {
-    (
-        status,
-        Json(json!({
-            "error": {
-                "message": message,
-                "type": "invalid_request_error"
-            }
-        })),
-    )
-        .into_response()
+/// Formats a Unix timestamp into local wall-clock time for HTTP status responses.
+fn format_unix_timestamp(timestamp: i64) -> Option<String> {
+    Local
+        .timestamp_opt(timestamp, 0)
+        .single()
+        .map(|datetime| datetime.format("%Y-%m-%d %H:%M:%S %:z").to_string())
+}
+
+/// Formats a status time that may be a Unix timestamp or RFC3339 string.
+fn format_status_time_value(value: &str) -> Option<String> {
+    if let Ok(timestamp) = value.parse::<i64>() {
+        return format_unix_timestamp(timestamp);
+    }
+
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|datetime| datetime.with_timezone(&Local))
+        .map(|datetime| datetime.format("%Y-%m-%d %H:%M:%S %:z").to_string())
+}
+
+/// Computes the signed distance in seconds between now and a status timestamp.
+fn remaining_seconds_for_status_time(value: &str, now_unix: i64) -> Option<i64> {
+    if let Ok(timestamp) = value.parse::<i64>() {
+        return Some(timestamp.saturating_sub(now_unix));
+    }
+
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|datetime| datetime.timestamp().saturating_sub(now_unix))
 }
 
 #[cfg(test)]
@@ -208,6 +278,55 @@ mod tests {
         let app = Router::new().route("/token", post(refresh_handler));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/token", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        url
+    }
+
+    async fn account_handler() -> Json<Value> {
+        Json(json!({
+            "accounts": {
+                "default": {
+                    "account": {
+                        "name": "Personal",
+                        "structure": "personal"
+                    },
+                    "entitlement": {
+                        "subscription_plan": "chatgptplus",
+                        "has_active_subscription": true,
+                        "expires_at": "2026-05-01T00:00:00Z"
+                    }
+                }
+            }
+        }))
+    }
+
+    async fn usage_handler() -> Json<Value> {
+        Json(json!({
+            "email": "test@example.com",
+            "plan_type": "pro",
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 10,
+                    "reset_at": "2026-04-27T12:00:00Z"
+                },
+                "secondary_window": {
+                    "remaining_percent": 90,
+                    "reset_at": "2026-05-01T00:00:00Z"
+                }
+            },
+            "credits": { "balance": 1 }
+        }))
+    }
+
+    async fn spawn_status_server() -> String {
+        let app = Router::new()
+            .route("/accounts/check/v4-2023-04-27", get(account_handler))
+            .route("/wham/usage", get(usage_handler));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
@@ -299,5 +418,49 @@ mod tests {
         let response = manual_refresh(State(state), HeaderMap::new()).await;
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn status_returns_account_and_rate_limit_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AuthStore::new(dir.path().join("auth.json"));
+        store
+            .save(&Credentials {
+                access_token: "access".into(),
+                refresh_token: "refresh".into(),
+                expires_at: now_unix() + 600,
+                account_id: "acc_old".into(),
+            })
+            .unwrap();
+
+        let status_base_url = spawn_status_server().await;
+        let http = Client::new();
+        let state = AppState::new(
+            TokenManager::new(
+                store,
+                CodexOAuthClient::new_with_token_url(http.clone(), spawn_refresh_server().await),
+            ),
+            CodexClient::new(http, status_base_url),
+            Some("secret".into()),
+            ModelList::from_ids(["gpt-test"]),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("secret"));
+
+        let response = status(State(state), headers).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value = serde_json::from_slice::<Value>(&body).unwrap();
+        assert_eq!(value["account_id"], "acc_old");
+        assert_eq!(value["account"]["plan"], "chatgptplus");
+        assert!(value["account"]["subscription_expires_at_local"].is_string());
+        assert!(value["account"]["subscription_remaining_seconds"].is_number());
+        assert_eq!(value["rate_limits"][0]["name"], "5h");
+        assert_eq!(value["rate_limits"][0]["remaining_percent"], 90.0);
+        assert!(value["rate_limits"][0]["reset_at_local"].is_string());
+        assert!(value["rate_limits"][0]["reset_in_seconds"].is_number());
+        assert!(value["token"]["expires_at_local"].is_string());
+        assert!(value["warnings"].as_array().unwrap().is_empty());
     }
 }

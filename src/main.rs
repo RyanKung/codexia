@@ -1,11 +1,20 @@
+//! `codexia` command-line entrypoint.
+//!
+//! The binary provides login, serving, token refresh, status inspection, and
+//! daemon management commands on top of the library modules exposed by
+//! `codexia`.
+
+use chrono::{DateTime, Local, TimeZone};
 use clap::{Parser, Subcommand};
 use codexia::{
     Error, Result,
     codex::client::CodexClient,
     config::{AuthStore, Credentials, now_unix},
+    daemon::{self, DaemonInstallOptions},
     models::{ModelOptions, resolve_model_list},
     oauth::{CodexOAuthClient, create_authorization_flow, parse_authorization_input},
     server::{AppState, serve},
+    status::StatusClient,
     token::TokenManager,
 };
 use reqwest::Client;
@@ -31,7 +40,10 @@ Examples:
   codexia login
   codexia serve
   codexia serve --bind 127.0.0.1:14550 --api-key local-secret
+  codexia daemon install
+  codexia daemon start
   codexia refresh
+  codexia status
   curl -X POST http://127.0.0.1:14550/v1/auth/refresh \\
     -H 'authorization: Bearer local-secret'
 
@@ -54,6 +66,7 @@ Disclaimer:
 Copyright:
   Copyright (c) 2026 Codexia contributors. Licensed under the MIT License.";
 
+/// Top-level CLI parser.
 #[derive(Debug, Parser)]
 #[command(
     name = "codexia",
@@ -67,6 +80,7 @@ struct Cli {
     command: Command,
 }
 
+/// Supported top-level CLI commands.
 #[derive(Debug, Subcommand)]
 enum Command {
     #[command(
@@ -146,6 +160,100 @@ enum Command {
         #[arg(long, value_name = "PATH", help = "Credential file to read/write")]
         auth_file: Option<PathBuf>,
     },
+    #[command(
+        about = "Fetch token, account, and rate-limit status",
+        long_about = "Refresh credentials if needed, then fetch token expiry, ChatGPT account metadata, and Codex rate-limit windows such as 5h/weekly remaining when available."
+    )]
+    Status {
+        #[arg(long, value_name = "PATH", help = "Credential file to read/write")]
+        auth_file: Option<PathBuf>,
+        #[arg(
+            long,
+            default_value = CodexClient::default_base_url(),
+            value_name = "URL",
+            help = "ChatGPT backend base URL"
+        )]
+        codex_base_url: String,
+    },
+    #[command(
+        about = "Install and control the background Codexia service",
+        long_about = "Install and control Codexia as a per-user background service. macOS uses launchd LaunchAgents; Linux uses systemd user services."
+    )]
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommand,
+    },
+}
+
+/// Background service management subcommands.
+#[derive(Debug, Subcommand)]
+enum DaemonCommand {
+    #[command(
+        about = "Install Codexia as a per-user autostart service",
+        long_about = "Write the service definition for the current user and enable autostart. Use `codexia daemon start` to start it immediately."
+    )]
+    Install {
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "Codexia executable to run; defaults to the current executable"
+        )]
+        executable: Option<PathBuf>,
+        #[arg(
+            long,
+            default_value = "127.0.0.1:14550",
+            value_name = "ADDR",
+            help = "Socket address the daemon should listen on"
+        )]
+        bind: SocketAddr,
+        #[arg(long, value_name = "PATH", help = "Credential file to read/write")]
+        auth_file: Option<PathBuf>,
+        #[arg(
+            long,
+            default_value = CodexClient::default_base_url(),
+            value_name = "URL",
+            help = "Codex backend base URL"
+        )]
+        codex_base_url: String,
+        #[arg(
+            long,
+            env = "CODEXIA_API_KEY",
+            value_name = "KEY",
+            help = "Optional local API key accepted as Bearer token or x-api-key"
+        )]
+        api_key: Option<String>,
+        #[arg(
+            long,
+            env = "CODEXIA_MODELS",
+            value_delimiter = ',',
+            value_name = "MODEL[,MODEL...]",
+            help = "Replace the default model list"
+        )]
+        models: Vec<String>,
+        #[arg(
+            long,
+            env = "CODEXIA_EXTRA_MODELS",
+            value_delimiter = ',',
+            value_name = "MODEL[,MODEL...]",
+            help = "Append models to the default or configured model list"
+        )]
+        extra_models: Vec<String>,
+        #[arg(
+            long,
+            env = "CODEXIA_MODELS_FILE",
+            value_name = "PATH",
+            help = "JSON file containing models and/or extra_models"
+        )]
+        models_file: Option<PathBuf>,
+    },
+    #[command(about = "Start the installed Codexia daemon")]
+    Start,
+    #[command(about = "Restart the installed Codexia daemon")]
+    Restart,
+    #[command(about = "Stop the installed Codexia daemon")]
+    Stop,
+    #[command(about = "Disable and remove the installed Codexia daemon")]
+    Uninstall,
 }
 
 #[tokio::main]
@@ -192,9 +300,44 @@ async fn run(cli: Cli) -> Result<()> {
             .await
         }
         Command::Refresh { auth_file } => refresh(auth_store(auth_file)?).await,
+        Command::Status {
+            auth_file,
+            codex_base_url,
+        } => status(auth_store(auth_file)?, codex_base_url).await,
+        Command::Daemon { command } => daemon_command(command),
     }
 }
 
+/// Maps daemon-specific CLI requests to the platform-specific service helpers.
+fn daemon_command(command: DaemonCommand) -> Result<()> {
+    match command {
+        DaemonCommand::Install {
+            executable,
+            bind,
+            auth_file,
+            codex_base_url,
+            api_key,
+            models,
+            extra_models,
+            models_file,
+        } => daemon::install(DaemonInstallOptions {
+            executable: executable.map(Ok).unwrap_or_else(std::env::current_exe)?,
+            bind: bind.to_string(),
+            auth_file,
+            codex_base_url,
+            api_key,
+            models,
+            extra_models,
+            models_file,
+        }),
+        DaemonCommand::Start => daemon::start(),
+        DaemonCommand::Restart => daemon::restart(),
+        DaemonCommand::Stop => daemon::stop(),
+        DaemonCommand::Uninstall => daemon::uninstall(),
+    }
+}
+
+/// Runs the interactive OAuth login flow and persists the resulting credentials.
 async fn login(store: AuthStore, originator: &str, no_browser: bool) -> Result<()> {
     let flow = create_authorization_flow(originator)?;
     println!("Open this URL to authenticate:\n{}\n", flow.authorize_url);
@@ -219,6 +362,7 @@ async fn login(store: AuthStore, originator: &str, no_browser: bool) -> Result<(
     Ok(())
 }
 
+/// Forces a refresh of the saved OAuth credentials and writes them back to disk.
 async fn refresh(store: AuthStore) -> Result<()> {
     let credentials = store
         .load()?
@@ -231,12 +375,76 @@ async fn refresh(store: AuthStore) -> Result<()> {
     Ok(())
 }
 
+/// Fetches token, plan, and rate-limit status and renders a human-readable report.
+async fn status(store: AuthStore, codex_base_url: String) -> Result<()> {
+    let http = Client::new();
+    let token_manager = TokenManager::new(store, CodexOAuthClient::new(http.clone()));
+    let credentials = token_manager.credentials().await?;
+    let snapshot = StatusClient::new(http, codex_base_url)
+        .fetch_status(&credentials)
+        .await;
+
+    println!("account_id: {}", credentials.account_id);
+    println!("token: {}", token_expiry_message(&credentials));
+
+    if let Some(account) = snapshot.account {
+        if let Some(email) = account.email {
+            println!("email: {email}");
+        }
+        if let Some(plan) = account.plan {
+            match account.has_active_subscription {
+                Some(active) => println!("plan: {plan} (active: {active})"),
+                None => println!("plan: {plan}"),
+            }
+        }
+        if let Some(structure) = account.structure {
+            println!("account_structure: {structure}");
+        }
+        if let Some(name) = account.name {
+            println!("account_name: {name}");
+        }
+        if let Some(expires_at) = account.subscription_expires_at {
+            println!(
+                "subscription_expires_at: {}",
+                format_status_time(&expires_at)
+            );
+        }
+    }
+
+    if let Some(balance) = snapshot.credits_balance {
+        println!("credits_balance: {balance}");
+    }
+
+    if snapshot.rate_limits.is_empty() {
+        println!("rate_limits: unavailable");
+    } else {
+        for window in snapshot.rate_limits {
+            let mut line = format!(
+                "rate_limit_{}: {:.0}% remaining",
+                window.name, window.remaining_percent
+            );
+            if let Some(reset_at) = window.reset_at {
+                line.push_str(&format!(", resets {}", format_status_time(&reset_at)));
+            }
+            println!("{line}");
+        }
+    }
+
+    for warning in snapshot.warnings {
+        println!("warning: {warning}");
+    }
+
+    Ok(())
+}
+
+/// Resolves the configured credential store path.
 fn auth_store(path: Option<PathBuf>) -> Result<AuthStore> {
     path.map(AuthStore::new)
         .map(Ok)
         .unwrap_or_else(AuthStore::from_default_path)
 }
 
+/// Reads the pasted OAuth callback URL or raw authorization code from stdin.
 fn prompt_authorization_code(expected_state: &str) -> Result<String> {
     print!("Paste the full redirect URL or authorization code: ");
     std::io::stdout().flush()?;
@@ -257,6 +465,7 @@ fn prompt_authorization_code(expected_state: &str) -> Result<String> {
         .ok_or_else(|| Error::oauth("missing authorization code"))
 }
 
+/// Periodically prints token expiry state while the local server is running.
 fn spawn_token_expiry_display(token_manager: TokenManager) {
     tokio::spawn(async move {
         let interactive = io::stdout().is_terminal();
@@ -280,6 +489,7 @@ fn spawn_token_expiry_display(token_manager: TokenManager) {
     });
 }
 
+/// Builds a one-line token expiry status string for the current credentials snapshot.
 async fn token_expiry_status(token_manager: &TokenManager) -> String {
     match token_manager.credentials_snapshot().await {
         Some(credentials) => token_expiry_message(&credentials),
@@ -287,6 +497,7 @@ async fn token_expiry_status(token_manager: &TokenManager) -> String {
     }
 }
 
+/// Renders a human-readable expiry message for one credential set.
 fn token_expiry_message(credentials: &Credentials) -> String {
     let remaining_secs = credentials.expires_at.saturating_sub(now_unix());
     if remaining_secs == 0 {
@@ -300,6 +511,7 @@ fn token_expiry_message(credentials: &Credentials) -> String {
     }
 }
 
+/// Formats a positive or negative duration into a compact textual form.
 fn format_duration(total_secs: i64) -> String {
     let total_secs = total_secs.max(0);
     let days = total_secs / 86_400;
@@ -318,9 +530,39 @@ fn format_duration(total_secs: i64) -> String {
     }
 }
 
+/// Formats a status time that may arrive as either a Unix timestamp or RFC3339 string.
+fn format_status_time(value: &str) -> String {
+    if let Ok(timestamp) = value.parse::<i64>()
+        && let Some(datetime) = Local.timestamp_opt(timestamp, 0).single()
+    {
+        return format_datetime_with_remaining(datetime);
+    }
+
+    if let Ok(datetime) = DateTime::parse_from_rfc3339(value) {
+        return format_datetime_with_remaining(datetime.with_timezone(&Local));
+    }
+
+    value.to_owned()
+}
+
+/// Renders a local timestamp alongside the relative time until or since it.
+fn format_datetime_with_remaining(datetime: DateTime<Local>) -> String {
+    let remaining = datetime.timestamp().saturating_sub(now_unix());
+    format!(
+        "{} ({})",
+        datetime.format("%Y-%m-%d %H:%M:%S %:z"),
+        if remaining >= 0 {
+            format!("in {}", format_duration(remaining))
+        } else {
+            format!("{} ago", format_duration(-remaining))
+        }
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::format_duration;
+    use super::{format_duration, format_status_time};
+    use chrono::{Local, TimeZone, Utc};
 
     #[test]
     fn formats_token_duration() {
@@ -334,5 +576,20 @@ mod tests {
     #[test]
     fn clamps_negative_duration_to_zero() {
         assert_eq!(format_duration(-1), "0s");
+    }
+
+    #[test]
+    fn formats_unix_status_time() {
+        let rendered = format_status_time("0");
+        assert!(rendered.contains("1970-01-01"));
+    }
+
+    #[test]
+    fn formats_rfc3339_status_time() {
+        let datetime = Local.timestamp_opt(1_800_000_000, 0).single().unwrap();
+        let rfc3339 = datetime.with_timezone(&Utc).to_rfc3339();
+        let rendered = format_status_time(&rfc3339);
+        let expected_prefix = datetime.format("%Y-%m-%d %H:%M:%S %:z").to_string();
+        assert!(rendered.starts_with(&expected_prefix));
     }
 }
