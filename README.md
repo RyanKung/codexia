@@ -6,6 +6,7 @@ Rust gateway that logs in with OpenAI Codex OAuth and exposes an OpenAI-compatib
 
 ```bash
 cargo run -- login
+cargo run -- config
 cargo run -- serve
 ```
 
@@ -32,6 +33,17 @@ Optional local API key protection:
 CODEXIA_API_KEY=local-secret cargo run -- serve
 curl http://127.0.0.1:14550/v1/models -H 'authorization: Bearer local-secret'
 ```
+
+Interactive runtime configuration:
+
+```bash
+codexia config
+codexia config show
+codexia config reset
+```
+
+The config file is stored at `~/.codexia/config.json` by default and is used as
+the fallback source for `codexia serve` and `codexia daemon install`.
 
 Manually refresh the stored Codex OAuth token while the server is running:
 

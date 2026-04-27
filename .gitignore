@@ -1,1 +1,47 @@
 /target
+
+# Credentials and local environment files
+/.codexia/
+/auth.json
+/.env
+/.env.*
+/*.pem
+/*.key
+/*.p12
+/*.pfx
+
+# macOS and Unix filesystem metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+.fseventsd
+Icon?
+
+# Linux desktop and mount metadata
+*~
+.directory
+.Trash-*
+.nfs*
+
+# Vim
+*.swp
+*.swo
+Session.vim
+.netrwhist
+
+# Emacs
+\#*\#
+.\#*
+*.elc
+auto-save-list/
+tramp
+
+# Generic editor and merge leftovers
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
