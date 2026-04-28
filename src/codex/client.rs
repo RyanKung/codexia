@@ -121,17 +121,17 @@ impl CodexClient {
                 if let Some(message) = event_error(&event) {
                     Err(Error::upstream(message))?;
                 }
-                if let Some(delta) = text_delta(&event)
-                    && !delta.is_empty()
-                {
-                    yield chunk_with_content(&id, created, &model, delta);
+                if let Some(delta) = text_delta(&event) {
+                    if !delta.is_empty() {
+                        yield chunk_with_content(&id, created, &model, delta);
+                    }
                 }
-                if let Some(tool_call) = event_tool_call(&event)
-                    && seen_tool_call_ids.insert(tool_call.id.clone())
-                {
-                    // The SSE stream can repeat tool calls across incremental and completed events.
-                    yield chunk_with_tool_call(&id, created, &model, tool_call_count, tool_call);
-                    tool_call_count += 1;
+                if let Some(tool_call) = event_tool_call(&event) {
+                    if seen_tool_call_ids.insert(tool_call.id.clone()) {
+                        // The SSE stream can repeat tool calls across incremental and completed events.
+                        yield chunk_with_tool_call(&id, created, &model, tool_call_count, tool_call);
+                        tool_call_count += 1;
+                    }
                 }
                 if is_done_event(&event) {
                     // Some tool calls appear only on the terminal completed event.

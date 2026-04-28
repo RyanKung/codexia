@@ -67,10 +67,10 @@ pub fn apply_event(output: &mut ChatOutput, event: &Value) -> Result<()> {
 
     // Streaming item completion events are the earliest stable point where
     // function calls can be collected without waiting for the final envelope.
-    if matches!(event_type(event), Some("response.output_item.done"))
-        && let Some(item) = event.get("item")
-    {
-        apply_output_item(output, item, false);
+    if matches!(event_type(event), Some("response.output_item.done")) {
+        if let Some(item) = event.get("item") {
+            apply_output_item(output, item, false);
+        }
     }
 
     if let Some(response) = event.get("response") {
@@ -182,10 +182,10 @@ fn apply_output_item(output: &mut ChatOutput, item: &Value, fill_text: bool) {
             output.text.push_str(&text);
         }
         Some("function_call") => {
-            if let Some(tool_call) = parse_tool_call(item)
-                && !output.tool_calls.iter().any(|call| call.id == tool_call.id)
-            {
-                output.tool_calls.push(tool_call);
+            if let Some(tool_call) = parse_tool_call(item) {
+                if !output.tool_calls.iter().any(|call| call.id == tool_call.id) {
+                    output.tool_calls.push(tool_call);
+                }
             }
         }
         _ => {}

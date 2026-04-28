@@ -206,15 +206,16 @@ fn anthropic_sse_response(
                         continue;
                     };
 
-                    if let Some(text) = choice.delta.content
-                        && !text.is_empty()
-                    {
-                        output_tokens = output_tokens.saturating_add(estimate_stream_tokens(&text));
-                        if !text_open {
-                            yield_event_or_error!(text_block_start(current_index));
-                            text_open = true;
+                    if let Some(text) = choice.delta.content {
+                        if !text.is_empty() {
+                            output_tokens =
+                                output_tokens.saturating_add(estimate_stream_tokens(&text));
+                            if !text_open {
+                                yield_event_or_error!(text_block_start(current_index));
+                                text_open = true;
+                            }
+                            yield_event_or_error!(text_delta(current_index, &text));
                         }
-                        yield_event_or_error!(text_delta(current_index, &text));
                     }
 
                     for tool_call in choice.delta.tool_calls.into_iter().flatten() {

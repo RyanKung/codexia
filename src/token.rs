@@ -61,10 +61,11 @@ impl TokenManager {
     /// request fails, or persisted credentials cannot be loaded or saved.
     pub async fn credentials(&self) -> Result<Credentials> {
         // Check the shared cache first so uncontended reads avoid disk I/O and refresh traffic.
-        if let Some(credentials) = self.cached.read().await.clone()
-            && !credentials.is_expired(REFRESH_SKEW_SECS)
-        {
-            return Ok(credentials);
+        let cached_credentials = self.cached.read().await.clone();
+        if let Some(credentials) = cached_credentials {
+            if !credentials.is_expired(REFRESH_SKEW_SECS) {
+                return Ok(credentials);
+            }
         }
 
         let mut guard = self.cached.write().await;
