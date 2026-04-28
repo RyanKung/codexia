@@ -10,7 +10,7 @@ use codexia::{
     codex::client::CodexClient,
     config::{AppConfig, AppConfigStore, AuthStore, Credentials, now_unix},
     daemon::{self, DaemonInstallOptions},
-    models::{ModelOptions, resolve_model_list},
+    models::resolve_model_list,
     oauth::{CodexOAuthClient, create_authorization_flow, parse_authorization_input},
     server::{AppState, serve},
     status::StatusClient,
@@ -55,10 +55,6 @@ Environment:
   CODEXIA_API_KEY          Optional local API key for server endpoints
   CODEXIA_AUTH_FILE        Override the credential file path
   CODEXIA_HOME             Override the default config home
-  CODEXIA_MODELS           Comma-separated replacement model list
-  CODEXIA_EXTRA_MODELS     Comma-separated models appended to defaults
-  CODEXIA_MODELS_FILE      JSON file with models/extra_models
-
 Files:
   Credentials default to ~/.codexia/auth.json.
   Runtime config defaults to ~/.codexia/config.json.
@@ -108,7 +104,7 @@ enum Command {
     },
     #[command(
         about = "Manage persisted runtime configuration",
-        long_about = "Interactively save or inspect default host, port, backend URL, API key, and model settings stored in the Codexia config file."
+        long_about = "Interactively save or inspect default host, port, and API key stored in the Codexia config file."
     )]
     Config {
         #[command(subcommand)]
@@ -123,8 +119,6 @@ enum Command {
         bind: Option<SocketAddr>,
         #[arg(long, value_name = "PATH", help = "Credential file to read/write")]
         auth_file: Option<PathBuf>,
-        #[arg(long, value_name = "URL", help = "Codex backend base URL")]
-        codex_base_url: Option<String>,
         #[arg(
             long,
             env = "CODEXIA_API_KEY",
@@ -132,29 +126,6 @@ enum Command {
             help = "Optional local API key accepted as Bearer token or x-api-key"
         )]
         api_key: Option<String>,
-        #[arg(
-            long,
-            env = "CODEXIA_MODELS",
-            value_delimiter = ',',
-            value_name = "MODEL[,MODEL...]",
-            help = "Replace the default model list"
-        )]
-        models: Vec<String>,
-        #[arg(
-            long,
-            env = "CODEXIA_EXTRA_MODELS",
-            value_delimiter = ',',
-            value_name = "MODEL[,MODEL...]",
-            help = "Append models to the default or configured model list"
-        )]
-        extra_models: Vec<String>,
-        #[arg(
-            long,
-            env = "CODEXIA_MODELS_FILE",
-            value_name = "PATH",
-            help = "JSON file containing models and/or extra_models"
-        )]
-        models_file: Option<PathBuf>,
     },
     #[command(
         about = "Force refresh the saved Codex OAuth token",
@@ -171,13 +142,6 @@ enum Command {
     Status {
         #[arg(long, value_name = "PATH", help = "Credential file to read/write")]
         auth_file: Option<PathBuf>,
-        #[arg(
-            long,
-            default_value = CodexClient::default_base_url(),
-            value_name = "URL",
-            help = "ChatGPT backend base URL"
-        )]
-        codex_base_url: String,
     },
     #[command(
         about = "Install and control the background Codexia service",
@@ -238,8 +202,6 @@ struct DaemonInstallCliOptions {
     bind: Option<SocketAddr>,
     #[arg(long, value_name = "PATH", help = "Credential file to read/write")]
     auth_file: Option<PathBuf>,
-    #[arg(long, value_name = "URL", help = "Codex backend base URL")]
-    codex_base_url: Option<String>,
     #[arg(
         long,
         env = "CODEXIA_API_KEY",
@@ -247,29 +209,6 @@ struct DaemonInstallCliOptions {
         help = "Optional local API key accepted as Bearer token or x-api-key"
     )]
     api_key: Option<String>,
-    #[arg(
-        long,
-        env = "CODEXIA_MODELS",
-        value_delimiter = ',',
-        value_name = "MODEL[,MODEL...]",
-        help = "Replace the default model list"
-    )]
-    models: Vec<String>,
-    #[arg(
-        long,
-        env = "CODEXIA_EXTRA_MODELS",
-        value_delimiter = ',',
-        value_name = "MODEL[,MODEL...]",
-        help = "Append models to the default or configured model list"
-    )]
-    extra_models: Vec<String>,
-    #[arg(
-        long,
-        env = "CODEXIA_MODELS_FILE",
-        value_name = "PATH",
-        help = "JSON file containing models and/or extra_models"
-    )]
-    models_file: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -291,37 +230,22 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Serve {
             bind,
             auth_file,
-            codex_base_url,
             api_key,
-            models,
-            extra_models,
-            models_file,
         } => {
             let config = load_app_config()?;
             let effective_bind = bind
                 .or_else(|| bind_from_config(config.as_ref()))
                 .unwrap_or_else(default_bind);
             let effective_auth_file = auth_file.or_else(|| config_auth_file(config.as_ref()));
-            let effective_codex_base_url = codex_base_url
-                .or_else(|| config_string(config.as_ref(), |item| item.codex_base_url.clone()))
-                .unwrap_or_else(|| CodexClient::default_base_url().to_owned());
             let effective_api_key =
                 api_key.or_else(|| config_string(config.as_ref(), |item| item.api_key.clone()));
-            let (effective_models, effective_extra_models, effective_models_file) =
-                merge_model_options(config.as_ref(), models, extra_models, models_file);
             let http = Client::new();
             let token_manager = TokenManager::new(
                 auth_store(effective_auth_file)?,
                 CodexOAuthClient::new(http.clone()),
             );
-            let codex = CodexClient::new(http, effective_codex_base_url);
-            let model_list = resolve_model_list(
-                effective_models_file.as_deref(),
-                ModelOptions {
-                    replacement_models: effective_models,
-                    extra_models: effective_extra_models,
-                },
-            )?;
+            let codex = CodexClient::new(http, CodexClient::default_base_url());
+            let model_list = resolve_model_list()?;
             println!("listening on http://{effective_bind}");
             spawn_token_expiry_display(token_manager.clone());
             serve(
@@ -331,10 +255,7 @@ async fn run(cli: Cli) -> Result<()> {
             .await
         }
         Command::Refresh { auth_file } => refresh(auth_store(auth_file)?).await,
-        Command::Status {
-            auth_file,
-            codex_base_url,
-        } => status(auth_store(auth_file)?, codex_base_url).await,
+        Command::Status { auth_file } => status(auth_store(auth_file)?).await,
         Command::Daemon { command } => daemon_command(command),
     }
 }
@@ -376,20 +297,9 @@ fn resolve_daemon_install_options(
     let effective_auth_file = options
         .auth_file
         .or_else(|| config_auth_file(config.as_ref()));
-    let effective_codex_base_url = options
-        .codex_base_url
-        .or_else(|| config_string(config.as_ref(), |item| item.codex_base_url.clone()))
-        .unwrap_or_else(|| CodexClient::default_base_url().to_owned());
     let effective_api_key = options
         .api_key
         .or_else(|| config_string(config.as_ref(), |item| item.api_key.clone()));
-    let (effective_models, effective_extra_models, effective_models_file) = merge_model_options(
-        config.as_ref(),
-        options.models,
-        options.extra_models,
-        options.models_file,
-    );
-
     Ok(DaemonInstallOptions {
         executable: options
             .executable
@@ -397,11 +307,7 @@ fn resolve_daemon_install_options(
             .unwrap_or_else(std::env::current_exe)?,
         bind: effective_bind.to_string(),
         auth_file: effective_auth_file,
-        codex_base_url: effective_codex_base_url,
         api_key: effective_api_key,
-        models: effective_models,
-        extra_models: effective_extra_models,
-        models_file: effective_models_file,
     })
 }
 
@@ -423,13 +329,6 @@ fn configure(store: AppConfigStore) -> Result<()> {
         existing.bind_host.as_deref().unwrap_or("127.0.0.1"),
     )?;
     let bind_port = prompt_port("Bind port", existing.bind_port.unwrap_or(14550))?;
-    let codex_base_url = prompt_string(
-        "Codex backend base URL",
-        existing
-            .codex_base_url
-            .as_deref()
-            .unwrap_or(CodexClient::default_base_url()),
-    )?;
     let api_key = prompt_optional_string(
         "Local API key (leave blank to disable)",
         existing.api_key.as_deref(),
@@ -438,28 +337,12 @@ fn configure(store: AppConfigStore) -> Result<()> {
         "Credential file path (leave blank for default ~/.codexia/auth.json)",
         existing.auth_file.as_deref(),
     )?;
-    let models = prompt_csv_list(
-        "Replacement models (comma-separated, leave blank to use defaults)",
-        &existing.models,
-    )?;
-    let extra_models = prompt_csv_list(
-        "Extra models (comma-separated, leave blank for none)",
-        &existing.extra_models,
-    )?;
-    let models_file = prompt_optional_path(
-        "Models JSON file (leave blank to disable)",
-        existing.models_file.as_deref(),
-    )?;
 
     let config = AppConfig {
         bind_host: Some(bind_host),
         bind_port: Some(bind_port),
         auth_file,
-        codex_base_url: Some(codex_base_url),
         api_key,
-        models,
-        extra_models,
-        models_file,
     };
     store.save(&config)?;
     println!("saved runtime config to {}", store.path().display());
@@ -524,11 +407,11 @@ async fn refresh(store: AuthStore) -> Result<()> {
 }
 
 /// Fetches token, plan, and rate-limit status and renders a human-readable report.
-async fn status(store: AuthStore, codex_base_url: String) -> Result<()> {
+async fn status(store: AuthStore) -> Result<()> {
     let http = Client::new();
     let token_manager = TokenManager::new(store, CodexOAuthClient::new(http.clone()));
     let credentials = token_manager.credentials().await?;
-    let snapshot = StatusClient::new(http, codex_base_url)
+    let snapshot = StatusClient::new(http, CodexClient::default_base_url())
         .fetch_status(&credentials)
         .await;
 
@@ -616,34 +499,6 @@ fn config_string(
     config.and_then(map)
 }
 
-fn merge_model_options(
-    config: Option<&AppConfig>,
-    models: Vec<String>,
-    extra_models: Vec<String>,
-    models_file: Option<PathBuf>,
-) -> (Vec<String>, Vec<String>, Option<PathBuf>) {
-    let replacement_models = if models.is_empty() {
-        config.map(|item| item.models.clone()).unwrap_or_default()
-    } else {
-        models
-    };
-    let effective_extra_models = if extra_models.is_empty() {
-        config
-            .map(|item| item.extra_models.clone())
-            .unwrap_or_default()
-    } else {
-        extra_models
-    };
-    let effective_models_file =
-        models_file.or_else(|| config.and_then(|item| item.models_file.clone()));
-
-    (
-        replacement_models,
-        effective_extra_models,
-        effective_models_file,
-    )
-}
-
 fn prompt_string(label: &str, default: &str) -> Result<String> {
     print!("{label} [{default}]: ");
     io::stdout().flush()?;
@@ -685,29 +540,6 @@ fn prompt_optional_path(label: &str, default: Option<&std::path::Path>) -> Resul
     } else {
         Ok(Some(PathBuf::from(value)))
     }
-}
-
-fn prompt_csv_list(label: &str, default: &[String]) -> Result<Vec<String>> {
-    let default_text = if default.is_empty() {
-        String::new()
-    } else {
-        format!(" [{}]", default.join(","))
-    };
-    print!("{label}{default_text}: ");
-    io::stdout().flush()?;
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    let value = input.trim();
-    let source = if value.is_empty() {
-        default.to_vec()
-    } else {
-        value.split(',').map(str::to_owned).collect()
-    };
-    Ok(source
-        .into_iter()
-        .map(|item| item.trim().to_owned())
-        .filter(|item| !item.is_empty())
-        .collect())
 }
 
 fn prompt_port(label: &str, default: u16) -> Result<u16> {
@@ -786,9 +618,8 @@ fn token_expiry_message(credentials: &Credentials) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppConfig, bind_from_config, merge_model_options};
+    use super::{AppConfig, bind_from_config};
     use codexia::timefmt::format_duration;
-    use std::path::PathBuf;
 
     #[test]
     fn reuses_shared_duration_formatting() {
@@ -807,43 +638,5 @@ mod tests {
             bind_from_config(Some(&config)).map(|item| item.to_string()),
             Some("127.0.0.1:14550".to_owned())
         );
-    }
-
-    #[test]
-    fn cli_model_values_override_config_models() {
-        let config = AppConfig {
-            models: vec!["from-config".into()],
-            extra_models: vec!["config-extra".into()],
-            models_file: Some(PathBuf::from("/tmp/config-models.json")),
-            ..AppConfig::default()
-        };
-
-        let (models, extra_models, models_file) = merge_model_options(
-            Some(&config),
-            vec!["from-cli".into()],
-            vec!["cli-extra".into()],
-            Some(PathBuf::from("/tmp/cli-models.json")),
-        );
-
-        assert_eq!(models, vec!["from-cli"]);
-        assert_eq!(extra_models, vec!["cli-extra"]);
-        assert_eq!(models_file, Some(PathBuf::from("/tmp/cli-models.json")));
-    }
-
-    #[test]
-    fn config_models_fill_missing_cli_model_values() {
-        let config = AppConfig {
-            models: vec!["from-config".into()],
-            extra_models: vec!["config-extra".into()],
-            models_file: Some(PathBuf::from("/tmp/config-models.json")),
-            ..AppConfig::default()
-        };
-
-        let (models, extra_models, models_file) =
-            merge_model_options(Some(&config), Vec::new(), Vec::new(), None);
-
-        assert_eq!(models, vec!["from-config"]);
-        assert_eq!(extra_models, vec!["config-extra"]);
-        assert_eq!(models_file, Some(PathBuf::from("/tmp/config-models.json")));
     }
 }

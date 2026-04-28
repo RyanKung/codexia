@@ -34,15 +34,7 @@ pub struct AppConfig {
     #[serde(default)]
     pub auth_file: Option<PathBuf>,
     #[serde(default)]
-    pub codex_base_url: Option<String>,
-    #[serde(default)]
     pub api_key: Option<String>,
-    #[serde(default)]
-    pub models: Vec<String>,
-    #[serde(default)]
-    pub extra_models: Vec<String>,
-    #[serde(default)]
-    pub models_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -206,11 +198,7 @@ mod tests {
             bind_host: Some("127.0.0.1".into()),
             bind_port: Some(14550),
             auth_file: Some(PathBuf::from("/tmp/auth.json")),
-            codex_base_url: Some("https://chatgpt.com/backend-api".into()),
             api_key: Some("secret".into()),
-            models: vec!["gpt-5.5".into()],
-            extra_models: vec!["gpt-5.5-mini".into()],
-            models_file: Some(PathBuf::from("/tmp/models.json")),
         }
     }
 

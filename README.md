@@ -216,27 +216,6 @@ gpt-5.5
 gpt-5.5-mini
 ```
 
-Override or extend the list with CLI flags or environment variables:
-
-```bash
-codexia serve --models gpt-5.5,gpt-5.5-mini
-CODEXIA_EXTRA_MODELS=my-model codexia serve
-CODEXIA_MODELS_FILE=models.json codexia serve
-```
-
-`models.json` may be a JSON array or an object:
-
-```json
-["gpt-5.5", "gpt-5.5-mini"]
-```
-
-```json
-{
-  "models": ["gpt-5.5"],
-  "extra_models": ["my-model"]
-}
-```
-
 Credentials are stored at `~/.codexia/auth.json` by default. Override with
 `--auth-file`, `CODEXIA_AUTH_FILE`, or `CODEXIA_HOME`.
 

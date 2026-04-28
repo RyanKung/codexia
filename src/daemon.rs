@@ -13,11 +13,7 @@ pub struct DaemonInstallOptions {
     pub executable: PathBuf,
     pub bind: String,
     pub auth_file: Option<PathBuf>,
-    pub codex_base_url: String,
     pub api_key: Option<String>,
-    pub models: Vec<String>,
-    pub extra_models: Vec<String>,
-    pub models_file: Option<PathBuf>,
 }
 
 pub fn install(options: DaemonInstallOptions) -> Result<()> {
@@ -128,8 +124,6 @@ fn serve_args(options: &DaemonInstallOptions) -> Vec<String> {
         "serve".to_owned(),
         "--bind".to_owned(),
         options.bind.clone(),
-        "--codex-base-url".to_owned(),
-        options.codex_base_url.clone(),
     ];
 
     if let Some(path) = &options.auth_file {
@@ -140,19 +134,6 @@ fn serve_args(options: &DaemonInstallOptions) -> Vec<String> {
         args.push("--api-key".to_owned());
         args.push(api_key.clone());
     }
-    if !options.models.is_empty() {
-        args.push("--models".to_owned());
-        args.push(options.models.join(","));
-    }
-    if !options.extra_models.is_empty() {
-        args.push("--extra-models".to_owned());
-        args.push(options.extra_models.join(","));
-    }
-    if let Some(path) = &options.models_file {
-        args.push("--models-file".to_owned());
-        args.push(path.display().to_string());
-    }
-
     args
 }
 
@@ -328,11 +309,7 @@ mod tests {
             executable: "/usr/local/bin/codexia".into(),
             bind: "127.0.0.1:14550".into(),
             auth_file: Some("/tmp/auth file.json".into()),
-            codex_base_url: "https://chatgpt.com/backend-api".into(),
             api_key: Some("local secret".into()),
-            models: vec!["gpt-5.4".into(), "gpt-5.4-mini".into()],
-            extra_models: vec!["custom".into()],
-            models_file: Some("/tmp/models.json".into()),
         }
     }
 
@@ -345,18 +322,10 @@ mod tests {
                 "serve",
                 "--bind",
                 "127.0.0.1:14550",
-                "--codex-base-url",
-                "https://chatgpt.com/backend-api",
                 "--auth-file",
                 "/tmp/auth file.json",
                 "--api-key",
                 "local secret",
-                "--models",
-                "gpt-5.4,gpt-5.4-mini",
-                "--extra-models",
-                "custom",
-                "--models-file",
-                "/tmp/models.json",
             ]
         );
     }
