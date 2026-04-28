@@ -30,6 +30,7 @@ pub struct AppState {
 
 impl AppState {
     /// Builds application state from the configured token manager, upstream client, and model list.
+    #[must_use]
     pub fn new(
         token_manager: TokenManager,
         codex: CodexClient,
@@ -48,6 +49,10 @@ impl AppState {
 }
 
 /// Binds the local listener and serves the Axum router until shutdown.
+///
+/// # Errors
+///
+/// Returns an error when binding the socket or serving the router fails.
 pub async fn serve(addr: SocketAddr, state: AppState) -> Result<()> {
     let listener = TcpListener::bind(addr).await?;
     axum::serve(listener, router(state)).await?;
@@ -79,6 +84,7 @@ mod tests {
         config::{AuthStore, Credentials, now_unix},
         oauth::CodexOAuthClient,
         openai::response::ModelList,
+        testsupport::TempDir,
     };
     use axum::{
         Json,
@@ -243,7 +249,7 @@ mod tests {
 
     #[tokio::test]
     async fn manual_refresh_refreshes_credentials_without_returning_tokens() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = TempDir::new().unwrap();
         let store = AuthStore::new(dir.path().join("auth.json"));
         store
             .save(&Credentials {
@@ -278,7 +284,7 @@ mod tests {
 
     #[tokio::test]
     async fn manual_refresh_requires_api_key_when_configured() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = TempDir::new().unwrap();
         let store = AuthStore::new(dir.path().join("auth.json"));
         let state = test_state(store, spawn_refresh_server().await, Some("secret".into()));
 
@@ -290,7 +296,7 @@ mod tests {
 
     #[tokio::test]
     async fn status_returns_account_and_rate_limit_snapshot() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = TempDir::new().unwrap();
         let store = AuthStore::new(dir.path().join("auth.json"));
         store
             .save(&Credentials {
@@ -334,7 +340,7 @@ mod tests {
 
     #[tokio::test]
     async fn messages_returns_anthropic_message_response() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = TempDir::new().unwrap();
         let store = AuthStore::new(dir.path().join("auth.json"));
         store
             .save(&Credentials {
@@ -384,7 +390,7 @@ mod tests {
 
     #[tokio::test]
     async fn messages_returns_tool_use_blocks() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = TempDir::new().unwrap();
         let store = AuthStore::new(dir.path().join("auth.json"));
         store
             .save(&Credentials {
@@ -432,7 +438,7 @@ mod tests {
 
     #[tokio::test]
     async fn count_message_tokens_returns_estimate() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = TempDir::new().unwrap();
         let store = AuthStore::new(dir.path().join("auth.json"));
         let state = test_state(store, spawn_refresh_server().await, Some("secret".into()));
         let mut headers = HeaderMap::new();

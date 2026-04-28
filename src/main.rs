@@ -1,4 +1,7 @@
 #![deny(missing_docs)]
+#![deny(clippy::all)]
+#![deny(clippy::pedantic)]
+#![deny(clippy::nursery)]
 
 //! `codexia` command-line entrypoint.
 //!
@@ -101,8 +104,6 @@ enum Command {
             help = "OAuth originator parameter to send during login"
         )]
         originator: String,
-        #[arg(long, help = "Print the login URL without opening a browser")]
-        no_browser: bool,
     },
     #[command(
         about = "Manage persisted runtime configuration",
@@ -226,9 +227,8 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Login {
             auth_file,
             originator,
-            no_browser,
-        } => login(auth_store(auth_file)?, &originator, no_browser).await,
-        Command::Config { command } => config_command(command),
+        } => login(auth_store(auth_file)?, &originator).await,
+        Command::Config { command } => config_command(command.as_ref()),
         Command::Serve {
             bind,
             auth_file,
@@ -263,12 +263,12 @@ async fn run(cli: Cli) -> Result<()> {
 }
 
 /// Handles interactive configuration, inspection, and reset commands.
-fn config_command(command: Option<ConfigCommand>) -> Result<()> {
+fn config_command(command: Option<&ConfigCommand>) -> Result<()> {
     let store = app_config_store()?;
     match command {
-        None => configure(store),
-        Some(ConfigCommand::Show) => show_config(store),
-        Some(ConfigCommand::Reset) => reset_config(store),
+        None => configure(&store),
+        Some(ConfigCommand::Show) => show_config(&store),
+        Some(ConfigCommand::Reset) => reset_config(&store),
     }
 }
 
@@ -276,10 +276,10 @@ fn config_command(command: Option<ConfigCommand>) -> Result<()> {
 fn daemon_command(command: DaemonCommand) -> Result<()> {
     match command {
         DaemonCommand::Install(options) => {
-            daemon::install(resolve_daemon_install_options(options)?)
+            daemon::install(&resolve_daemon_install_options(options)?)
         }
         DaemonCommand::Reinstall(options) => {
-            daemon::reinstall(resolve_daemon_install_options(options)?)
+            daemon::reinstall(&resolve_daemon_install_options(options)?)
         }
         DaemonCommand::Start => daemon::start(),
         DaemonCommand::Restart => daemon::restart(),
@@ -303,10 +303,7 @@ fn resolve_daemon_install_options(
         .api_key
         .or_else(|| config_string(config.as_ref(), |item| item.api_key.clone()));
     Ok(DaemonInstallOptions {
-        executable: options
-            .executable
-            .map(Ok)
-            .unwrap_or_else(std::env::current_exe)?,
+        executable: options.executable.map_or_else(std::env::current_exe, Ok)?,
         bind: effective_bind.to_string(),
         auth_file: effective_auth_file,
         api_key: effective_api_key,
@@ -324,7 +321,7 @@ fn load_app_config() -> Result<Option<AppConfig>> {
 }
 
 /// Interactively prompts for runtime defaults and saves them to disk.
-fn configure(store: AppConfigStore) -> Result<()> {
+fn configure(store: &AppConfigStore) -> Result<()> {
     let existing = store.load()?.unwrap_or_default();
     let bind_host = prompt_string(
         "Bind host",
@@ -351,7 +348,7 @@ fn configure(store: AppConfigStore) -> Result<()> {
     Ok(())
 }
 
-fn show_config(store: AppConfigStore) -> Result<()> {
+fn show_config(store: &AppConfigStore) -> Result<()> {
     match store.load()? {
         Some(config) => {
             println!("{}", serde_json::to_string_pretty(&config)?);
@@ -364,23 +361,19 @@ fn show_config(store: AppConfigStore) -> Result<()> {
     }
 }
 
-fn reset_config(store: AppConfigStore) -> Result<()> {
+fn reset_config(store: &AppConfigStore) -> Result<()> {
     store.delete()?;
     println!("removed runtime config at {}", store.path().display());
     Ok(())
 }
 
 /// Runs the interactive OAuth login flow and persists the resulting credentials.
-async fn login(store: AuthStore, originator: &str, no_browser: bool) -> Result<()> {
+async fn login(store: AuthStore, originator: &str) -> Result<()> {
     let flow = create_authorization_flow(originator)?;
     println!("Open this URL to authenticate:\n{}\n", flow.authorize_url);
     println!(
         "After login, your browser may fail to load the localhost callback. Copy the full address from the browser address bar and paste it here."
     );
-
-    if !no_browser {
-        let _ = webbrowser::open(flow.authorize_url.as_str());
-    }
 
     let code = prompt_authorization_code(&flow.state)?;
     let credentials = CodexOAuthClient::default()
@@ -457,7 +450,8 @@ async fn status(store: AuthStore) -> Result<()> {
                 window.name, window.remaining_percent
             );
             if let Some(reset_at) = window.reset_at {
-                line.push_str(&format!(", resets {}", format_status_time_human(&reset_at)));
+                use std::fmt::Write as _;
+                let _ = write!(line, ", resets {}", format_status_time_human(&reset_at));
             }
             println!("{line}");
         }
@@ -473,8 +467,7 @@ async fn status(store: AuthStore) -> Result<()> {
 /// Resolves the configured credential store path.
 fn auth_store(path: Option<PathBuf>) -> Result<AuthStore> {
     path.map(AuthStore::new)
-        .map(Ok)
-        .unwrap_or_else(AuthStore::from_default_path)
+        .map_or_else(AuthStore::from_default_path, Ok)
 }
 
 fn default_bind() -> SocketAddr {
@@ -598,10 +591,10 @@ fn spawn_token_expiry_display(token_manager: TokenManager) {
 
 /// Builds a one-line token expiry status string for the current credentials snapshot.
 async fn token_expiry_status(token_manager: &TokenManager) -> String {
-    match token_manager.credentials_snapshot().await {
-        Some(credentials) => token_expiry_message(&credentials),
-        None => "token status unavailable: not logged in; run `codexia login` first".to_owned(),
-    }
+    token_manager.credentials_snapshot().await.map_or_else(
+        || "token status unavailable: not logged in; run `codexia login` first".to_owned(),
+        |credentials| token_expiry_message(&credentials),
+    )
 }
 
 /// Renders a human-readable expiry message for one credential set.

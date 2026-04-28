@@ -22,6 +22,11 @@ pub fn resolve_model_ids() -> Vec<String> {
 }
 
 /// Builds a [`ModelList`] from the default model identifiers.
+///
+/// # Errors
+///
+/// This currently forwards construction through [`ModelList::from_ids`] and is
+/// fallible only to preserve the crate-wide result-based call sites.
 pub fn resolve_model_list() -> Result<ModelList> {
     Ok(ModelList::from_ids(resolve_model_ids()))
 }

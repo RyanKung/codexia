@@ -18,6 +18,7 @@ pub struct TokenManager {
 
 impl TokenManager {
     /// Creates a token manager backed by the given credential store and OAuth client.
+    #[must_use]
     pub fn new(store: AuthStore, oauth: CodexOAuthClient) -> Self {
         let cached = store.load().unwrap_or(None);
         Self {
@@ -28,11 +29,17 @@ impl TokenManager {
     }
 
     /// Returns the currently cached credentials without forcing a refresh.
+    #[must_use]
     pub async fn credentials_snapshot(&self) -> Option<Credentials> {
         self.cached.read().await.clone()
     }
 
     /// Refreshes the current credentials immediately and persists the new tokens.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no credentials are stored locally, the refresh
+    /// request fails, or the refreshed credentials cannot be saved.
     pub async fn refresh(&self) -> Result<Credentials> {
         let mut guard = self.cached.write().await;
         let credentials = guard.clone().or(self.store.load()?).ok_or_else(|| {
@@ -42,10 +49,16 @@ impl TokenManager {
         let refreshed = self.refresh_credentials(&credentials).await?;
         self.store.save(&refreshed)?;
         *guard = Some(refreshed.clone());
+        drop(guard);
         Ok(refreshed)
     }
 
     /// Returns valid credentials, refreshing them when they are near expiry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no credentials are stored locally, the refresh
+    /// request fails, or persisted credentials cannot be loaded or saved.
     pub async fn credentials(&self) -> Result<Credentials> {
         // Check the shared cache first so uncontended reads avoid disk I/O and refresh traffic.
         if let Some(credentials) = self.cached.read().await.clone()
@@ -55,13 +68,10 @@ impl TokenManager {
         }
 
         let mut guard = self.cached.write().await;
-        let credentials = match guard.clone().or(self.store.load()?) {
-            Some(credentials) => credentials,
-            None => {
-                return Err(Error::config(
-                    "not logged in; run `codexia login` before serving requests",
-                ));
-            }
+        let Some(credentials) = guard.clone().or(self.store.load()?) else {
+            return Err(Error::config(
+                "not logged in; run `codexia login` before serving requests",
+            ));
         };
 
         // Refresh slightly before the exact expiry time so callers do not race a token timeout.
@@ -73,6 +83,7 @@ impl TokenManager {
         let refreshed = self.refresh_credentials(&credentials).await?;
         self.store.save(&refreshed)?;
         *guard = Some(refreshed.clone());
+        drop(guard);
         Ok(refreshed)
     }
 
@@ -85,6 +96,7 @@ impl TokenManager {
 mod tests {
     use super::*;
     use crate::config::now_unix;
+    use crate::testsupport::TempDir;
     use axum::{Form, Json, Router, routing::post};
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     use reqwest::Client;
@@ -92,13 +104,13 @@ mod tests {
     use std::collections::HashMap;
     use tokio::net::TcpListener;
 
-    fn jwt_with_payload(payload: Value) -> String {
-        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+    fn jwt_with_payload(payload: &Value) -> String {
+        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(payload).unwrap());
         format!("header.{encoded}.sig")
     }
 
     fn jwt_with_account_id(account_id: &str) -> String {
-        jwt_with_payload(json!({
+        jwt_with_payload(&json!({
             "https://api.openai.com/auth": { "chatgpt_account_id": account_id }
         }))
     }
@@ -125,7 +137,7 @@ mod tests {
 
     #[test]
     fn manager_loads_missing_store_without_panic() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = TempDir::new().unwrap();
         let store = AuthStore::new(dir.path().join("auth.json"));
         let manager = TokenManager::new(store, CodexOAuthClient::default());
 
@@ -134,7 +146,7 @@ mod tests {
 
     #[tokio::test]
     async fn manager_returns_unexpired_credentials() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = TempDir::new().unwrap();
         let store = AuthStore::new(dir.path().join("auth.json"));
         let credentials = Credentials {
             access_token: "access".into(),
@@ -150,7 +162,7 @@ mod tests {
 
     #[tokio::test]
     async fn manager_refreshes_expired_credentials_and_saves_them() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = TempDir::new().unwrap();
         let store = AuthStore::new(dir.path().join("auth.json"));
         store
             .save(&Credentials {
@@ -173,7 +185,7 @@ mod tests {
 
     #[tokio::test]
     async fn manager_refresh_forces_refresh_even_when_credentials_are_unexpired() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = TempDir::new().unwrap();
         let store = AuthStore::new(dir.path().join("auth.json"));
         store
             .save(&Credentials {

@@ -6,7 +6,7 @@ use serde_json::Value;
 use super::model::{AccountStatus, RateLimitWindow, UsageStatus};
 
 /// Parses account metadata from the account-check endpoint payload.
-pub(crate) fn parse_account_status(value: &Value) -> Result<AccountStatus> {
+pub(super) fn parse_account_status(value: &Value) -> Result<AccountStatus> {
     let default = value
         .pointer("/accounts/default")
         .ok_or_else(|| Error::upstream("account response is missing /accounts/default"))?;
@@ -41,7 +41,7 @@ pub(crate) fn parse_account_status(value: &Value) -> Result<AccountStatus> {
 }
 
 /// Parses normalized usage status from the rate-limit endpoint payload.
-pub(crate) fn parse_usage_status(value: &Value) -> Result<UsageStatus> {
+pub(super) fn parse_usage_status(value: &Value) -> Result<UsageStatus> {
     let mut windows = Vec::new();
 
     if let Some(rate_limit) = value.get("rate_limit") {
@@ -113,15 +113,16 @@ pub(crate) fn parse_usage_status(value: &Value) -> Result<UsageStatus> {
     })
 }
 
-pub(crate) fn backend_api_base_url(base_url: &str) -> String {
+pub(super) fn backend_api_base_url(base_url: &str) -> String {
     let normalized = base_url.trim_end_matches('/');
-    if let Some(value) = normalized.strip_suffix("/codex/responses") {
-        value.to_owned()
-    } else if let Some(value) = normalized.strip_suffix("/codex") {
-        value.to_owned()
-    } else {
-        normalized.to_owned()
-    }
+    normalized.strip_suffix("/codex/responses").map_or_else(
+        || {
+            normalized
+                .strip_suffix("/codex")
+                .map_or_else(|| normalized.to_owned(), ToOwned::to_owned)
+        },
+        ToOwned::to_owned,
+    )
 }
 
 fn parse_rate_limit_window(name: &str, value: &Value) -> Option<RateLimitWindow> {
@@ -154,7 +155,5 @@ fn string_like_value(value: &Value) -> Option<String> {
 fn number_like_value(value: &Value) -> Option<f64> {
     value
         .as_f64()
-        .or_else(|| value.as_i64().map(|item| item as f64))
-        .or_else(|| value.as_u64().map(|item| item as f64))
         .or_else(|| value.as_str().and_then(|item| item.parse::<f64>().ok()))
 }

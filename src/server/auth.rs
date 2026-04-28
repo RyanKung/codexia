@@ -4,6 +4,11 @@ use crate::{Error, error::Result};
 use axum::http::HeaderMap;
 
 /// Validates the configured local API key against either `Authorization` or `x-api-key`.
+///
+/// # Errors
+///
+/// Returns [`Error::Unauthorized`](crate::Error::Unauthorized) when a local API
+/// key is configured and neither header contains the expected secret.
 pub fn authorize(headers: &HeaderMap, api_key: Option<&str>) -> Result<()> {
     let Some(expected) = api_key else {
         return Ok(());

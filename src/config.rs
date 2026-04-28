@@ -21,11 +21,13 @@ pub struct Credentials {
 
 impl Credentials {
     /// Returns whether the credentials should be considered expired at `now_unix`.
-    pub fn is_expired_at(&self, now_unix: i64, skew_secs: i64) -> bool {
+    #[must_use]
+    pub const fn is_expired_at(&self, now_unix: i64, skew_secs: i64) -> bool {
         self.expires_at.saturating_sub(skew_secs) <= now_unix
     }
 
     /// Returns whether the credentials are expired relative to the current system time.
+    #[must_use]
     pub fn is_expired(&self, skew_secs: i64) -> bool {
         self.is_expired_at(now_unix(), skew_secs)
     }
@@ -56,11 +58,17 @@ pub struct AuthStore {
 
 impl AuthStore {
     /// Creates a store for credentials at `path`.
+    #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
     }
 
     /// Returns the default credential file path derived from environment variables.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when neither `CODEXIA_AUTH_FILE` nor a usable home
+    /// directory environment variable is available.
     pub fn default_path() -> Result<PathBuf> {
         if let Ok(path) = env::var("CODEXIA_AUTH_FILE") {
             return Ok(PathBuf::from(path));
@@ -74,16 +82,25 @@ impl AuthStore {
     }
 
     /// Creates a credential store that uses the default path resolution rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the default credential path cannot be resolved.
     pub fn from_default_path() -> Result<Self> {
         Ok(Self::new(Self::default_path()?))
     }
 
     /// Returns the on-disk path used by this store.
+    #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
     }
 
     /// Loads credentials from disk, or `None` when the file does not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file exists but cannot be read or decoded.
     pub fn load(&self) -> Result<Option<Credentials>> {
         match fs::read_to_string(&self.path) {
             Ok(raw) => Ok(Some(serde_json::from_str(&raw)?)),
@@ -93,6 +110,11 @@ impl AuthStore {
     }
 
     /// Persists credentials to disk using a private temporary file and atomic rename.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the parent directory cannot be created, the JSON
+    /// cannot be serialized, or the file cannot be written atomically.
     pub fn save(&self, credentials: &Credentials) -> Result<()> {
         let parent = self
             .path
@@ -117,26 +139,40 @@ pub struct AppConfigStore {
 
 impl AppConfigStore {
     /// Creates a store for application configuration at `path`.
+    #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
     }
 
     /// Returns the default application configuration path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the `codexia` home directory cannot be resolved.
     pub fn default_path() -> Result<PathBuf> {
         Ok(codexia_home()?.join("config.json"))
     }
 
     /// Creates a configuration store that uses the default path resolution rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the default configuration path cannot be resolved.
     pub fn from_default_path() -> Result<Self> {
         Ok(Self::new(Self::default_path()?))
     }
 
     /// Returns the on-disk path used by this store.
+    #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
     }
 
     /// Loads configuration from disk, or `None` when the file does not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file exists but cannot be read or decoded.
     pub fn load(&self) -> Result<Option<AppConfig>> {
         match fs::read_to_string(&self.path) {
             Ok(raw) => Ok(Some(serde_json::from_str(&raw)?)),
@@ -146,6 +182,11 @@ impl AppConfigStore {
     }
 
     /// Persists configuration to disk using a private temporary file and atomic rename.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the parent directory cannot be created, the JSON
+    /// cannot be serialized, or the file cannot be written atomically.
     pub fn save(&self, config: &AppConfig) -> Result<()> {
         let parent = self
             .path
@@ -162,6 +203,11 @@ impl AppConfigStore {
     }
 
     /// Removes the persisted configuration file when it exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when removing an existing file fails for reasons other
+    /// than it not being present.
     pub fn delete(&self) -> Result<()> {
         match fs::remove_file(&self.path) {
             Ok(()) => Ok(()),
@@ -172,10 +218,12 @@ impl AppConfigStore {
 }
 
 /// Returns the current Unix timestamp in seconds.
+#[must_use]
 pub fn now_unix() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs() as i64)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_secs()).ok())
         .unwrap_or_default()
 }
 
@@ -211,6 +259,7 @@ fn codexia_home() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testsupport::TempDir;
 
     fn sample_credentials() -> Credentials {
         Credentials {
@@ -243,7 +292,7 @@ mod tests {
 
     #[test]
     fn missing_auth_file_loads_as_none() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = TempDir::new().unwrap();
         let store = AuthStore::new(dir.path().join("missing.json"));
 
         assert_eq!(store.load().unwrap(), None);
@@ -251,7 +300,7 @@ mod tests {
 
     #[test]
     fn saves_and_loads_credentials() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = TempDir::new().unwrap();
         let store = AuthStore::new(dir.path().join("auth.json"));
         let credentials = sample_credentials();
 
@@ -262,7 +311,7 @@ mod tests {
 
     #[test]
     fn missing_app_config_loads_as_none() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = TempDir::new().unwrap();
         let store = AppConfigStore::new(dir.path().join("missing.json"));
 
         assert_eq!(store.load().unwrap(), None);
@@ -270,7 +319,7 @@ mod tests {
 
     #[test]
     fn saves_and_loads_app_config() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = TempDir::new().unwrap();
         let store = AppConfigStore::new(dir.path().join("config.json"));
         let config = sample_app_config();
 
@@ -281,7 +330,7 @@ mod tests {
 
     #[test]
     fn deletes_app_config() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = TempDir::new().unwrap();
         let store = AppConfigStore::new(dir.path().join("config.json"));
         let config = sample_app_config();
 

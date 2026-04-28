@@ -22,7 +22,7 @@ pub struct ModelObject {
 }
 
 /// OpenAI-compatible non-streaming chat completion response body.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ChatCompletionResponse {
     /// Response identifier.
     pub id: String,
@@ -40,7 +40,7 @@ pub struct ChatCompletionResponse {
 }
 
 /// Single completion choice in a chat completion response.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ChatChoice {
     /// Choice index in the response.
     pub index: u32,
@@ -51,7 +51,7 @@ pub struct ChatChoice {
 }
 
 /// Assistant message returned in a non-streaming response.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct AssistantMessage {
     /// Message role, always `assistant`.
     pub role: &'static str,
@@ -74,7 +74,7 @@ pub struct Usage {
 }
 
 /// OpenAI-compatible streamed chat completion chunk.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ChatCompletionChunk {
     /// Response identifier shared across chunks.
     pub id: String,
@@ -89,7 +89,7 @@ pub struct ChatCompletionChunk {
 }
 
 /// Single choice delta inside a streaming chunk.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ChunkChoice {
     /// Choice index in the response.
     pub index: u32,
@@ -101,7 +101,7 @@ pub struct ChunkChoice {
 }
 
 /// Incremental assistant message payload carried by a stream chunk.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DeltaMessage {
     /// Role emitted at the start of the stream.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -115,7 +115,7 @@ pub struct DeltaMessage {
 }
 
 /// Streaming representation of a single tool call delta.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ToolCallDelta {
     /// Zero-based tool call index within the assistant turn.
     pub index: u32,
@@ -130,6 +130,7 @@ pub struct ToolCallDelta {
 
 impl ModelList {
     /// Builds a model list from a sequence of model identifiers.
+    #[must_use]
     pub fn from_ids(ids: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
         Self {
             object: "list",
@@ -146,6 +147,7 @@ impl ModelList {
 }
 
 /// Builds the initial stream chunk that introduces the assistant role.
+#[must_use]
 pub fn chunk_with_role(id: &str, created: i64, model: &str) -> ChatCompletionChunk {
     ChatCompletionChunk {
         id: id.to_owned(),
@@ -165,6 +167,7 @@ pub fn chunk_with_role(id: &str, created: i64, model: &str) -> ChatCompletionChu
 }
 
 /// Builds a stream chunk that carries an assistant text delta.
+#[must_use]
 pub fn chunk_with_content(
     id: &str,
     created: i64,
@@ -189,6 +192,7 @@ pub fn chunk_with_content(
 }
 
 /// Builds a stream chunk that carries a tool call delta.
+#[must_use]
 pub fn chunk_with_tool_call(
     id: &str,
     created: i64,
@@ -221,6 +225,7 @@ pub fn chunk_with_tool_call(
 }
 
 /// Builds the terminal stream chunk for a finished choice.
+#[must_use]
 pub fn chunk_finished(id: &str, created: i64, model: &str, reason: &str) -> ChatCompletionChunk {
     ChatCompletionChunk {
         id: id.to_owned(),

@@ -12,6 +12,7 @@ pub struct Pkce {
 }
 
 /// Generates a random PKCE verifier and its matching S256 code challenge.
+#[must_use]
 pub fn generate_pkce(rng: &mut impl RngCore) -> Pkce {
     let mut bytes = [0_u8; 32];
     rng.fill_bytes(&mut bytes);
@@ -25,6 +26,7 @@ pub fn generate_pkce(rng: &mut impl RngCore) -> Pkce {
 }
 
 /// Computes the RFC 7636 S256 code challenge for a verifier.
+#[must_use]
 pub fn code_challenge(verifier: &str) -> String {
     let digest = Sha256::digest(verifier.as_bytes());
     URL_SAFE_NO_PAD.encode(digest)

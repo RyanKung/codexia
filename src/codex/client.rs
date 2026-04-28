@@ -22,11 +22,11 @@ use reqwest::{
 use serde_json::Value;
 use std::pin::Pin;
 
-/// Default upstream base URL for Codex response requests.
+/// Default upstream base URL for `Codex` response requests.
 pub const DEFAULT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api";
 
 #[derive(Clone)]
-/// HTTP client wrapper for the ChatGPT Codex responses backend.
+/// HTTP client wrapper for the `ChatGPT` `Codex` responses backend.
 pub struct CodexClient {
     http: Client,
     base_url: String,
@@ -34,6 +34,7 @@ pub struct CodexClient {
 
 impl CodexClient {
     /// Creates a Codex client with the provided HTTP client and backend base URL.
+    #[must_use]
     pub fn new(http: Client, base_url: impl Into<String>) -> Self {
         Self {
             http,
@@ -42,16 +43,23 @@ impl CodexClient {
     }
 
     /// Returns the default upstream base URL used by the client.
-    pub fn default_base_url() -> &'static str {
+    #[must_use]
+    pub const fn default_base_url() -> &'static str {
         DEFAULT_CODEX_BASE_URL
     }
 
     /// Returns the configured upstream base URL.
+    #[must_use]
     pub fn base_url(&self) -> &str {
         &self.base_url
     }
 
     /// Sends a non-streaming chat completion request and collects the full response body.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the upstream request fails or the Codex response
+    /// stream cannot be collected into a final completion payload.
     pub async fn complete_chat(
         &self,
         request: crate::openai::types::ChatCompletionRequest,
@@ -86,6 +94,11 @@ impl CodexClient {
     }
 
     /// Sends a streaming chat completion request and yields OpenAI-compatible chunks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the upstream request fails before the response
+    /// stream can be handed back to the caller.
     pub async fn stream_chat(
         &self,
         request: crate::openai::types::ChatCompletionRequest,
@@ -169,6 +182,7 @@ impl CodexClient {
 }
 
 /// Resolves a configured base URL into the concrete Codex responses endpoint.
+#[must_use]
 pub fn resolve_codex_url(base_url: &str) -> String {
     let normalized = base_url.trim_end_matches('/');
     if normalized.ends_with("/codex/responses") {
@@ -181,6 +195,10 @@ pub fn resolve_codex_url(base_url: &str) -> String {
 }
 
 /// Builds the required HTTP headers for authenticated Codex backend requests.
+///
+/// # Errors
+///
+/// Returns an error when any derived header value is invalid.
 pub fn codex_headers(credentials: &Credentials) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -226,6 +244,7 @@ fn header_value(value: &str) -> Result<HeaderValue> {
     HeaderValue::from_str(value).map_err(|_| Error::config("invalid header value"))
 }
 
+#[must_use]
 fn chat_completion_id() -> String {
     format!("chatcmpl-{}-{:08x}", now_unix(), rand::random::<u32>())
 }

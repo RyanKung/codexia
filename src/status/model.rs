@@ -16,7 +16,7 @@ pub struct StatusSnapshot {
 }
 
 /// Account-level metadata derived from account and usage endpoints.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AccountStatus {
     /// Human-readable account name, if the service reported one.
     pub name: Option<String>,
@@ -45,8 +45,8 @@ pub struct RateLimitWindow {
 
 /// Internal normalized usage payload built from `/wham/usage`.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct UsageStatus {
-    pub(crate) account: Option<AccountStatus>,
-    pub(crate) rate_limits: Vec<RateLimitWindow>,
-    pub(crate) credits_balance: Option<f64>,
+pub(super) struct UsageStatus {
+    pub(super) account: Option<AccountStatus>,
+    pub(super) rate_limits: Vec<RateLimitWindow>,
+    pub(super) credits_balance: Option<f64>,
 }

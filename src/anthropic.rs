@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 /// Anthropic-compatible Messages API request body.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MessagesRequest {
     /// Target model identifier.
     pub model: String,
@@ -60,13 +60,14 @@ pub struct MessagesRequest {
 
 impl MessagesRequest {
     /// Returns whether the request should use streaming responses.
+    #[must_use]
     pub fn wants_stream(&self) -> bool {
         self.stream.unwrap_or(false)
     }
 }
 
 /// Anthropic-compatible input message.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Message {
     /// Message role such as `user` or `assistant`.
     pub role: String,
@@ -75,7 +76,7 @@ pub struct Message {
 }
 
 /// Anthropic accepts either a string or an array of blocks for message content.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum MessageContent {
     /// Plain text message content.
@@ -85,7 +86,7 @@ pub enum MessageContent {
 }
 
 /// Top-level system prompt can be a string or an array of blocks.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum SystemPrompt {
     /// Plain text system prompt.
@@ -95,7 +96,7 @@ pub enum SystemPrompt {
 }
 
 /// Supported Anthropic system block shape.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SystemBlock {
     /// Block type, typically `text`.
     #[serde(rename = "type")]
@@ -106,7 +107,7 @@ pub struct SystemBlock {
 }
 
 /// Minimal Anthropic content block support needed by SDKs and Claude Code.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ContentBlock {
     /// Content block type such as `text`, `image`, `tool_use`, or `tool_result`.
     #[serde(rename = "type")]
@@ -141,7 +142,7 @@ pub struct ContentBlock {
 }
 
 /// Base64 image source accepted by the Anthropic Messages API.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ImageSource {
     /// Source type, typically `base64`.
     #[serde(rename = "type")]
@@ -155,7 +156,7 @@ pub struct ImageSource {
 }
 
 /// Tool result content may arrive as a string or as a list of text blocks.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum ToolResultContent {
     /// Plain-text tool output.
@@ -165,7 +166,7 @@ pub enum ToolResultContent {
 }
 
 /// Anthropic tool definition.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ToolDefinition {
     /// Tool name exposed to the model.
     pub name: String,
@@ -178,7 +179,7 @@ pub struct ToolDefinition {
 }
 
 /// Anthropic Messages API response body.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize)]
 pub struct MessageResponse {
     /// Anthropic message identifier.
     pub id: String,
@@ -200,7 +201,7 @@ pub struct MessageResponse {
 }
 
 /// Anthropic response content block.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
 pub enum ResponseContentBlock {
     /// Plain text response content.
@@ -271,6 +272,12 @@ pub struct StreamingMessage {
 
 /// Converts an Anthropic Messages request into the existing OpenAI-like request
 /// type used by the Codex upstream adapter.
+///
+/// # Errors
+///
+/// Returns an error when the request contains unsupported Anthropic roles or
+/// malformed tool blocks that cannot be mapped into the OpenAI-compatible
+/// request shape.
 pub fn to_openai_request(request: &MessagesRequest) -> Result<ChatCompletionRequest> {
     let mut messages = Vec::new();
     if let Some(system) = system_prompt_text(request.system.as_ref()) {
@@ -345,6 +352,7 @@ pub fn from_openai_response(response: ChatCompletionResponse) -> MessageResponse
 }
 
 /// Produces a compact token estimate for `/v1/messages/count_tokens`.
+#[must_use]
 pub fn estimate_input_tokens(request: &MessagesRequest) -> u32 {
     let mut text = String::new();
     if let Some(system) = system_prompt_text(request.system.as_ref()) {
@@ -379,6 +387,10 @@ pub fn estimate_input_tokens(request: &MessagesRequest) -> u32 {
 }
 
 /// Builds the `message_start` payload emitted ahead of streaming deltas.
+///
+/// # Errors
+///
+/// Returns an error when the SSE payload cannot be serialized to JSON.
 pub fn message_start_event(id: &str, model: &str, input_tokens: u32) -> Result<Event> {
     sse_event(
         "message_start",
@@ -402,6 +414,10 @@ pub fn message_start_event(id: &str, model: &str, input_tokens: u32) -> Result<E
 }
 
 /// Builds a `content_block_start` event for a text block.
+///
+/// # Errors
+///
+/// Returns an error when the SSE payload cannot be serialized to JSON.
 pub fn text_block_start(index: u32) -> Result<Event> {
     sse_event(
         "content_block_start",
@@ -414,6 +430,10 @@ pub fn text_block_start(index: u32) -> Result<Event> {
 }
 
 /// Builds a `content_block_start` event for a tool use block.
+///
+/// # Errors
+///
+/// Returns an error when the SSE payload cannot be serialized to JSON.
 pub fn tool_block_start(index: u32, tool_call: &ToolCall) -> Result<Event> {
     sse_event(
         "content_block_start",
@@ -431,6 +451,10 @@ pub fn tool_block_start(index: u32, tool_call: &ToolCall) -> Result<Event> {
 }
 
 /// Builds a `content_block_delta` event for text content.
+///
+/// # Errors
+///
+/// Returns an error when the SSE payload cannot be serialized to JSON.
 pub fn text_delta(index: u32, text: &str) -> Result<Event> {
     sse_event(
         "content_block_delta",
@@ -443,6 +467,10 @@ pub fn text_delta(index: u32, text: &str) -> Result<Event> {
 }
 
 /// Builds a `content_block_delta` event for tool input JSON.
+///
+/// # Errors
+///
+/// Returns an error when the SSE payload cannot be serialized to JSON.
 pub fn tool_json_delta(index: u32, arguments: &str) -> Result<Event> {
     sse_event(
         "content_block_delta",
@@ -455,6 +483,10 @@ pub fn tool_json_delta(index: u32, arguments: &str) -> Result<Event> {
 }
 
 /// Builds a `content_block_stop` event.
+///
+/// # Errors
+///
+/// Returns an error when the SSE payload cannot be serialized to JSON.
 pub fn content_block_stop(index: u32) -> Result<Event> {
     sse_event(
         "content_block_stop",
@@ -466,6 +498,10 @@ pub fn content_block_stop(index: u32) -> Result<Event> {
 }
 
 /// Builds the terminal `message_delta` event with cumulative usage.
+///
+/// # Errors
+///
+/// Returns an error when the SSE payload cannot be serialized to JSON.
 pub fn message_delta_event(stop_reason: &str, output_tokens: u32) -> Result<Event> {
     sse_event(
         "message_delta",
@@ -483,11 +519,16 @@ pub fn message_delta_event(stop_reason: &str, output_tokens: u32) -> Result<Even
 }
 
 /// Builds the terminal `message_stop` event.
+///
+/// # Errors
+///
+/// Returns an error when the SSE payload cannot be serialized to JSON.
 pub fn message_stop_event() -> Result<Event> {
     sse_event("message_stop", &json!({ "type": "message_stop" }))
 }
 
 /// Builds an Anthropic-shaped error response body.
+#[must_use]
 pub fn error_body(error: &Error) -> Value {
     json!({
         "type": "error",
@@ -498,7 +539,7 @@ pub fn error_body(error: &Error) -> Value {
     })
 }
 
-fn anthropic_error_type(error: &Error) -> &'static str {
+const fn anthropic_error_type(error: &Error) -> &'static str {
     match error {
         Error::Unauthorized => "authentication_error",
         Error::Upstream(_) | Error::Http(_) => "api_error",
@@ -508,13 +549,16 @@ fn anthropic_error_type(error: &Error) -> &'static str {
 
 fn append_message(messages: &mut Vec<ChatMessage>, message: &Message) -> Result<()> {
     match message.role.as_str() {
-        "user" => append_user_message(messages, message),
+        "user" => {
+            append_user_message(messages, message);
+            Ok(())
+        }
         "assistant" => append_assistant_message(messages, message),
         role => Err(Error::config(format!("unsupported Anthropic role: {role}"))),
     }
 }
 
-fn append_user_message(messages: &mut Vec<ChatMessage>, message: &Message) -> Result<()> {
+fn append_user_message(messages: &mut Vec<ChatMessage>, message: &Message) {
     match &message.content {
         MessageContent::Text(text) => messages.push(ChatMessage {
             role: "user".to_owned(),
@@ -548,7 +592,6 @@ fn append_user_message(messages: &mut Vec<ChatMessage>, message: &Message) -> Re
                         tool_call_id: block.tool_use_id.clone(),
                         tool_calls: None,
                     }),
-                    "thinking" => {}
                     _ => {}
                 }
             }
@@ -564,7 +607,6 @@ fn append_user_message(messages: &mut Vec<ChatMessage>, message: &Message) -> Re
             }
         }
     }
-    Ok(())
 }
 
 fn append_assistant_message(messages: &mut Vec<ChatMessage>, message: &Message) -> Result<()> {
@@ -712,7 +754,10 @@ fn estimate_tokens_from_text(text: &str) -> u32 {
     if trimmed.is_empty() {
         0
     } else {
-        ((trimmed.chars().count() as u32) / 4).max(1)
+        u32::try_from(trimmed.chars().count())
+            .unwrap_or(u32::MAX)
+            .saturating_div(4)
+            .max(1)
     }
 }
 

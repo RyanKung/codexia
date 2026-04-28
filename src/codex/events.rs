@@ -11,7 +11,7 @@ use reqwest::Response;
 use serde_json::Value;
 
 /// Aggregated output built from a streamed Codex response.
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ChatOutput {
     /// Concatenated assistant text collected from deltas or final message items.
     pub text: String,
@@ -24,6 +24,11 @@ pub struct ChatOutput {
 }
 
 /// Consumes a streamed Codex HTTP response and folds its SSE events into one output.
+///
+/// # Errors
+///
+/// Returns an error when the SSE stream contains an upstream failure event or
+/// cannot be decoded into JSON events.
 pub async fn collect_output(response: Response) -> Result<ChatOutput> {
     let mut events = Box::pin(sse::json_events(Box::pin(response.bytes_stream())));
     let mut output = ChatOutput {
@@ -40,13 +45,17 @@ pub async fn collect_output(response: Response) -> Result<ChatOutput> {
     }
 
     if !output.tool_calls.is_empty() {
-        output.finish_reason = "tool_calls".to_owned();
+        "tool_calls".clone_into(&mut output.finish_reason);
     }
 
     Ok(output)
 }
 
 /// Applies one parsed Codex event to an in-progress chat output.
+///
+/// # Errors
+///
+/// Returns an error when the event encodes an upstream failure.
 pub fn apply_event(output: &mut ChatOutput, event: &Value) -> Result<()> {
     if let Some(message) = event_error(event) {
         return Err(Error::upstream(message));
@@ -83,13 +92,14 @@ pub fn apply_event(output: &mut ChatOutput, event: &Value) -> Result<()> {
     }
 
     if is_done_event(event) {
-        output.finish_reason = finish_reason(event).to_owned();
+        finish_reason(event).clone_into(&mut output.finish_reason);
     }
 
     Ok(())
 }
 
 /// Extracts a text delta from a streaming event, if the event carries one.
+#[must_use]
 pub fn text_delta(event: &Value) -> Option<String> {
     matches!(event_type(event), Some("response.output_text.delta"))
         .then(|| {
@@ -102,6 +112,7 @@ pub fn text_delta(event: &Value) -> Option<String> {
 }
 
 /// Returns whether an event marks the end of a streamed Codex response.
+#[must_use]
 pub fn is_done_event(event: &Value) -> bool {
     matches!(
         event_type(event),
@@ -110,6 +121,7 @@ pub fn is_done_event(event: &Value) -> bool {
 }
 
 /// Maps a terminal Codex event to the finish reason exposed to chat clients.
+#[must_use]
 pub fn finish_reason(event: &Value) -> &'static str {
     match event_type(event) {
         Some("response.incomplete") => "length",
@@ -118,6 +130,7 @@ pub fn finish_reason(event: &Value) -> &'static str {
 }
 
 /// Extracts an upstream error message from an event, if the event represents failure.
+#[must_use]
 pub fn event_error(event: &Value) -> Option<String> {
     match event_type(event) {
         Some("error") => event
@@ -209,12 +222,15 @@ fn parse_tool_call(item: &Value) -> Option<ToolCall> {
 
 fn parse_usage(value: Option<&Value>) -> Option<Usage> {
     let usage = value?;
-    let prompt_tokens = usage.get("input_tokens")?.as_u64()? as u32;
-    let completion_tokens = usage.get("output_tokens")?.as_u64()? as u32;
+    let prompt_tokens = u32::try_from(usage.get("input_tokens")?.as_u64()?).ok()?;
+    let completion_tokens = u32::try_from(usage.get("output_tokens")?.as_u64()?).ok()?;
     let total_tokens = usage
         .get("total_tokens")
         .and_then(Value::as_u64)
-        .unwrap_or((prompt_tokens + completion_tokens) as u64) as u32;
+        .map_or_else(
+            || Some(prompt_tokens.saturating_add(completion_tokens)),
+            |value| u32::try_from(value).ok(),
+        )?;
 
     Some(Usage {
         prompt_tokens,

@@ -4,6 +4,7 @@ use crate::config::now_unix;
 use chrono::{DateTime, Local, TimeZone};
 
 /// Formats a positive or negative duration into a compact textual form.
+#[must_use]
 pub fn format_duration(total_secs: i64) -> String {
     let total_secs = total_secs.max(0);
     let days = total_secs / 86_400;
@@ -23,6 +24,7 @@ pub fn format_duration(total_secs: i64) -> String {
 }
 
 /// Formats a Unix timestamp into local wall-clock time.
+#[must_use]
 pub fn format_unix_timestamp_local(timestamp: i64) -> Option<String> {
     Local
         .timestamp_opt(timestamp, 0)
@@ -31,19 +33,20 @@ pub fn format_unix_timestamp_local(timestamp: i64) -> Option<String> {
 }
 
 /// Formats a status time that may arrive as either a Unix timestamp or RFC3339 string.
+#[must_use]
 pub fn format_status_time_human(value: &str) -> String {
-    parse_status_datetime(value)
-        .map(format_datetime_with_remaining)
-        .unwrap_or_else(|| value.to_owned())
+    parse_status_datetime(value).map_or_else(|| value.to_owned(), format_datetime_with_remaining)
 }
 
 /// Formats a status time into local wall-clock time without relative text.
+#[must_use]
 pub fn format_status_time_local(value: &str) -> Option<String> {
     parse_status_datetime(value)
         .map(|datetime| datetime.format("%Y-%m-%d %H:%M:%S %:z").to_string())
 }
 
 /// Computes the signed distance in seconds between now and a status timestamp.
+#[must_use]
 pub fn remaining_seconds_for_status_time(value: &str, now_unix: i64) -> Option<i64> {
     parse_status_datetime(value).map(|datetime| datetime.timestamp().saturating_sub(now_unix))
 }

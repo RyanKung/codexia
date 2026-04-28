@@ -13,7 +13,7 @@ use super::{
     parse::{backend_api_base_url, parse_account_status, parse_usage_status},
 };
 
-/// Fetches account and rate-limit state from ChatGPT backend endpoints.
+/// Fetches account and rate-limit state from `ChatGPT` backend endpoints.
 #[derive(Clone)]
 pub struct StatusClient {
     http: Client,
@@ -21,7 +21,7 @@ pub struct StatusClient {
 }
 
 impl StatusClient {
-    /// Creates a new status client targeting the provided ChatGPT backend base URL.
+    /// Creates a new status client targeting the provided `ChatGPT` backend base URL.
     pub fn new(http: Client, base_url: impl Into<String>) -> Self {
         Self {
             http,

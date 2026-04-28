@@ -4,6 +4,7 @@ use crate::openai::types::{
 use serde_json::{Value, json};
 
 /// Normalizes model IDs by removing the `openai-codex/` prefix when present.
+#[must_use]
 pub fn normalize_model(model: &str) -> String {
     model
         .strip_prefix("openai-codex/")

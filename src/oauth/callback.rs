@@ -28,26 +28,35 @@ pub struct CallbackServer {
 
 impl CallbackServer {
     /// Binds the local callback listener on the fixed OAuth redirect address.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the local callback port cannot be bound.
     pub async fn bind() -> Result<Self> {
         let listener = TcpListener::bind(CALLBACK_ADDR).await?;
         Ok(Self { listener })
     }
 
     /// Waits for a callback request with the expected state and returns its outcome.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when reading callback requests or writing the browser
+    /// response fails.
     pub async fn receive_code(
         self,
         expected_state: &str,
         timeout: Duration,
     ) -> Result<CallbackOutcome> {
-        match time::timeout(
+        time::timeout(
             timeout,
             receive_valid_callback(self.listener, expected_state),
         )
         .await
-        {
-            Ok(result) => result.map(CallbackOutcome::Code),
-            Err(_) => Ok(CallbackOutcome::TimedOut),
-        }
+        .map_or_else(
+            |_| Ok(CallbackOutcome::TimedOut),
+            |result| result.map(CallbackOutcome::Code),
+        )
     }
 }
 

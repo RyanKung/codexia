@@ -47,6 +47,7 @@ impl Error {
     }
 
     /// Creates a configuration error with the provided message.
+    #[must_use]
     pub fn config(message: impl Into<String>) -> Self {
         Self::Config(message.into())
     }
@@ -57,7 +58,8 @@ impl Error {
     }
 
     /// Maps an application error to the HTTP status code exposed by the server.
-    pub fn status_code(&self) -> StatusCode {
+    #[must_use]
+    pub const fn status_code(&self) -> StatusCode {
         match self {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::Config(_) | Self::OAuth(_) => StatusCode::BAD_REQUEST,

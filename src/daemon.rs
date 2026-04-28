@@ -22,7 +22,12 @@ pub struct DaemonInstallOptions {
 }
 
 /// Installs the daemon service definition for the current platform.
-pub fn install(options: DaemonInstallOptions) -> Result<()> {
+///
+/// # Errors
+///
+/// Returns an error when the platform is unsupported, filesystem writes fail,
+/// or the platform service manager rejects the installation.
+pub fn install(options: &DaemonInstallOptions) -> Result<()> {
     match platform()? {
         Platform::MacOs => install_launchd(options),
         Platform::Linux => install_systemd(options),
@@ -30,12 +35,22 @@ pub fn install(options: DaemonInstallOptions) -> Result<()> {
 }
 
 /// Reinstalls the daemon by removing any existing service definition first.
-pub fn reinstall(options: DaemonInstallOptions) -> Result<()> {
+///
+/// # Errors
+///
+/// Returns an error when uninstalling the existing service or installing the
+/// replacement definition fails.
+pub fn reinstall(options: &DaemonInstallOptions) -> Result<()> {
     uninstall()?;
     install(options)
 }
 
 /// Starts the installed daemon service for the current user.
+///
+/// # Errors
+///
+/// Returns an error when the service is not installed or the platform service
+/// manager rejects the start request.
 pub fn start() -> Result<()> {
     match platform()? {
         Platform::MacOs => {
@@ -54,6 +69,10 @@ pub fn start() -> Result<()> {
 }
 
 /// Stops the running daemon service for the current user.
+///
+/// # Errors
+///
+/// Returns an error when the platform service manager rejects the stop request.
 pub fn stop() -> Result<()> {
     match platform()? {
         Platform::MacOs => {
@@ -65,6 +84,10 @@ pub fn stop() -> Result<()> {
 }
 
 /// Restarts the daemon service for the current user.
+///
+/// # Errors
+///
+/// Returns an error when the platform service manager rejects the restart request.
 pub fn restart() -> Result<()> {
     match platform()? {
         Platform::MacOs => {
@@ -77,6 +100,10 @@ pub fn restart() -> Result<()> {
 }
 
 /// Removes the daemon service definition and stops it if it is running.
+///
+/// # Errors
+///
+/// Returns an error when the service definition cannot be removed from disk.
 pub fn uninstall() -> Result<()> {
     match platform()? {
         Platform::MacOs => {
@@ -99,7 +126,7 @@ pub fn uninstall() -> Result<()> {
     }
 }
 
-fn install_launchd(options: DaemonInstallOptions) -> Result<()> {
+fn install_launchd(options: &DaemonInstallOptions) -> Result<()> {
     let plist = launchd_plist_path()?;
     let parent = plist
         .parent()
@@ -108,20 +135,20 @@ fn install_launchd(options: DaemonInstallOptions) -> Result<()> {
 
     let log_dir = codexia_home()?;
     fs::create_dir_all(&log_dir)?;
-    fs::write(&plist, launchd_plist(&options, &log_dir))?;
+    fs::write(&plist, launchd_plist(options, &log_dir))?;
     println!("installed {}", plist.display());
     println!("run `codexia daemon start` to start now; launchd will load it on login");
     Ok(())
 }
 
-fn install_systemd(options: DaemonInstallOptions) -> Result<()> {
+fn install_systemd(options: &DaemonInstallOptions) -> Result<()> {
     let unit = systemd_unit_path()?;
     let parent = unit
         .parent()
         .ok_or_else(|| Error::config("systemd unit path has no parent directory"))?;
     fs::create_dir_all(parent)?;
 
-    fs::write(&unit, systemd_unit(&options))?;
+    fs::write(&unit, systemd_unit(options))?;
     systemctl(["daemon-reload"])?;
     systemctl(["enable", SYSTEMD_UNIT])?;
     println!("installed {}", unit.display());
@@ -200,21 +227,20 @@ fn systemd_unit(options: &DaemonInstallOptions) -> String {
         .join(" ");
 
     format!(
-        r#"[Unit]
+        r"[Unit]
 Description=Codexia OpenAI-compatible Codex OAuth gateway
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart={}
+ExecStart={command}
 Restart=always
 RestartSec=5
 
 [Install]
 WantedBy=default.target
-"#,
-        command
+"
     )
 }
 
@@ -268,8 +294,7 @@ fn run_status(command: &mut Command) -> Result<()> {
         Ok(())
     } else {
         Err(Error::config(format!(
-            "command failed with status {status}: {:?}",
-            command
+            "command failed with status {status}: {command:?}"
         )))
     }
 }

@@ -1,4 +1,7 @@
 #![deny(missing_docs)]
+#![deny(clippy::all)]
+#![deny(clippy::pedantic)]
+#![deny(clippy::nursery)]
 
 //! Core library for `codexia`.
 //!
@@ -16,7 +19,7 @@ pub mod config;
 pub mod daemon;
 /// Shared error types and result aliases.
 pub mod error;
-/// Model list resolution from defaults, CLI flags, and JSON files.
+/// Model list resolution from the built-in defaults.
 pub mod models;
 /// OAuth authorization, token exchange, and callback parsing.
 pub mod oauth;
@@ -26,6 +29,9 @@ pub mod openai;
 pub mod server;
 /// Account and rate-limit status fetchers.
 pub mod status;
+/// Test-only filesystem helpers shared across unit tests.
+#[cfg(test)]
+pub(crate) mod testsupport;
 /// Shared time formatting helpers for CLI and HTTP output.
 pub mod timefmt;
 /// OAuth credential caching and refresh orchestration.

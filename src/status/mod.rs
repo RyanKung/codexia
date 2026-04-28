@@ -96,8 +96,8 @@ mod tests {
         assert_eq!(usage.account.unwrap().plan.as_deref(), Some("pro"));
         assert_eq!(usage.credits_balance, Some(7.5));
         assert_eq!(usage.rate_limits.len(), 2);
-        assert_eq!(usage.rate_limits[0].remaining_percent, 88.0);
-        assert_eq!(usage.rate_limits[1].remaining_percent, 94.0);
+        assert!((usage.rate_limits[0].remaining_percent - 88.0).abs() < f64::EPSILON);
+        assert!((usage.rate_limits[1].remaining_percent - 94.0).abs() < f64::EPSILON);
     }
 
     #[tokio::test]

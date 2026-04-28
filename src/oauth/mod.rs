@@ -7,7 +7,7 @@ use crate::{
     oauth::pkce::Pkce,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use rand::{RngCore, rngs::OsRng};
+use rand::{RngCore, SeedableRng, rngs::StdRng};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::Value;
@@ -71,6 +71,7 @@ impl Default for CodexOAuthClient {
 
 impl CodexOAuthClient {
     /// Creates an OAuth client backed by the provided HTTP client.
+    #[must_use]
     pub fn new(http: Client) -> Self {
         Self {
             http,
@@ -87,6 +88,11 @@ impl CodexOAuthClient {
     }
 
     /// Exchanges an authorization code plus PKCE verifier for stored credentials.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the HTTP exchange fails or the OAuth server
+    /// rejects the authorization code.
     pub async fn exchange_authorization_code(
         &self,
         code: &str,
@@ -109,6 +115,11 @@ impl CodexOAuthClient {
     }
 
     /// Refreshes an existing refresh token and returns replacement credentials.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the HTTP exchange fails or the OAuth server
+    /// rejects the refresh token.
     pub async fn refresh_token(&self, refresh_token: &str) -> Result<Credentials> {
         let response = self
             .http
@@ -126,12 +137,17 @@ impl CodexOAuthClient {
 }
 
 /// Creates a browser-ready OAuth flow and the local state needed to validate it.
+///
+/// # Errors
+///
+/// Returns an error when the authorization URL cannot be constructed.
 pub fn create_authorization_flow(originator: &str) -> Result<AuthorizationFlow> {
+    let mut rng = StdRng::from_os_rng();
     let Pkce {
         verifier,
         challenge,
-    } = generate_pkce(&mut OsRng);
-    let state = create_state(&mut OsRng);
+    } = generate_pkce(&mut rng);
+    let state = create_state(&mut rng);
     let mut authorize_url = Url::parse(AUTHORIZE_URL)?;
     authorize_url
         .query_pairs_mut()
@@ -154,6 +170,7 @@ pub fn create_authorization_flow(originator: &str) -> Result<AuthorizationFlow> 
 }
 
 /// Parses authorization input from a full callback URL, query string, or raw code.
+#[must_use]
 pub fn parse_authorization_input(input: &str) -> AuthorizationInput {
     let value = input.trim();
     if value.is_empty() {
@@ -188,7 +205,12 @@ pub fn parse_authorization_input(input: &str) -> AuthorizationInput {
     }
 }
 
-/// Extracts the ChatGPT account identifier embedded in an OAuth access token.
+/// Extracts the `ChatGPT` account identifier embedded in an OAuth access token.
+///
+/// # Errors
+///
+/// Returns an error when the token is not a valid JWT payload or does not
+/// contain the expected account-id claim.
 pub fn account_id_from_access_token(access_token: &str) -> Result<String> {
     let payload = decode_jwt_payload(access_token)?;
     let account_id = payload
@@ -221,14 +243,10 @@ fn query_value(url: &Url, key: &str) -> Option<String> {
 fn parse_query_like_input(value: &str) -> AuthorizationInput {
     let query = value
         .split_once('?')
-        .map(|(_, query)| query)
-        .unwrap_or(value)
+        .map_or(value, |(_, query)| query)
         .trim_start_matches('?');
     // Ignore any fragment suffix so pasted callback URLs and raw query strings behave the same.
-    let query = query
-        .split_once('#')
-        .map(|(query, _)| query)
-        .unwrap_or(query);
+    let query = query.split_once('#').map_or(query, |(query, _)| query);
     let pairs = url::form_urlencoded::parse(query.as_bytes()).collect::<Vec<_>>();
 
     AuthorizationInput {
@@ -291,13 +309,13 @@ mod tests {
     type RefreshForm = HashMap<String, String>;
     type RefreshFormState = Arc<Mutex<Option<RefreshForm>>>;
 
-    fn jwt_with_payload(payload: Value) -> String {
-        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+    fn jwt_with_payload(payload: &Value) -> String {
+        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(payload).unwrap());
         format!("header.{encoded}.sig")
     }
 
     fn jwt_with_account_id(account_id: &str) -> String {
-        jwt_with_payload(json!({
+        jwt_with_payload(&json!({
             JWT_CLAIM_PATH: { "chatgpt_account_id": account_id }
         }))
     }
@@ -394,7 +412,7 @@ mod tests {
 
     #[test]
     fn extracts_account_id_from_jwt() {
-        let token = jwt_with_payload(json!({
+        let token = jwt_with_payload(&json!({
             JWT_CLAIM_PATH: { "chatgpt_account_id": "acc_123" }
         }));
 
@@ -403,7 +421,7 @@ mod tests {
 
     #[test]
     fn rejects_jwt_without_account_id() {
-        let token = jwt_with_payload(json!({ "sub": "user" }));
+        let token = jwt_with_payload(&json!({ "sub": "user" }));
 
         assert!(account_id_from_access_token(&token).is_err());
     }

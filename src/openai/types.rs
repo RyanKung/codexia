@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 /// OpenAI-compatible chat completions request body.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ChatCompletionRequest {
     /// Target model identifier.
     pub model: String,
@@ -40,13 +40,14 @@ pub struct ChatCompletionRequest {
 
 impl ChatCompletionRequest {
     /// Returns whether the request should use streaming responses.
+    #[must_use]
     pub fn wants_stream(&self) -> bool {
         self.stream.unwrap_or(false)
     }
 }
 
 /// Single chat message in an OpenAI-compatible conversation.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ChatMessage {
     /// Message role such as `system`, `user`, `assistant`, or `tool`.
     pub role: String,
@@ -65,7 +66,7 @@ pub struct ChatMessage {
 }
 
 /// Chat message content represented as a plain string or structured parts.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum ChatContent {
     /// Plain text content.
@@ -75,7 +76,7 @@ pub enum ChatContent {
 }
 
 /// Single structured content part within a multimodal chat message.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ChatContentPart {
     /// Part type such as `text` or `image_url`.
     #[serde(rename = "type")]
@@ -89,7 +90,7 @@ pub struct ChatContentPart {
 }
 
 /// OpenAI-compatible image reference embedded in message content.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ImageUrl {
     /// Image URL or data URL.
     pub url: String,
@@ -99,7 +100,7 @@ pub struct ImageUrl {
 }
 
 /// Tool call emitted by an assistant response.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ToolCall {
     /// Stable identifier for correlating tool responses.
     pub id: String,
@@ -111,7 +112,7 @@ pub struct ToolCall {
 }
 
 /// Function call payload embedded in a tool call.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct FunctionCall {
     /// Function name selected by the model.
     pub name: String,
@@ -120,7 +121,7 @@ pub struct FunctionCall {
 }
 
 /// Tool definition exposed to the model.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ChatTool {
     /// Tool type, currently `function`.
     #[serde(rename = "type")]
@@ -130,7 +131,7 @@ pub struct ChatTool {
 }
 
 /// Metadata describing a callable function tool.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FunctionTool {
     /// Function name advertised to the model.
     pub name: String,

@@ -103,16 +103,16 @@ pub async fn messages(
     Json(request): Json<MessagesRequest>,
 ) -> Response {
     if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
-        return anthropic_error_response(error);
+        return anthropic_error_response(&error);
     }
 
     let credentials = match state.token_manager.credentials().await {
         Ok(credentials) => credentials,
-        Err(error) => return anthropic_error_response(error),
+        Err(error) => return anthropic_error_response(&error),
     };
     let openai_request = match to_openai_request(&request) {
         Ok(request) => request,
-        Err(error) => return anthropic_error_response(error),
+        Err(error) => return anthropic_error_response(&error),
     };
 
     let input_tokens = estimate_input_tokens(&request);
@@ -121,7 +121,7 @@ pub async fn messages(
     if request.wants_stream() {
         match state.codex.stream_chat(openai_request, &credentials).await {
             Ok(stream) => anthropic_sse_response(stream, model, input_tokens).into_response(),
-            Err(error) => anthropic_error_response(error),
+            Err(error) => anthropic_error_response(&error),
         }
     } else {
         match state
@@ -130,7 +130,7 @@ pub async fn messages(
             .await
         {
             Ok(response) => Json(from_openai_response(response)).into_response(),
-            Err(error) => anthropic_error_response(error),
+            Err(error) => anthropic_error_response(&error),
         }
     }
 }
@@ -142,7 +142,7 @@ pub async fn count_message_tokens(
     Json(request): Json<MessagesRequest>,
 ) -> Response {
     if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
-        return anthropic_error_response(error);
+        return anthropic_error_response(&error);
     }
 
     Json(CountTokensResponse {
@@ -179,19 +179,25 @@ fn anthropic_sse_response(
     input_tokens: u32,
 ) -> Sse<impl Stream<Item = std::result::Result<Event, Infallible>>> {
     let mapped = async_stream::stream! {
+        macro_rules! yield_event_or_error {
+            ($event:expr) => {
+                match $event {
+                    Ok(event) => yield Ok(event),
+                    Err(error) => {
+                        yield Ok(anthropic_error_event(&error));
+                        return;
+                    }
+                }
+            };
+        }
+
         let id = format!("msg_{}", rand::random::<u64>());
         let mut stream = stream;
         let mut current_index = 0_u32;
         let mut text_open = false;
         let mut output_tokens = 0_u32;
 
-        match message_start_event(&id, &model, input_tokens) {
-            Ok(event) => yield Ok(event),
-            Err(error) => {
-                yield Ok(anthropic_error_event(error));
-                return;
-            }
-        }
+        yield_event_or_error!(message_start_event(&id, &model, input_tokens));
 
         while let Some(item) = stream.next().await {
             match item {
@@ -205,33 +211,15 @@ fn anthropic_sse_response(
                     {
                         output_tokens = output_tokens.saturating_add(estimate_stream_tokens(&text));
                         if !text_open {
-                            match text_block_start(current_index) {
-                                Ok(event) => yield Ok(event),
-                                Err(error) => {
-                                    yield Ok(anthropic_error_event(error));
-                                    return;
-                                }
-                            }
+                            yield_event_or_error!(text_block_start(current_index));
                             text_open = true;
                         }
-                        match text_delta(current_index, &text) {
-                            Ok(event) => yield Ok(event),
-                            Err(error) => {
-                                yield Ok(anthropic_error_event(error));
-                                return;
-                            }
-                        }
+                        yield_event_or_error!(text_delta(current_index, &text));
                     }
 
                     for tool_call in choice.delta.tool_calls.into_iter().flatten() {
                         if text_open {
-                            match content_block_stop(current_index) {
-                                Ok(event) => yield Ok(event),
-                                Err(error) => {
-                                    yield Ok(anthropic_error_event(error));
-                                    return;
-                                }
-                            }
+                            yield_event_or_error!(content_block_stop(current_index));
                             current_index += 1;
                             text_open = false;
                         }
@@ -249,80 +237,50 @@ fn anthropic_sse_response(
                             tool_json_delta(current_index, &tool_call.function.arguments),
                             content_block_stop(current_index),
                         ] {
-                            match event {
-                                Ok(event) => yield Ok(event),
-                                Err(error) => {
-                                    yield Ok(anthropic_error_event(error));
-                                    return;
-                                }
-                            }
+                            yield_event_or_error!(event);
                         }
                         current_index += 1;
                     }
 
                     if let Some(reason) = choice.finish_reason {
                         if text_open {
-                            match content_block_stop(current_index) {
-                                Ok(event) => yield Ok(event),
-                                Err(error) => {
-                                    yield Ok(anthropic_error_event(error));
-                                    return;
-                                }
-                            }
+                            yield_event_or_error!(content_block_stop(current_index));
                         }
                         for event in [
                             message_delta_event(&reason, output_tokens),
                             message_stop_event(),
                         ] {
-                            match event {
-                                Ok(event) => yield Ok(event),
-                                Err(error) => {
-                                    yield Ok(anthropic_error_event(error));
-                                    return;
-                                }
-                            }
+                            yield_event_or_error!(event);
                         }
                         return;
                     }
                 }
                 Err(error) => {
-                    yield Ok(anthropic_error_event(error));
+                    yield Ok(anthropic_error_event(&error));
                     return;
                 }
             }
         }
 
         if text_open {
-            match content_block_stop(current_index) {
-                Ok(event) => yield Ok(event),
-                Err(error) => {
-                    yield Ok(anthropic_error_event(error));
-                    return;
-                }
-            }
+            yield_event_or_error!(content_block_stop(current_index));
         }
         for event in [message_delta_event("stop", output_tokens), message_stop_event()] {
-            match event {
-                Ok(event) => yield Ok(event),
-                Err(error) => {
-                    yield Ok(anthropic_error_event(error));
-                    return;
-                }
-            }
+            yield_event_or_error!(event);
         }
     };
 
     Sse::new(mapped).keep_alive(KeepAlive::default())
 }
 
-fn anthropic_error_response(error: crate::Error) -> Response {
-    (error.status_code(), Json(error_body(&error))).into_response()
+fn anthropic_error_response(error: &crate::Error) -> Response {
+    (error.status_code(), Json(error_body(error))).into_response()
 }
 
-fn anthropic_error_event(error: crate::Error) -> Event {
+fn anthropic_error_event(error: &crate::Error) -> Event {
     Event::default()
         .event("error")
-        .data(error_body(&error).to_string())
+        .data(error_body(error).to_string())
 }
 
 fn estimate_stream_tokens(text: &str) -> u32 {
@@ -330,6 +288,9 @@ fn estimate_stream_tokens(text: &str) -> u32 {
     if trimmed.is_empty() {
         0
     } else {
-        ((trimmed.chars().count() as u32) / 4).max(1)
+        u32::try_from(trimmed.chars().count())
+            .unwrap_or(u32::MAX)
+            .saturating_div(4)
+            .max(1)
     }
 }
