@@ -4,15 +4,20 @@ use futures_util::{Stream, StreamExt};
 use serde_json::Value;
 use std::pin::Pin;
 
+/// Boxed byte stream returned by the upstream HTTP client for SSE responses.
 pub type ByteStream =
     Pin<Box<dyn Stream<Item = std::result::Result<Bytes, reqwest::Error>> + Send>>;
 
+/// Parsed server-sent event frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SseEvent {
+    /// Optional SSE event name from the `event:` field.
     pub event: Option<String>,
+    /// Combined payload from one or more `data:` lines.
     pub data: String,
 }
 
+/// Parses a byte stream of SSE frames into JSON payload events.
 pub fn json_events(stream: ByteStream) -> impl Stream<Item = Result<Value>> + Send {
     async_stream::try_stream! {
         let mut stream = stream;
@@ -24,6 +29,8 @@ pub fn json_events(stream: ByteStream) -> impl Stream<Item = Result<Value>> + Se
                 .map_err(|_| Error::upstream("upstream SSE was not UTF-8"))?;
             buffer.push_str(text);
 
+            // Keep incomplete trailing bytes in the buffer so frames split across
+            // network chunks are only parsed once a full separator arrives.
             for event in drain_events(&mut buffer) {
                 if event.data.trim().is_empty() || event.data.trim() == "[DONE]" {
                     continue;
@@ -32,6 +39,7 @@ pub fn json_events(stream: ByteStream) -> impl Stream<Item = Result<Value>> + Se
             }
         }
 
+        // Flush a final unterminated frame after the stream closes.
         for event in drain_last_event(&mut buffer) {
             if !event.data.trim().is_empty() && event.data.trim() != "[DONE]" {
                 yield serde_json::from_str::<Value>(&event.data)?;
@@ -40,6 +48,7 @@ pub fn json_events(stream: ByteStream) -> impl Stream<Item = Result<Value>> + Se
     }
 }
 
+/// Drains every complete SSE frame currently buffered, leaving any partial tail in place.
 pub fn drain_events(buffer: &mut String) -> Vec<SseEvent> {
     let mut events = Vec::new();
     while let Some(index) = find_frame_end(buffer) {

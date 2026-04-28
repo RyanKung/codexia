@@ -21,27 +21,39 @@ use serde_json::{Map, Value, json};
 /// Anthropic-compatible Messages API request body.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct MessagesRequest {
+    /// Target model identifier.
     pub model: String,
+    /// Conversation history supplied to the model.
     #[serde(default)]
     pub messages: Vec<Message>,
+    /// Optional top-level system prompt.
     #[serde(default)]
     pub system: Option<SystemPrompt>,
+    /// Maximum number of output tokens requested.
     #[serde(default)]
     pub max_tokens: Option<u32>,
+    /// Whether the caller requested SSE streaming.
     #[serde(default)]
     pub stream: Option<bool>,
+    /// Sampling temperature, when supported upstream.
     #[serde(default)]
     pub temperature: Option<f64>,
+    /// Nucleus sampling parameter, preserved for compatibility.
     #[serde(default)]
     pub top_p: Option<f64>,
+    /// Tools exposed to the model.
     #[serde(default)]
     pub tools: Option<Vec<ToolDefinition>>,
+    /// Requested tool selection mode or explicit tool choice.
     #[serde(default)]
     pub tool_choice: Option<Value>,
+    /// Optional stop sequences understood by Anthropic clients.
     #[serde(default)]
     pub stop_sequences: Option<Vec<String>>,
+    /// Optional thinking configuration passed through by compatible clients.
     #[serde(default)]
     pub thinking: Option<Value>,
+    /// Additional provider-specific fields preserved verbatim.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -56,7 +68,9 @@ impl MessagesRequest {
 /// Anthropic-compatible input message.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct Message {
+    /// Message role such as `user` or `assistant`.
     pub role: String,
+    /// Message payload as text or structured blocks.
     pub content: MessageContent,
 }
 
@@ -64,7 +78,9 @@ pub struct Message {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum MessageContent {
+    /// Plain text message content.
     Text(String),
+    /// Structured content blocks.
     Blocks(Vec<ContentBlock>),
 }
 
@@ -72,15 +88,19 @@ pub enum MessageContent {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum SystemPrompt {
+    /// Plain text system prompt.
     Text(String),
+    /// Structured system prompt blocks.
     Blocks(Vec<SystemBlock>),
 }
 
 /// Supported Anthropic system block shape.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct SystemBlock {
+    /// Block type, typically `text`.
     #[serde(rename = "type")]
     pub kind: String,
+    /// Optional text payload carried by the block.
     #[serde(default)]
     pub text: Option<String>,
 }
@@ -88,24 +108,34 @@ pub struct SystemBlock {
 /// Minimal Anthropic content block support needed by SDKs and Claude Code.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct ContentBlock {
+    /// Content block type such as `text`, `image`, `tool_use`, or `tool_result`.
     #[serde(rename = "type")]
     pub kind: String,
+    /// Inline text payload for text-like blocks.
     #[serde(default)]
     pub text: Option<String>,
+    /// Image source for image blocks.
     #[serde(default)]
     pub source: Option<ImageSource>,
+    /// Tool use identifier for `tool_use` blocks.
     #[serde(default)]
     pub id: Option<String>,
+    /// Tool name for `tool_use` blocks.
     #[serde(default)]
     pub name: Option<String>,
+    /// JSON input payload for `tool_use` blocks.
     #[serde(default)]
     pub input: Option<Value>,
+    /// Referenced tool call identifier for `tool_result` blocks.
     #[serde(default)]
     pub tool_use_id: Option<String>,
+    /// Structured or plain-text tool result content.
     #[serde(default)]
     pub content: Option<ToolResultContent>,
+    /// Reasoning text for `thinking` blocks.
     #[serde(default)]
     pub thinking: Option<String>,
+    /// Optional signature attached to signed thinking blocks.
     #[serde(default)]
     pub signature: Option<String>,
 }
@@ -113,10 +143,13 @@ pub struct ContentBlock {
 /// Base64 image source accepted by the Anthropic Messages API.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct ImageSource {
+    /// Source type, typically `base64`.
     #[serde(rename = "type")]
     pub kind: String,
+    /// MIME type for the encoded image.
     #[serde(default)]
     pub media_type: Option<String>,
+    /// Base64-encoded image payload.
     #[serde(default)]
     pub data: Option<String>,
 }
@@ -125,16 +158,21 @@ pub struct ImageSource {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum ToolResultContent {
+    /// Plain-text tool output.
     Text(String),
+    /// Structured tool output blocks.
     Blocks(Vec<ContentBlock>),
 }
 
 /// Anthropic tool definition.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct ToolDefinition {
+    /// Tool name exposed to the model.
     pub name: String,
+    /// Optional human-readable description.
     #[serde(default)]
     pub description: Option<String>,
+    /// JSON Schema describing accepted tool input.
     #[serde(default)]
     pub input_schema: Option<Value>,
 }
@@ -142,14 +180,22 @@ pub struct ToolDefinition {
 /// Anthropic Messages API response body.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct MessageResponse {
+    /// Anthropic message identifier.
     pub id: String,
+    /// Object kind, always `message`.
     #[serde(rename = "type")]
     pub kind: &'static str,
+    /// Message role, always `assistant` for generated responses.
     pub role: &'static str,
+    /// Model identifier that produced the response.
     pub model: String,
+    /// Response content blocks in Anthropic format.
     pub content: Vec<ResponseContentBlock>,
+    /// Terminal reason reported to Anthropic clients.
     pub stop_reason: &'static str,
+    /// Matching stop sequence when one caused termination.
     pub stop_sequence: Option<String>,
+    /// Token usage metadata.
     pub usage: ResponseUsage,
 }
 
@@ -157,12 +203,20 @@ pub struct MessageResponse {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(tag = "type")]
 pub enum ResponseContentBlock {
+    /// Plain text response content.
     #[serde(rename = "text")]
-    Text { text: String },
+    Text {
+        /// Text emitted for this response block.
+        text: String,
+    },
+    /// Tool invocation content.
     #[serde(rename = "tool_use")]
     ToolUse {
+        /// Tool call identifier.
         id: String,
+        /// Tool name.
         name: String,
+        /// Parsed JSON tool input.
         input: Value,
     },
 }
@@ -170,35 +224,48 @@ pub enum ResponseContentBlock {
 /// Anthropic usage fields for Messages responses.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ResponseUsage {
+    /// Estimated or reported prompt token count.
     pub input_tokens: u32,
+    /// Estimated or reported output token count.
     pub output_tokens: u32,
 }
 
 /// Anthropic token counting response body.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct CountTokensResponse {
+    /// Estimated input token count for the submitted request.
     pub input_tokens: u32,
 }
 
 /// SSE payload for `message_start`.
 #[derive(Debug, Clone, Serialize)]
 pub struct MessageStartEvent {
+    /// Event payload type, always `message_start`.
     #[serde(rename = "type")]
     pub kind: &'static str,
+    /// Initial partial message object for the stream.
     pub message: StreamingMessage,
 }
 
 /// Partial message object used by stream events.
 #[derive(Debug, Clone, Serialize)]
 pub struct StreamingMessage {
+    /// Anthropic message identifier shared across the stream.
     pub id: String,
+    /// Object kind, always `message`.
     #[serde(rename = "type")]
     pub kind: &'static str,
+    /// Message role, always `assistant`.
     pub role: &'static str,
+    /// Content blocks accumulated so far.
     pub content: Vec<Value>,
+    /// Model identifier producing the stream.
     pub model: String,
+    /// Final stop reason, omitted until the stream ends.
     pub stop_reason: Option<String>,
+    /// Final stop sequence, if any.
     pub stop_sequence: Option<String>,
+    /// Incremental token usage metadata.
     pub usage: ResponseUsage,
 }
 
@@ -510,6 +577,9 @@ fn append_assistant_message(messages: &mut Vec<ChatMessage>, message: &Message) 
             tool_calls: None,
         }),
         MessageContent::Blocks(blocks) => {
+            // Anthropic can interleave text and tool_use blocks in one assistant
+            // turn; flatten text into one assistant message and preserve tool
+            // calls in the dedicated OpenAI-compatible field.
             let text = blocks
                 .iter()
                 .filter_map(|block| match block.kind.as_str() {
@@ -548,6 +618,8 @@ fn tool_call_from_block(block: &ContentBlock) -> Result<ToolCall> {
                 .name
                 .clone()
                 .ok_or_else(|| Error::config("tool_use block missing name"))?,
+            // Preserve the JSON object as a string because the OpenAI-style
+            // request shape stores function arguments as encoded JSON text.
             arguments: block.input.clone().unwrap_or_else(|| json!({})).to_string(),
         },
     })
@@ -622,6 +694,8 @@ fn tool_result_text(content: Option<&ToolResultContent>) -> String {
 }
 
 fn parse_arguments(arguments: &str) -> Value {
+    // Anthropic expects parsed JSON input for tool_use blocks; keep malformed
+    // arguments accessible instead of failing the entire response conversion.
     serde_json::from_str(arguments).unwrap_or_else(|_| json!({ "_raw": arguments }))
 }
 
@@ -668,6 +742,8 @@ fn append_block_text(text: &mut String, block: &ContentBlock) {
 }
 
 fn sse_event(event: &str, payload: &impl Serialize) -> Result<Event> {
+    // Axum's SSE helper takes a string payload, so serialize the Anthropic
+    // event envelope once here before attaching the event name.
     let data = serde_json::to_string(payload)?;
     Ok(Event::default().event(event).data(data))
 }

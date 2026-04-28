@@ -16,24 +16,36 @@ use url::Url;
 pub use callback::{CallbackOutcome, CallbackServer};
 pub use pkce::{code_challenge, generate_pkce};
 
+/// OAuth client identifier used by the Codex desktop-style authorization flow.
 pub const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+/// Authorization endpoint used to start the browser-based OAuth flow.
 pub const AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
+/// Token endpoint used for authorization code exchange and refresh requests.
 pub const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+/// Local callback URL registered for the OAuth authorization code flow.
 pub const REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
+/// OAuth scopes requested for the local Codex session.
 pub const SCOPE: &str = "openid profile email offline_access";
 
 const JWT_CLAIM_PATH: &str = "https://api.openai.com/auth";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Values needed to complete an OAuth authorization code flow with PKCE.
 pub struct AuthorizationFlow {
+    /// PKCE verifier that must be supplied during code exchange.
     pub verifier: String,
+    /// CSRF protection token that must match the callback payload.
     pub state: String,
+    /// Fully constructed authorization URL to open in the browser.
     pub authorize_url: Url,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Normalized authorization data parsed from CLI or callback input.
 pub struct AuthorizationInput {
+    /// Authorization code returned by the OAuth provider, if present.
     pub code: Option<String>,
+    /// State value returned by the OAuth provider, if present.
     pub state: Option<String>,
 }
 
@@ -45,6 +57,7 @@ struct TokenResponse {
 }
 
 #[derive(Clone)]
+/// Minimal OAuth client for exchanging and refreshing Codex credentials.
 pub struct CodexOAuthClient {
     http: Client,
     token_url: String,
@@ -57,6 +70,7 @@ impl Default for CodexOAuthClient {
 }
 
 impl CodexOAuthClient {
+    /// Creates an OAuth client backed by the provided HTTP client.
     pub fn new(http: Client) -> Self {
         Self {
             http,
@@ -72,6 +86,7 @@ impl CodexOAuthClient {
         }
     }
 
+    /// Exchanges an authorization code plus PKCE verifier for stored credentials.
     pub async fn exchange_authorization_code(
         &self,
         code: &str,
@@ -93,6 +108,7 @@ impl CodexOAuthClient {
         parse_token_response(response, "code exchange").await
     }
 
+    /// Refreshes an existing refresh token and returns replacement credentials.
     pub async fn refresh_token(&self, refresh_token: &str) -> Result<Credentials> {
         let response = self
             .http
@@ -109,6 +125,7 @@ impl CodexOAuthClient {
     }
 }
 
+/// Creates a browser-ready OAuth flow and the local state needed to validate it.
 pub fn create_authorization_flow(originator: &str) -> Result<AuthorizationFlow> {
     let Pkce {
         verifier,
@@ -136,6 +153,7 @@ pub fn create_authorization_flow(originator: &str) -> Result<AuthorizationFlow> 
     })
 }
 
+/// Parses authorization input from a full callback URL, query string, or raw code.
 pub fn parse_authorization_input(input: &str) -> AuthorizationInput {
     let value = input.trim();
     if value.is_empty() {
@@ -152,6 +170,7 @@ pub fn parse_authorization_input(input: &str) -> AuthorizationInput {
         };
     }
 
+    // Support the shell-friendly `code#state` format printed by some helpers.
     if let Some((code, state)) = value.split_once('#') {
         return AuthorizationInput {
             code: non_empty(code),
@@ -169,6 +188,7 @@ pub fn parse_authorization_input(input: &str) -> AuthorizationInput {
     }
 }
 
+/// Extracts the ChatGPT account identifier embedded in an OAuth access token.
 pub fn account_id_from_access_token(access_token: &str) -> Result<String> {
     let payload = decode_jwt_payload(access_token)?;
     let account_id = payload
@@ -204,6 +224,7 @@ fn parse_query_like_input(value: &str) -> AuthorizationInput {
         .map(|(_, query)| query)
         .unwrap_or(value)
         .trim_start_matches('?');
+    // Ignore any fragment suffix so pasted callback URLs and raw query strings behave the same.
     let query = query
         .split_once('#')
         .map(|(query, _)| query)
@@ -247,6 +268,7 @@ async fn parse_token_response(response: reqwest::Response, operation: &str) -> R
         return Err(Error::oauth("OAuth token response has invalid expires_in"));
     }
 
+    // The Codex API expects the account id in a header, so normalize it once here.
     let account_id = account_id_from_access_token(&token.access_token)?;
     Ok(Credentials {
         access_token: token.access_token,

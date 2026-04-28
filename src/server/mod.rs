@@ -56,6 +56,7 @@ pub async fn serve(addr: SocketAddr, state: AppState) -> Result<()> {
 
 /// Builds the HTTP router for all supported endpoints.
 pub fn router(state: AppState) -> Router {
+    // Keep route registration centralized so the server surface stays easy to audit.
     Router::new()
         .route("/health", get(handlers::health))
         .route("/v1/auth/refresh", post(handlers::manual_refresh))

@@ -22,15 +22,18 @@ use reqwest::{
 use serde_json::Value;
 use std::pin::Pin;
 
+/// Default upstream base URL for Codex response requests.
 pub const DEFAULT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api";
 
 #[derive(Clone)]
+/// HTTP client wrapper for the ChatGPT Codex responses backend.
 pub struct CodexClient {
     http: Client,
     base_url: String,
 }
 
 impl CodexClient {
+    /// Creates a Codex client with the provided HTTP client and backend base URL.
     pub fn new(http: Client, base_url: impl Into<String>) -> Self {
         Self {
             http,
@@ -38,14 +41,17 @@ impl CodexClient {
         }
     }
 
+    /// Returns the default upstream base URL used by the client.
     pub fn default_base_url() -> &'static str {
         DEFAULT_CODEX_BASE_URL
     }
 
+    /// Returns the configured upstream base URL.
     pub fn base_url(&self) -> &str {
         &self.base_url
     }
 
+    /// Sends a non-streaming chat completion request and collects the full response body.
     pub async fn complete_chat(
         &self,
         request: crate::openai::types::ChatCompletionRequest,
@@ -79,6 +85,7 @@ impl CodexClient {
         })
     }
 
+    /// Sends a streaming chat completion request and yields OpenAI-compatible chunks.
     pub async fn stream_chat(
         &self,
         request: crate::openai::types::ChatCompletionRequest,
@@ -109,10 +116,12 @@ impl CodexClient {
                 if let Some(tool_call) = event_tool_call(&event)
                     && seen_tool_call_ids.insert(tool_call.id.clone())
                 {
+                    // The SSE stream can repeat tool calls across incremental and completed events.
                     yield chunk_with_tool_call(&id, created, &model, tool_call_count, tool_call);
                     tool_call_count += 1;
                 }
                 if is_done_event(&event) {
+                    // Some tool calls appear only on the terminal completed event.
                     for tool_call in response_tool_calls(&event) {
                         if seen_tool_call_ids.insert(tool_call.id.clone()) {
                             yield chunk_with_tool_call(&id, created, &model, tool_call_count, tool_call);
@@ -159,6 +168,7 @@ impl CodexClient {
     }
 }
 
+/// Resolves a configured base URL into the concrete Codex responses endpoint.
 pub fn resolve_codex_url(base_url: &str) -> String {
     let normalized = base_url.trim_end_matches('/');
     if normalized.ends_with("/codex/responses") {
@@ -170,6 +180,7 @@ pub fn resolve_codex_url(base_url: &str) -> String {
     }
 }
 
+/// Builds the required HTTP headers for authenticated Codex backend requests.
 pub fn codex_headers(credentials: &Credentials) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -197,6 +208,7 @@ pub fn codex_headers(credentials: &Credentials) -> Result<HeaderMap> {
 async fn parse_error_response(response: Response) -> Error {
     let status = response.status();
     let text = response.text().await.unwrap_or_default();
+    // Prefer the structured upstream error message when the backend provides one.
     let message = serde_json::from_str::<Value>(&text)
         .ok()
         .and_then(|value| {

@@ -1,3 +1,5 @@
+#![deny(missing_docs)]
+
 //! `codexia` command-line entrypoint.
 //!
 //! The binary provides login, serving, token refresh, status inspection, and

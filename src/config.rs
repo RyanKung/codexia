@@ -6,19 +6,26 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+/// Persisted OAuth credentials used to authenticate API requests.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Credentials {
+    /// Bearer token used for authenticated API calls.
     pub access_token: String,
+    /// Long-lived token used to mint a new access token.
     pub refresh_token: String,
+    /// Access-token expiration timestamp, expressed as Unix seconds.
     pub expires_at: i64,
+    /// Upstream account identifier associated with the token pair.
     pub account_id: String,
 }
 
 impl Credentials {
+    /// Returns whether the credentials should be considered expired at `now_unix`.
     pub fn is_expired_at(&self, now_unix: i64, skew_secs: i64) -> bool {
         self.expires_at.saturating_sub(skew_secs) <= now_unix
     }
 
+    /// Returns whether the credentials are expired relative to the current system time.
     pub fn is_expired(&self, skew_secs: i64) -> bool {
         self.is_expired_at(now_unix(), skew_secs)
     }
@@ -27,26 +34,33 @@ impl Credentials {
 /// Persisted runtime defaults used by `serve` and `daemon install`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct AppConfig {
+    /// Hostname or IP address the service should bind to.
     #[serde(default)]
     pub bind_host: Option<String>,
+    /// TCP port the service should bind to.
     #[serde(default)]
     pub bind_port: Option<u16>,
+    /// Override path for the persisted authentication file.
     #[serde(default)]
     pub auth_file: Option<PathBuf>,
+    /// Static API key to expose from the local service, when configured.
     #[serde(default)]
     pub api_key: Option<String>,
 }
 
+/// Loads and saves persisted OAuth credentials from a single file.
 #[derive(Debug, Clone)]
 pub struct AuthStore {
     path: PathBuf,
 }
 
 impl AuthStore {
+    /// Creates a store for credentials at `path`.
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
     }
 
+    /// Returns the default credential file path derived from environment variables.
     pub fn default_path() -> Result<PathBuf> {
         if let Ok(path) = env::var("CODEXIA_AUTH_FILE") {
             return Ok(PathBuf::from(path));
@@ -59,14 +73,17 @@ impl AuthStore {
         Ok(PathBuf::from(home).join(".codexia").join("auth.json"))
     }
 
+    /// Creates a credential store that uses the default path resolution rules.
     pub fn from_default_path() -> Result<Self> {
         Ok(Self::new(Self::default_path()?))
     }
 
+    /// Returns the on-disk path used by this store.
     pub fn path(&self) -> &Path {
         &self.path
     }
 
+    /// Loads credentials from disk, or `None` when the file does not exist.
     pub fn load(&self) -> Result<Option<Credentials>> {
         match fs::read_to_string(&self.path) {
             Ok(raw) => Ok(Some(serde_json::from_str(&raw)?)),
@@ -75,6 +92,7 @@ impl AuthStore {
         }
     }
 
+    /// Persists credentials to disk using a private temporary file and atomic rename.
     pub fn save(&self, credentials: &Credentials) -> Result<()> {
         let parent = self
             .path
@@ -84,6 +102,7 @@ impl AuthStore {
 
         let tmp = self.path.with_extension("json.tmp");
         let bytes = serde_json::to_vec_pretty(credentials)?;
+        // Write to a sibling temp file first so a partial write never replaces the live secrets.
         write_secret_file(&tmp, &bytes)?;
         fs::rename(tmp, &self.path)?;
         Ok(())
@@ -97,22 +116,27 @@ pub struct AppConfigStore {
 }
 
 impl AppConfigStore {
+    /// Creates a store for application configuration at `path`.
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
     }
 
+    /// Returns the default application configuration path.
     pub fn default_path() -> Result<PathBuf> {
         Ok(codexia_home()?.join("config.json"))
     }
 
+    /// Creates a configuration store that uses the default path resolution rules.
     pub fn from_default_path() -> Result<Self> {
         Ok(Self::new(Self::default_path()?))
     }
 
+    /// Returns the on-disk path used by this store.
     pub fn path(&self) -> &Path {
         &self.path
     }
 
+    /// Loads configuration from disk, or `None` when the file does not exist.
     pub fn load(&self) -> Result<Option<AppConfig>> {
         match fs::read_to_string(&self.path) {
             Ok(raw) => Ok(Some(serde_json::from_str(&raw)?)),
@@ -121,6 +145,7 @@ impl AppConfigStore {
         }
     }
 
+    /// Persists configuration to disk using a private temporary file and atomic rename.
     pub fn save(&self, config: &AppConfig) -> Result<()> {
         let parent = self
             .path
@@ -130,11 +155,13 @@ impl AppConfigStore {
 
         let tmp = self.path.with_extension("json.tmp");
         let bytes = serde_json::to_vec_pretty(config)?;
+        // Use the same temp-file pattern as auth storage so readers never observe truncated JSON.
         write_secret_file(&tmp, &bytes)?;
         fs::rename(tmp, &self.path)?;
         Ok(())
     }
 
+    /// Removes the persisted configuration file when it exists.
     pub fn delete(&self) -> Result<()> {
         match fs::remove_file(&self.path) {
             Ok(()) => Ok(()),
@@ -144,6 +171,7 @@ impl AppConfigStore {
     }
 }
 
+/// Returns the current Unix timestamp in seconds.
 pub fn now_unix() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

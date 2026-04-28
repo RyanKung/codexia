@@ -3,6 +3,7 @@ use crate::openai::types::{
 };
 use serde_json::{Value, json};
 
+/// Normalizes model IDs by removing the `openai-codex/` prefix when present.
 pub fn normalize_model(model: &str) -> String {
     model
         .strip_prefix("openai-codex/")
@@ -10,6 +11,7 @@ pub fn normalize_model(model: &str) -> String {
         .to_owned()
 }
 
+/// Converts a chat completions request into the JSON body expected by Codex.
 pub fn to_codex_request(request: &ChatCompletionRequest) -> Value {
     let (instructions, input) = split_messages(&request.messages);
     let mut body = json!({

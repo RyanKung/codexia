@@ -11,22 +11,29 @@ const CALLBACK_ADDR: &str = "127.0.0.1:1455";
 const MAX_REQUEST_BYTES: usize = 8192;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Outcome of waiting for the local OAuth redirect callback.
 pub enum CallbackOutcome {
+    /// Received a valid authorization code from the callback request.
     Code(String),
+    /// No valid callback arrived before the timeout elapsed.
     TimedOut,
+    /// Binding the local callback listener failed with the given message.
     BindFailed(String),
 }
 
+/// Local HTTP listener that receives the OAuth redirect callback.
 pub struct CallbackServer {
     listener: TcpListener,
 }
 
 impl CallbackServer {
+    /// Binds the local callback listener on the fixed OAuth redirect address.
     pub async fn bind() -> Result<Self> {
         let listener = TcpListener::bind(CALLBACK_ADDR).await?;
         Ok(Self { listener })
     }
 
+    /// Waits for a callback request with the expected state and returns its outcome.
     pub async fn receive_code(
         self,
         expected_state: &str,

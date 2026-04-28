@@ -10,14 +10,20 @@ use futures_util::StreamExt;
 use reqwest::Response;
 use serde_json::Value;
 
+/// Aggregated output built from a streamed Codex response.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct ChatOutput {
+    /// Concatenated assistant text collected from deltas or final message items.
     pub text: String,
+    /// Function calls emitted by the model during the response.
     pub tool_calls: Vec<ToolCall>,
+    /// Token usage reported by the upstream response, when available.
     pub usage: Option<Usage>,
+    /// OpenAI-compatible finish reason derived from the terminal response event.
     pub finish_reason: String,
 }
 
+/// Consumes a streamed Codex HTTP response and folds its SSE events into one output.
 pub async fn collect_output(response: Response) -> Result<ChatOutput> {
     let mut events = Box::pin(sse::json_events(Box::pin(response.bytes_stream())));
     let mut output = ChatOutput {
@@ -40,6 +46,7 @@ pub async fn collect_output(response: Response) -> Result<ChatOutput> {
     Ok(output)
 }
 
+/// Applies one parsed Codex event to an in-progress chat output.
 pub fn apply_event(output: &mut ChatOutput, event: &Value) -> Result<()> {
     if let Some(message) = event_error(event) {
         return Err(Error::upstream(message));
@@ -49,6 +56,8 @@ pub fn apply_event(output: &mut ChatOutput, event: &Value) -> Result<()> {
         output.text.push_str(&delta);
     }
 
+    // Streaming item completion events are the earliest stable point where
+    // function calls can be collected without waiting for the final envelope.
     if matches!(event_type(event), Some("response.output_item.done"))
         && let Some(item) = event.get("item")
     {
@@ -59,6 +68,8 @@ pub fn apply_event(output: &mut ChatOutput, event: &Value) -> Result<()> {
         if let Some(usage) = parse_usage(response.get("usage")) {
             output.usage = Some(usage);
         }
+        // Some responses only expose final text in the completed output array,
+        // so backfill it if no incremental text deltas were observed.
         if output.text.is_empty() {
             for item in response
                 .get("output")
@@ -78,6 +89,7 @@ pub fn apply_event(output: &mut ChatOutput, event: &Value) -> Result<()> {
     Ok(())
 }
 
+/// Extracts a text delta from a streaming event, if the event carries one.
 pub fn text_delta(event: &Value) -> Option<String> {
     matches!(event_type(event), Some("response.output_text.delta"))
         .then(|| {
@@ -89,6 +101,7 @@ pub fn text_delta(event: &Value) -> Option<String> {
         .flatten()
 }
 
+/// Returns whether an event marks the end of a streamed Codex response.
 pub fn is_done_event(event: &Value) -> bool {
     matches!(
         event_type(event),
@@ -96,6 +109,7 @@ pub fn is_done_event(event: &Value) -> bool {
     )
 }
 
+/// Maps a terminal Codex event to the finish reason exposed to chat clients.
 pub fn finish_reason(event: &Value) -> &'static str {
     match event_type(event) {
         Some("response.incomplete") => "length",
@@ -103,6 +117,7 @@ pub fn finish_reason(event: &Value) -> &'static str {
     }
 }
 
+/// Extracts an upstream error message from an event, if the event represents failure.
 pub fn event_error(event: &Value) -> Option<String> {
     match event_type(event) {
         Some("error") => event
@@ -120,6 +135,7 @@ pub fn event_error(event: &Value) -> Option<String> {
     }
 }
 
+/// Extracts a completed function call from a streaming output-item event.
 pub fn event_tool_call(event: &Value) -> Option<ToolCall> {
     matches!(event_type(event), Some("response.output_item.done"))
         .then(|| event.get("item"))
@@ -127,6 +143,7 @@ pub fn event_tool_call(event: &Value) -> Option<ToolCall> {
         .and_then(parse_tool_call)
 }
 
+/// Extracts function calls from the final `response.output` payload on a terminal event.
 pub fn response_tool_calls(event: &Value) -> Vec<ToolCall> {
     event
         .get("response")

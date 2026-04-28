@@ -1,6 +1,7 @@
 use crate::{Result, openai::response::ModelList};
 use std::collections::HashSet;
 
+/// Default OpenAI-compatible model identifiers exposed by the project.
 pub const OPENCLAW_CODEX_MODELS: &[&str] = &[
     "gpt-5.1",
     "gpt-5.1-codex-max",
@@ -15,10 +16,12 @@ pub const OPENCLAW_CODEX_MODELS: &[&str] = &[
     "gpt-5.5-mini",
 ];
 
+/// Resolves the default model identifiers into a trimmed, de-duplicated list.
 pub fn resolve_model_ids() -> Vec<String> {
     normalize_model_ids(OPENCLAW_CODEX_MODELS.iter().map(ToString::to_string))
 }
 
+/// Builds a [`ModelList`] from the default model identifiers.
 pub fn resolve_model_list() -> Result<ModelList> {
     Ok(ModelList::from_ids(resolve_model_ids()))
 }

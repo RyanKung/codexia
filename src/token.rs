@@ -8,6 +8,7 @@ use tokio::sync::RwLock;
 
 const REFRESH_SKEW_SECS: i64 = 60;
 
+/// Keeps OAuth credentials cached in memory and refreshes them when needed.
 #[derive(Clone)]
 pub struct TokenManager {
     store: AuthStore,
@@ -16,6 +17,7 @@ pub struct TokenManager {
 }
 
 impl TokenManager {
+    /// Creates a token manager backed by the given credential store and OAuth client.
     pub fn new(store: AuthStore, oauth: CodexOAuthClient) -> Self {
         let cached = store.load().unwrap_or(None);
         Self {
@@ -25,10 +27,12 @@ impl TokenManager {
         }
     }
 
+    /// Returns the currently cached credentials without forcing a refresh.
     pub async fn credentials_snapshot(&self) -> Option<Credentials> {
         self.cached.read().await.clone()
     }
 
+    /// Refreshes the current credentials immediately and persists the new tokens.
     pub async fn refresh(&self) -> Result<Credentials> {
         let mut guard = self.cached.write().await;
         let credentials = guard.clone().or(self.store.load()?).ok_or_else(|| {
@@ -41,7 +45,9 @@ impl TokenManager {
         Ok(refreshed)
     }
 
+    /// Returns valid credentials, refreshing them when they are near expiry.
     pub async fn credentials(&self) -> Result<Credentials> {
+        // Check the shared cache first so uncontended reads avoid disk I/O and refresh traffic.
         if let Some(credentials) = self.cached.read().await.clone()
             && !credentials.is_expired(REFRESH_SKEW_SECS)
         {
@@ -58,6 +64,7 @@ impl TokenManager {
             }
         };
 
+        // Refresh slightly before the exact expiry time so callers do not race a token timeout.
         if !credentials.is_expired(REFRESH_SKEW_SECS) {
             *guard = Some(credentials.clone());
             return Ok(credentials);

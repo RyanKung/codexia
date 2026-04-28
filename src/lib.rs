@@ -1,3 +1,5 @@
+#![deny(missing_docs)]
+
 //! Core library for `codexia`.
 //!
 //! The library owns the OAuth flow, token lifecycle, upstream Codex client,

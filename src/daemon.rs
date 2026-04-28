@@ -8,14 +8,20 @@ use std::{
 const LAUNCHD_LABEL: &str = "com.codexia.daemon";
 const SYSTEMD_UNIT: &str = "codexia.service";
 
+/// Options used to install the user-scoped background daemon service.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonInstallOptions {
+    /// Absolute or resolvable path to the `codexia` executable to launch.
     pub executable: PathBuf,
+    /// Bind address passed to `codexia serve`.
     pub bind: String,
+    /// Optional auth file passed through to the daemon process.
     pub auth_file: Option<PathBuf>,
+    /// Optional API key injected into the daemon process arguments.
     pub api_key: Option<String>,
 }
 
+/// Installs the daemon service definition for the current platform.
 pub fn install(options: DaemonInstallOptions) -> Result<()> {
     match platform()? {
         Platform::MacOs => install_launchd(options),
@@ -23,11 +29,13 @@ pub fn install(options: DaemonInstallOptions) -> Result<()> {
     }
 }
 
+/// Reinstalls the daemon by removing any existing service definition first.
 pub fn reinstall(options: DaemonInstallOptions) -> Result<()> {
     uninstall()?;
     install(options)
 }
 
+/// Starts the installed daemon service for the current user.
 pub fn start() -> Result<()> {
     match platform()? {
         Platform::MacOs => {
@@ -45,6 +53,7 @@ pub fn start() -> Result<()> {
     }
 }
 
+/// Stops the running daemon service for the current user.
 pub fn stop() -> Result<()> {
     match platform()? {
         Platform::MacOs => {
@@ -55,6 +64,7 @@ pub fn stop() -> Result<()> {
     }
 }
 
+/// Restarts the daemon service for the current user.
 pub fn restart() -> Result<()> {
     match platform()? {
         Platform::MacOs => {
@@ -66,6 +76,7 @@ pub fn restart() -> Result<()> {
     }
 }
 
+/// Removes the daemon service definition and stops it if it is running.
 pub fn uninstall() -> Result<()> {
     match platform()? {
         Platform::MacOs => {
@@ -119,6 +130,8 @@ fn install_systemd(options: DaemonInstallOptions) -> Result<()> {
 }
 
 fn serve_args(options: &DaemonInstallOptions) -> Vec<String> {
+    // Build the exact argv list so both launchd and systemd invoke `codexia serve`
+    // without relying on shell parsing.
     let mut args = vec![
         options.executable.display().to_string(),
         "serve".to_owned(),
@@ -138,6 +151,8 @@ fn serve_args(options: &DaemonInstallOptions) -> Vec<String> {
 }
 
 fn launchd_plist(options: &DaemonInstallOptions, log_dir: &Path) -> String {
+    // launchd expects each argument as a distinct XML string entry in
+    // `ProgramArguments`, so escape each value before embedding it.
     let args = serve_args(options)
         .into_iter()
         .map(|arg| format!("        <string>{}</string>", xml_escape(&arg)))
@@ -176,6 +191,8 @@ fn launchd_plist(options: &DaemonInstallOptions, log_dir: &Path) -> String {
 }
 
 fn systemd_unit(options: &DaemonInstallOptions) -> String {
+    // Quote each argument individually because `ExecStart=` is parsed as a single
+    // command line by systemd rather than as a structured argv array.
     let command = serve_args(options)
         .into_iter()
         .map(|arg| systemd_quote(&arg))
