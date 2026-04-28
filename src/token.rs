@@ -32,7 +32,7 @@ impl TokenManager {
     pub async fn refresh(&self) -> Result<Credentials> {
         let mut guard = self.cached.write().await;
         let credentials = guard.clone().or(self.store.load()?).ok_or_else(|| {
-            Error::config("not logged in; run `codexia login` before refreshing tokens")
+            Error::config("not logged in; run `codexio login` before refreshing tokens")
         })?;
 
         let refreshed = self.refresh_credentials(&credentials).await?;
@@ -53,7 +53,7 @@ impl TokenManager {
             Some(credentials) => credentials,
             None => {
                 return Err(Error::config(
-                    "not logged in; run `codexia login` before serving requests",
+                    "not logged in; run `codexio login` before serving requests",
                 ));
             }
         };

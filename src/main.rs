@@ -1,4 +1,4 @@
-//! `codexia` command-line entrypoint.
+//! `codexio` command-line entrypoint.
 //!
 //! The binary provides login, serving, token refresh, status inspection, and
 //! daemon management commands on top of the library modules exposed by
@@ -38,16 +38,16 @@ login flow. Credentials are stored locally and can be refreshed automatically
 during requests or manually with the refresh command/API.";
 const CLI_AFTER_LONG_HELP: &str = "\
 Examples:
-  codexia login
-  codexia config
-  codexia config show
-  codexia serve
-  codexia serve --bind 127.0.0.1:14550 --api-key local-secret
-  codexia daemon install
-  codexia daemon reinstall
-  codexia daemon start
-  codexia refresh
-  codexia status
+  codexio login
+  codexio config
+  codexio config show
+  codexio serve
+  codexio serve --bind 127.0.0.1:14550 --api-key local-secret
+  codexio daemon install
+  codexio daemon reinstall
+  codexio daemon start
+  codexio refresh
+  codexio status
   curl -X POST http://127.0.0.1:14550/v1/auth/refresh \\
     -H 'authorization: Bearer local-secret'
 
@@ -75,7 +75,7 @@ Copyright:
 /// Top-level CLI parser.
 #[derive(Debug, Parser)]
 #[command(
-    name = "codexia",
+    name = "codexio",
     version,
     about = "OpenAI- and Anthropic-compatible API gateway backed by Codex OAuth",
     long_about = CLI_LONG_ABOUT,
@@ -194,7 +194,7 @@ enum Command {
 enum DaemonCommand {
     #[command(
         about = "Install Codexia as a per-user autostart service",
-        long_about = "Write the service definition for the current user and enable autostart. Use `codexia daemon start` to start it immediately."
+        long_about = "Write the service definition for the current user and enable autostart. Use `codexio daemon start` to start it immediately."
     )]
     Install(#[command(flatten)] DaemonInstallCliOptions),
     #[command(
@@ -473,7 +473,7 @@ fn show_config(store: AppConfigStore) -> Result<()> {
             Ok(())
         }
         None => Err(Error::config(format!(
-            "no runtime config found at {}; run `codexia config` first",
+            "no runtime config found at {}; run `codexio config` first",
             store.path().display()
         ))),
     }
@@ -514,7 +514,7 @@ async fn login(store: AuthStore, originator: &str, no_browser: bool) -> Result<(
 async fn refresh(store: AuthStore) -> Result<()> {
     let credentials = store
         .load()?
-        .ok_or_else(|| Error::config("not logged in; run `codexia login` first"))?;
+        .ok_or_else(|| Error::config("not logged in; run `codexio login` first"))?;
     let refreshed = CodexOAuthClient::default()
         .refresh_token(&credentials.refresh_token)
         .await?;
@@ -766,7 +766,7 @@ fn spawn_token_expiry_display(token_manager: TokenManager) {
 async fn token_expiry_status(token_manager: &TokenManager) -> String {
     match token_manager.credentials_snapshot().await {
         Some(credentials) => token_expiry_message(&credentials),
-        None => "token status unavailable: not logged in; run `codexia login` first".to_owned(),
+        None => "token status unavailable: not logged in; run `codexio login` first".to_owned(),
     }
 }
 

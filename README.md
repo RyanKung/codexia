@@ -6,9 +6,10 @@ Anthropic-compatible APIs.
 ## Usage
 
 ```bash
-cargo run -- login
-cargo run -- config
-cargo run -- serve
+cargo install codexia
+codexio login
+codexio config
+codexio serve
 ```
 
 `login` prints the Codex OAuth URL. Complete the login in a browser, then paste
@@ -60,13 +61,13 @@ Full Claude Code flow:
 1. Log in and save Codex OAuth credentials:
 
    ```bash
-   codexia login
+   codexio login
    ```
 
 2. Start Codexia with a supported model list and a local API key:
 
    ```bash
-   codexia serve --bind 127.0.0.1:14550 --api-key local-secret
+   codexio serve --bind 127.0.0.1:14550 --api-key local-secret
    ```
 
 3. Point Claude Code at the local gateway:
@@ -95,25 +96,25 @@ Common pitfalls:
 - Do not set `ANTHROPIC_BASE_URL` to `http://127.0.0.1:14550/v1`; Claude Code appends `/v1/messages` itself.
 - Use a model that `/v1/models` actually returns, such as `gpt-5.5`. If Claude Code defaults to `claude-sonnet-*`, the request will fail because Codexia proxies Codex models, not Anthropic-hosted model IDs.
 - `ANTHROPIC_AUTH_TOKEN` is only the local gateway key configured with `--api-key`; it is not your upstream OpenAI/Codex OAuth token.
-- If you prefer a background service, install the daemon first and then point `ANTHROPIC_BASE_URL` at the daemon address instead of running `codexia serve` manually.
+- If you prefer a background service, install the daemon first and then point `ANTHROPIC_BASE_URL` at the daemon address instead of running `codexio serve` manually.
 
 Optional local API key protection:
 
 ```bash
-CODEXIA_API_KEY=local-secret cargo run -- serve
+CODEXIA_API_KEY=local-secret codexio serve
 curl http://127.0.0.1:14550/v1/models -H 'authorization: Bearer local-secret'
 ```
 
 Interactive runtime configuration:
 
 ```bash
-codexia config
-codexia config show
-codexia config reset
+codexio config
+codexio config show
+codexio config reset
 ```
 
 The config file is stored at `~/.codexia/config.json` by default and is used as
-the fallback source for `codexia serve` and `codexia daemon install`.
+the fallback source for `codexio serve` and `codexio daemon install`.
 
 Manually refresh the stored Codex OAuth token while the server is running:
 
@@ -125,7 +126,7 @@ curl -X POST http://127.0.0.1:14550/v1/auth/refresh \
 Check token expiry, account metadata, and available rate-limit windows:
 
 ```bash
-codexia status
+codexio status
 ```
 
 Fetch the same status data over HTTP:
@@ -179,22 +180,22 @@ Example response:
 Install Codexia as a per-user background daemon:
 
 ```bash
-codexia daemon install
-codexia daemon reinstall
-codexia daemon start
-codexia daemon restart
-codexia daemon stop
-codexia daemon uninstall
+codexio daemon install
+codexio daemon reinstall
+codexio daemon start
+codexio daemon restart
+codexio daemon stop
+codexio daemon uninstall
 ```
 
 On macOS, Codexia installs a LaunchAgent at
 `~/Library/LaunchAgents/com.codexia.daemon.plist`. On Linux, it installs a
 systemd user unit at `~/.config/systemd/user/codexia.service`.
 
-The daemon runs `codexia serve` with the options passed at install time:
+The daemon runs `codexio serve` with the options passed at install time:
 
 ```bash
-codexia daemon install \
+codexio daemon install \
   --bind 127.0.0.1:14550 \
   --api-key local-secret
 ```
@@ -218,9 +219,9 @@ gpt-5.5-mini
 Override or extend the list with CLI flags or environment variables:
 
 ```bash
-cargo run -- serve --models gpt-5.5,gpt-5.5-mini
-CODEXIA_EXTRA_MODELS=my-model cargo run -- serve
-CODEXIA_MODELS_FILE=models.json cargo run -- serve
+codexio serve --models gpt-5.5,gpt-5.5-mini
+CODEXIA_EXTRA_MODELS=my-model codexio serve
+CODEXIA_MODELS_FILE=models.json codexio serve
 ```
 
 `models.json` may be a JSON array or an object:

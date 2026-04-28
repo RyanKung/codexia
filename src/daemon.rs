@@ -39,7 +39,7 @@ pub fn start() -> Result<()> {
             let domain = launchd_domain()?;
             if !plist.exists() {
                 return Err(Error::config(
-                    "daemon is not installed; run `codexia daemon install` first",
+                    "daemon is not installed; run `codexio daemon install` first",
                 ));
             }
             run_command("launchctl", ["bootstrap", &domain, path_str(&plist)?])?;
@@ -103,7 +103,7 @@ fn install_launchd(options: DaemonInstallOptions) -> Result<()> {
     fs::create_dir_all(&log_dir)?;
     fs::write(&plist, launchd_plist(&options, &log_dir))?;
     println!("installed {}", plist.display());
-    println!("run `codexia daemon start` to start now; launchd will load it on login");
+    println!("run `codexio daemon start` to start now; launchd will load it on login");
     Ok(())
 }
 
@@ -118,7 +118,7 @@ fn install_systemd(options: DaemonInstallOptions) -> Result<()> {
     systemctl(["daemon-reload"])?;
     systemctl(["enable", SYSTEMD_UNIT])?;
     println!("installed {}", unit.display());
-    println!("run `codexia daemon start` to start now");
+    println!("run `codexio daemon start` to start now");
     Ok(())
 }
 
