@@ -1,6 +1,6 @@
 [package]
 name = "codexia"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.85"
 description = "OpenAI- and Anthropic-compatible local API gateway backed by Codex OAuth."
@@ -11,11 +11,11 @@ homepage = "https://github.com/RyanKung/codexia"
 documentation = "https://docs.rs/codexia"
 keywords = ["openai", "codex", "oauth", "gateway", "cli"]
 categories = ["command-line-utilities", "api-bindings", "web-programming::http-server"]
-default-run = "codexio"
+default-run = "codexia"
 include = ["src/**/*", "README.md", "LICENSE", "Cargo.toml", "Cargo.lock"]
 
 [[bin]]
-name = "codexio"
+name = "codexia"
 path = "src/main.rs"
 
 [package.metadata.docs.rs]
