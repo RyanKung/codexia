@@ -183,6 +183,7 @@ fn anthropic_sse_response(
         let mut stream = stream;
         let mut current_index = 0_u32;
         let mut text_open = false;
+        let mut output_tokens = 0_u32;
 
         match message_start_event(&id, &model, input_tokens) {
             Ok(event) => yield Ok(event),
@@ -202,6 +203,7 @@ fn anthropic_sse_response(
                     if let Some(text) = choice.delta.content
                         && !text.is_empty()
                     {
+                        output_tokens = output_tokens.saturating_add(estimate_stream_tokens(&text));
                         if !text_open {
                             match text_block_start(current_index) {
                                 Ok(event) => yield Ok(event),
@@ -239,6 +241,8 @@ fn anthropic_sse_response(
                             kind: tool_call.kind.to_owned(),
                             function: tool_call.function,
                         };
+                        output_tokens = output_tokens
+                            .saturating_add(estimate_stream_tokens(&tool_call.function.arguments));
 
                         for event in [
                             tool_block_start(current_index, &tool_call),
@@ -266,7 +270,10 @@ fn anthropic_sse_response(
                                 }
                             }
                         }
-                        for event in [message_delta_event(&reason), message_stop_event()] {
+                        for event in [
+                            message_delta_event(&reason, output_tokens),
+                            message_stop_event(),
+                        ] {
                             match event {
                                 Ok(event) => yield Ok(event),
                                 Err(error) => {
@@ -294,7 +301,7 @@ fn anthropic_sse_response(
                 }
             }
         }
-        for event in [message_delta_event("stop"), message_stop_event()] {
+        for event in [message_delta_event("stop", output_tokens), message_stop_event()] {
             match event {
                 Ok(event) => yield Ok(event),
                 Err(error) => {
@@ -316,4 +323,13 @@ fn anthropic_error_event(error: crate::Error) -> Event {
     Event::default()
         .event("error")
         .data(error_body(&error).to_string())
+}
+
+fn estimate_stream_tokens(text: &str) -> u32 {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        0
+    } else {
+        ((trimmed.chars().count() as u32) / 4).max(1)
+    }
 }

@@ -51,7 +51,9 @@ claude --model gpt-5.5
 ```
 
 `ANTHROPIC_BASE_URL` should point at the Codexia server root, not `/v1`,
-because Anthropic clients append `/v1/messages` themselves.
+because Anthropic clients append `/v1/messages` themselves. Streaming emits
+Anthropic-style `message_delta` `stop_reason` and cumulative
+`usage.output_tokens`.
 
 Optional local API key protection:
 

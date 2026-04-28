@@ -398,8 +398,8 @@ pub fn content_block_stop(index: u32) -> Result<Event> {
     )
 }
 
-/// Builds the terminal `message_delta` event.
-pub fn message_delta_event(stop_reason: &str) -> Result<Event> {
+/// Builds the terminal `message_delta` event with cumulative usage.
+pub fn message_delta_event(stop_reason: &str, output_tokens: u32) -> Result<Event> {
     sse_event(
         "message_delta",
         &json!({
@@ -407,6 +407,9 @@ pub fn message_delta_event(stop_reason: &str) -> Result<Event> {
             "delta": {
                 "stop_reason": map_stop_reason(stop_reason),
                 "stop_sequence": null
+            },
+            "usage": {
+                "output_tokens": output_tokens
             }
         }),
     )
