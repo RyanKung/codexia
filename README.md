@@ -55,6 +55,48 @@ because Anthropic clients append `/v1/messages` themselves. Streaming emits
 Anthropic-style `message_delta` `stop_reason` and cumulative
 `usage.output_tokens`.
 
+Full Claude Code flow:
+
+1. Log in and save Codex OAuth credentials:
+
+   ```bash
+   codexia login
+   ```
+
+2. Start Codexia with a supported model list and a local API key:
+
+   ```bash
+   codexia serve --bind 127.0.0.1:14550 --api-key local-secret
+   ```
+
+3. Point Claude Code at the local gateway:
+
+   ```bash
+   export ANTHROPIC_BASE_URL=http://127.0.0.1:14550
+   export ANTHROPIC_AUTH_TOKEN=local-secret
+   ```
+
+4. Run Claude Code against a model that Codexia exposes:
+
+   ```bash
+   claude --model gpt-5.5
+   ```
+
+For non-interactive validation, this works:
+
+```bash
+ANTHROPIC_BASE_URL=http://127.0.0.1:14550 \
+ANTHROPIC_AUTH_TOKEN=local-secret \
+claude -p --model gpt-5.5 "Reply with the single word OK"
+```
+
+Common pitfalls:
+
+- Do not set `ANTHROPIC_BASE_URL` to `http://127.0.0.1:14550/v1`; Claude Code appends `/v1/messages` itself.
+- Use a model that `/v1/models` actually returns, such as `gpt-5.5`. If Claude Code defaults to `claude-sonnet-*`, the request will fail because Codexia proxies Codex models, not Anthropic-hosted model IDs.
+- `ANTHROPIC_AUTH_TOKEN` is only the local gateway key configured with `--api-key`; it is not your upstream OpenAI/Codex OAuth token.
+- If you prefer a background service, install the daemon first and then point `ANTHROPIC_BASE_URL` at the daemon address instead of running `codexia serve` manually.
+
 Optional local API key protection:
 
 ```bash
