@@ -1,6 +1,7 @@
 # codexia
 
-Rust gateway that logs in with OpenAI Codex OAuth and exposes an OpenAI-compatible API.
+Rust gateway that logs in with OpenAI Codex OAuth and exposes OpenAI- and
+Anthropic-compatible APIs.
 
 ## Usage
 
@@ -26,6 +27,31 @@ curl http://127.0.0.1:14550/v1/chat/completions \
     "messages": [{"role": "user", "content": "hello"}]
   }'
 ```
+
+Anthropic-compatible Messages request:
+
+```bash
+curl http://127.0.0.1:14550/v1/messages \
+  -H 'content-type: application/json' \
+  -H 'x-api-key: local-secret' \
+  -H 'anthropic-version: 2023-06-01' \
+  -d '{
+    "model": "gpt-5.5",
+    "max_tokens": 1024,
+    "messages": [{"role": "user", "content": "hello"}]
+  }'
+```
+
+Claude Code / Anthropic SDK setup:
+
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:14550
+export ANTHROPIC_AUTH_TOKEN=local-secret
+claude --model gpt-5.5
+```
+
+`ANTHROPIC_BASE_URL` should point at the Codexia server root, not `/v1`,
+because Anthropic clients append `/v1/messages` themselves.
 
 Optional local API key protection:
 
@@ -110,6 +136,7 @@ Install Codexia as a per-user background daemon:
 
 ```bash
 codexia daemon install
+codexia daemon reinstall
 codexia daemon start
 codexia daemon restart
 codexia daemon stop
@@ -167,6 +194,18 @@ CODEXIA_MODELS_FILE=models.json cargo run -- serve
 
 Credentials are stored at `~/.codexia/auth.json` by default. Override with
 `--auth-file`, `CODEXIA_AUTH_FILE`, or `CODEXIA_HOME`.
+
+Anthropic compatibility currently covers:
+
+- `POST /v1/messages`
+- `POST /v1/messages/count_tokens`
+- `x-api-key` or `authorization: Bearer ...` local auth
+- Anthropic-style SSE events for streaming text and tool use
+
+The implementation intentionally follows Ollama's compatibility strategy where
+possible: Anthropic headers are accepted, locally configured auth is enforced,
+and unsupported advanced Anthropic-only features are ignored rather than
+rejected when possible.
 
 The OAuth flow follows OpenClaw/pi-ai's Codex flow: PKCE, manual paste of the
 `http://localhost:1455/auth/callback?...` redirect URL, token exchange at

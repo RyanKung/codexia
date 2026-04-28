@@ -27,6 +27,11 @@ pub fn install(options: DaemonInstallOptions) -> Result<()> {
     }
 }
 
+pub fn reinstall(options: DaemonInstallOptions) -> Result<()> {
+    uninstall()?;
+    install(options)
+}
+
 pub fn start() -> Result<()> {
     match platform()? {
         Platform::MacOs => {

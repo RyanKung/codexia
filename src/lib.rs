@@ -4,9 +4,11 @@
 //! HTTP server, and status inspection helpers used by both the CLI binary and
 //! any embedding integration.
 
+/// Anthropic-compatible Messages API request, response, and SSE adapters.
+pub mod anthropic;
 /// Codex upstream request/response adapters and streaming support.
 pub mod codex;
-/// Local credential storage and time utilities.
+/// Local credential storage, persisted runtime config, and time utilities.
 pub mod config;
 /// Background service installation and lifecycle management.
 pub mod daemon;

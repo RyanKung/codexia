@@ -1,6 +1,12 @@
 //! Route handlers and streaming response helpers for the HTTP server.
 
 use crate::{
+    anthropic::{
+        CountTokensResponse, MessagesRequest, content_block_stop, error_body,
+        estimate_input_tokens, from_openai_response, message_delta_event, message_start_event,
+        message_stop_event, text_block_start, text_delta, to_openai_request, tool_block_start,
+        tool_json_delta,
+    },
     error::Result,
     openai::types::ChatCompletionRequest,
     server::{AppState, auth::authorize, status_response::build_status_response},
@@ -90,6 +96,61 @@ pub async fn chat_completions(
     }
 }
 
+/// Anthropic-compatible Messages API handler used by Claude SDKs and Claude Code.
+pub async fn messages(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<MessagesRequest>,
+) -> Response {
+    if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
+        return anthropic_error_response(error);
+    }
+
+    let credentials = match state.token_manager.credentials().await {
+        Ok(credentials) => credentials,
+        Err(error) => return anthropic_error_response(error),
+    };
+    let openai_request = match to_openai_request(&request) {
+        Ok(request) => request,
+        Err(error) => return anthropic_error_response(error),
+    };
+
+    let input_tokens = estimate_input_tokens(&request);
+    let model = request.model.clone();
+
+    if request.wants_stream() {
+        match state.codex.stream_chat(openai_request, &credentials).await {
+            Ok(stream) => anthropic_sse_response(stream, model, input_tokens).into_response(),
+            Err(error) => anthropic_error_response(error),
+        }
+    } else {
+        match state
+            .codex
+            .complete_chat(openai_request, &credentials)
+            .await
+        {
+            Ok(response) => Json(from_openai_response(response)).into_response(),
+            Err(error) => anthropic_error_response(error),
+        }
+    }
+}
+
+/// Anthropic-compatible token counting endpoint.
+pub async fn count_message_tokens(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<MessagesRequest>,
+) -> Response {
+    if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
+        return anthropic_error_response(error);
+    }
+
+    Json(CountTokensResponse {
+        input_tokens: estimate_input_tokens(&request),
+    })
+    .into_response()
+}
+
 fn sse_response(
     stream: Pin<
         Box<dyn Stream<Item = Result<crate::openai::response::ChatCompletionChunk>> + Send>,
@@ -108,4 +169,151 @@ fn sse_response(
 
     let done = stream::once(async { Ok(Event::default().data("[DONE]")) });
     Sse::new(mapped.chain(done)).keep_alive(KeepAlive::default())
+}
+
+fn anthropic_sse_response(
+    stream: Pin<
+        Box<dyn Stream<Item = Result<crate::openai::response::ChatCompletionChunk>> + Send>,
+    >,
+    model: String,
+    input_tokens: u32,
+) -> Sse<impl Stream<Item = std::result::Result<Event, Infallible>>> {
+    let mapped = async_stream::stream! {
+        let id = format!("msg_{}", rand::random::<u64>());
+        let mut stream = stream;
+        let mut current_index = 0_u32;
+        let mut text_open = false;
+
+        match message_start_event(&id, &model, input_tokens) {
+            Ok(event) => yield Ok(event),
+            Err(error) => {
+                yield Ok(anthropic_error_event(error));
+                return;
+            }
+        }
+
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(chunk) => {
+                    let Some(choice) = chunk.choices.into_iter().next() else {
+                        continue;
+                    };
+
+                    if let Some(text) = choice.delta.content
+                        && !text.is_empty()
+                    {
+                        if !text_open {
+                            match text_block_start(current_index) {
+                                Ok(event) => yield Ok(event),
+                                Err(error) => {
+                                    yield Ok(anthropic_error_event(error));
+                                    return;
+                                }
+                            }
+                            text_open = true;
+                        }
+                        match text_delta(current_index, &text) {
+                            Ok(event) => yield Ok(event),
+                            Err(error) => {
+                                yield Ok(anthropic_error_event(error));
+                                return;
+                            }
+                        }
+                    }
+
+                    for tool_call in choice.delta.tool_calls.into_iter().flatten() {
+                        if text_open {
+                            match content_block_stop(current_index) {
+                                Ok(event) => yield Ok(event),
+                                Err(error) => {
+                                    yield Ok(anthropic_error_event(error));
+                                    return;
+                                }
+                            }
+                            current_index += 1;
+                            text_open = false;
+                        }
+
+                        let tool_call = crate::openai::types::ToolCall {
+                            id: tool_call.id,
+                            kind: tool_call.kind.to_owned(),
+                            function: tool_call.function,
+                        };
+
+                        for event in [
+                            tool_block_start(current_index, &tool_call),
+                            tool_json_delta(current_index, &tool_call.function.arguments),
+                            content_block_stop(current_index),
+                        ] {
+                            match event {
+                                Ok(event) => yield Ok(event),
+                                Err(error) => {
+                                    yield Ok(anthropic_error_event(error));
+                                    return;
+                                }
+                            }
+                        }
+                        current_index += 1;
+                    }
+
+                    if let Some(reason) = choice.finish_reason {
+                        if text_open {
+                            match content_block_stop(current_index) {
+                                Ok(event) => yield Ok(event),
+                                Err(error) => {
+                                    yield Ok(anthropic_error_event(error));
+                                    return;
+                                }
+                            }
+                        }
+                        for event in [message_delta_event(&reason), message_stop_event()] {
+                            match event {
+                                Ok(event) => yield Ok(event),
+                                Err(error) => {
+                                    yield Ok(anthropic_error_event(error));
+                                    return;
+                                }
+                            }
+                        }
+                        return;
+                    }
+                }
+                Err(error) => {
+                    yield Ok(anthropic_error_event(error));
+                    return;
+                }
+            }
+        }
+
+        if text_open {
+            match content_block_stop(current_index) {
+                Ok(event) => yield Ok(event),
+                Err(error) => {
+                    yield Ok(anthropic_error_event(error));
+                    return;
+                }
+            }
+        }
+        for event in [message_delta_event("stop"), message_stop_event()] {
+            match event {
+                Ok(event) => yield Ok(event),
+                Err(error) => {
+                    yield Ok(anthropic_error_event(error));
+                    return;
+                }
+            }
+        }
+    };
+
+    Sse::new(mapped).keep_alive(KeepAlive::default())
+}
+
+fn anthropic_error_response(error: crate::Error) -> Response {
+    (error.status_code(), Json(error_body(&error))).into_response()
+}
+
+fn anthropic_error_event(error: crate::Error) -> Event {
+    Event::default()
+        .event("error")
+        .data(error_body(&error).to_string())
 }

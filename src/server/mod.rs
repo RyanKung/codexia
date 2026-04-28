@@ -61,6 +61,11 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/auth/refresh", post(handlers::manual_refresh))
         .route("/v1/status", get(handlers::status))
         .route("/v1/models", get(handlers::models))
+        .route("/v1/messages", post(handlers::messages))
+        .route(
+            "/v1/messages/count_tokens",
+            post(handlers::count_message_tokens),
+        )
         .route("/v1/chat/completions", post(handlers::chat_completions))
         .with_state(state)
 }
@@ -157,6 +162,35 @@ mod tests {
         let app = Router::new()
             .route("/accounts/check/v4-2023-04-27", get(account_handler))
             .route("/wham/usage", get(usage_handler));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        url
+    }
+
+    async fn codex_complete_handler() -> impl axum::response::IntoResponse {
+        (
+            [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+            "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"OK\"}]}],\"usage\":{\"input_tokens\":12,\"output_tokens\":5,\"total_tokens\":17}}}\n\n",
+        )
+    }
+
+    async fn codex_tool_call_handler() -> impl axum::response::IntoResponse {
+        (
+            [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+            "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"lookup\",\"arguments\":\"{\\\"q\\\":\\\"x\\\"}\"}],\"usage\":{\"input_tokens\":7,\"output_tokens\":3,\"total_tokens\":10}}}\n\n",
+        )
+    }
+
+    async fn spawn_codex_server(tool_call: bool) -> String {
+        let app = if tool_call {
+            Router::new().route("/codex/responses", post(codex_tool_call_handler))
+        } else {
+            Router::new().route("/codex/responses", post(codex_complete_handler))
+        };
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move {
@@ -295,5 +329,130 @@ mod tests {
         assert!(value["rate_limits"][0]["reset_in_seconds"].is_number());
         assert!(value["token"]["expires_at_local"].is_string());
         assert!(value["warnings"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn messages_returns_anthropic_message_response() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AuthStore::new(dir.path().join("auth.json"));
+        store
+            .save(&Credentials {
+                access_token: "access".into(),
+                refresh_token: "refresh".into(),
+                expires_at: now_unix() + 600,
+                account_id: "acc_old".into(),
+            })
+            .unwrap();
+        let http = Client::new();
+        let state = AppState::new(
+            TokenManager::new(
+                store,
+                CodexOAuthClient::new_with_token_url(http.clone(), spawn_refresh_server().await),
+            ),
+            CodexClient::new(http, spawn_codex_server(false).await),
+            Some("secret".into()),
+            ModelList::from_ids(["gpt-5.5"]),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("secret"));
+
+        let response = handlers::messages(
+            axum::extract::State(state),
+            headers,
+            Json(
+                serde_json::from_value(json!({
+                    "model": "gpt-5.5",
+                    "max_tokens": 128,
+                    "messages": [{"role": "user", "content": "hello"}]
+                }))
+                .unwrap(),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value = serde_json::from_slice::<Value>(&body).unwrap();
+        assert_eq!(value["type"], "message");
+        assert_eq!(value["role"], "assistant");
+        assert_eq!(value["content"][0]["type"], "text");
+        assert_eq!(value["content"][0]["text"], "OK");
+        assert_eq!(value["stop_reason"], "end_turn");
+        assert_eq!(value["usage"]["input_tokens"], 12);
+    }
+
+    #[tokio::test]
+    async fn messages_returns_tool_use_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AuthStore::new(dir.path().join("auth.json"));
+        store
+            .save(&Credentials {
+                access_token: "access".into(),
+                refresh_token: "refresh".into(),
+                expires_at: now_unix() + 600,
+                account_id: "acc_old".into(),
+            })
+            .unwrap();
+        let http = Client::new();
+        let state = AppState::new(
+            TokenManager::new(
+                store,
+                CodexOAuthClient::new_with_token_url(http.clone(), spawn_refresh_server().await),
+            ),
+            CodexClient::new(http, spawn_codex_server(true).await),
+            Some("secret".into()),
+            ModelList::from_ids(["gpt-5.5"]),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("secret"));
+
+        let response = handlers::messages(
+            axum::extract::State(state),
+            headers,
+            Json(
+                serde_json::from_value(json!({
+                    "model": "gpt-5.5",
+                    "max_tokens": 128,
+                    "messages": [{"role": "user", "content": "hello"}]
+                }))
+                .unwrap(),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value = serde_json::from_slice::<Value>(&body).unwrap();
+        assert_eq!(value["content"][0]["type"], "tool_use");
+        assert_eq!(value["content"][0]["id"], "call_1");
+        assert_eq!(value["content"][0]["name"], "lookup");
+        assert_eq!(value["stop_reason"], "tool_use");
+    }
+
+    #[tokio::test]
+    async fn count_message_tokens_returns_estimate() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AuthStore::new(dir.path().join("auth.json"));
+        let state = test_state(store, spawn_refresh_server().await, Some("secret".into()));
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("secret"));
+
+        let response = handlers::count_message_tokens(
+            axum::extract::State(state),
+            headers,
+            Json(
+                serde_json::from_value(json!({
+                    "model": "gpt-5.5",
+                    "messages": [{"role": "user", "content": "Reply with the single word OK"}]
+                }))
+                .unwrap(),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value = serde_json::from_slice::<Value>(&body).unwrap();
+        assert!(value["input_tokens"].as_u64().unwrap() > 0);
     }
 }

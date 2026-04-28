@@ -4,7 +4,7 @@
 //! daemon management commands on top of the library modules exposed by
 //! `codexia`.
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use codexia::{
     Error, Result,
     codex::client::CodexClient,
@@ -29,12 +29,13 @@ use tokio::time::{MissedTickBehavior, interval};
 const INTERACTIVE_TOKEN_STATUS_INTERVAL: Duration = Duration::from_secs(1);
 const LOG_TOKEN_STATUS_INTERVAL: Duration = Duration::from_secs(60);
 const CLI_LONG_ABOUT: &str = "\
-Codexia is a local OpenAI-compatible API gateway backed by Codex OAuth.
+Codexia is a local OpenAI- and Anthropic-compatible API gateway backed by Codex
+OAuth.
 
-It helps clients that speak the OpenAI Chat Completions API call the Codex
-backend after you complete the OAuth login flow. Credentials are stored locally
-and can be refreshed automatically during requests or manually with the refresh
-command/API.";
+It helps clients that speak either the OpenAI Chat Completions API or the
+Anthropic Messages API call the Codex backend after you complete the OAuth
+login flow. Credentials are stored locally and can be refreshed automatically
+during requests or manually with the refresh command/API.";
 const CLI_AFTER_LONG_HELP: &str = "\
 Examples:
   codexia login
@@ -43,6 +44,7 @@ Examples:
   codexia serve
   codexia serve --bind 127.0.0.1:14550 --api-key local-secret
   codexia daemon install
+  codexia daemon reinstall
   codexia daemon start
   codexia refresh
   codexia status
@@ -75,7 +77,7 @@ Copyright:
 #[command(
     name = "codexia",
     version,
-    about = "OpenAI-compatible API gateway backed by Codex OAuth",
+    about = "OpenAI- and Anthropic-compatible API gateway backed by Codex OAuth",
     long_about = CLI_LONG_ABOUT,
     after_long_help = CLI_AFTER_LONG_HELP
 )]
@@ -113,8 +115,8 @@ enum Command {
         command: Option<ConfigCommand>,
     },
     #[command(
-        about = "Serve the OpenAI-compatible HTTP API",
-        long_about = "Serve OpenAI-compatible endpoints backed by Codex, including /v1/models, /v1/chat/completions, and /v1/auth/refresh."
+        about = "Serve the OpenAI- and Anthropic-compatible HTTP API",
+        long_about = "Serve OpenAI- and Anthropic-compatible endpoints backed by Codex, including /v1/models, /v1/chat/completions, /v1/messages, /v1/messages/count_tokens, and /v1/auth/refresh."
     )]
     Serve {
         #[arg(long, value_name = "ADDR", help = "Socket address to listen on")]
@@ -194,54 +196,12 @@ enum DaemonCommand {
         about = "Install Codexia as a per-user autostart service",
         long_about = "Write the service definition for the current user and enable autostart. Use `codexia daemon start` to start it immediately."
     )]
-    Install {
-        #[arg(
-            long,
-            value_name = "PATH",
-            help = "Codexia executable to run; defaults to the current executable"
-        )]
-        executable: Option<PathBuf>,
-        #[arg(
-            long,
-            value_name = "ADDR",
-            help = "Socket address the daemon should listen on"
-        )]
-        bind: Option<SocketAddr>,
-        #[arg(long, value_name = "PATH", help = "Credential file to read/write")]
-        auth_file: Option<PathBuf>,
-        #[arg(long, value_name = "URL", help = "Codex backend base URL")]
-        codex_base_url: Option<String>,
-        #[arg(
-            long,
-            env = "CODEXIA_API_KEY",
-            value_name = "KEY",
-            help = "Optional local API key accepted as Bearer token or x-api-key"
-        )]
-        api_key: Option<String>,
-        #[arg(
-            long,
-            env = "CODEXIA_MODELS",
-            value_delimiter = ',',
-            value_name = "MODEL[,MODEL...]",
-            help = "Replace the default model list"
-        )]
-        models: Vec<String>,
-        #[arg(
-            long,
-            env = "CODEXIA_EXTRA_MODELS",
-            value_delimiter = ',',
-            value_name = "MODEL[,MODEL...]",
-            help = "Append models to the default or configured model list"
-        )]
-        extra_models: Vec<String>,
-        #[arg(
-            long,
-            env = "CODEXIA_MODELS_FILE",
-            value_name = "PATH",
-            help = "JSON file containing models and/or extra_models"
-        )]
-        models_file: Option<PathBuf>,
-    },
+    Install(#[command(flatten)] DaemonInstallCliOptions),
+    #[command(
+        about = "Reinstall Codexia with updated service configuration",
+        long_about = "Remove the existing per-user daemon definition if present, then install a fresh one using the provided options and saved runtime config defaults."
+    )]
+    Reinstall(#[command(flatten)] DaemonInstallCliOptions),
     #[command(about = "Start the installed Codexia daemon")]
     Start,
     #[command(about = "Restart the installed Codexia daemon")]
@@ -259,6 +219,57 @@ enum ConfigCommand {
     Show,
     #[command(about = "Delete the saved runtime configuration file")]
     Reset,
+}
+
+/// Shared CLI options used by `daemon install` and `daemon reinstall`.
+#[derive(Debug, Clone, Args)]
+struct DaemonInstallCliOptions {
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Codexia executable to run; defaults to the current executable"
+    )]
+    executable: Option<PathBuf>,
+    #[arg(
+        long,
+        value_name = "ADDR",
+        help = "Socket address the daemon should listen on"
+    )]
+    bind: Option<SocketAddr>,
+    #[arg(long, value_name = "PATH", help = "Credential file to read/write")]
+    auth_file: Option<PathBuf>,
+    #[arg(long, value_name = "URL", help = "Codex backend base URL")]
+    codex_base_url: Option<String>,
+    #[arg(
+        long,
+        env = "CODEXIA_API_KEY",
+        value_name = "KEY",
+        help = "Optional local API key accepted as Bearer token or x-api-key"
+    )]
+    api_key: Option<String>,
+    #[arg(
+        long,
+        env = "CODEXIA_MODELS",
+        value_delimiter = ',',
+        value_name = "MODEL[,MODEL...]",
+        help = "Replace the default model list"
+    )]
+    models: Vec<String>,
+    #[arg(
+        long,
+        env = "CODEXIA_EXTRA_MODELS",
+        value_delimiter = ',',
+        value_name = "MODEL[,MODEL...]",
+        help = "Append models to the default or configured model list"
+    )]
+    extra_models: Vec<String>,
+    #[arg(
+        long,
+        env = "CODEXIA_MODELS_FILE",
+        value_name = "PATH",
+        help = "JSON file containing models and/or extra_models"
+    )]
+    models_file: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -341,45 +352,57 @@ fn config_command(command: Option<ConfigCommand>) -> Result<()> {
 /// Maps daemon-specific CLI requests to the platform-specific service helpers.
 fn daemon_command(command: DaemonCommand) -> Result<()> {
     match command {
-        DaemonCommand::Install {
-            executable,
-            bind,
-            auth_file,
-            codex_base_url,
-            api_key,
-            models,
-            extra_models,
-            models_file,
-        } => {
-            let config = load_app_config()?;
-            let effective_bind = bind
-                .or_else(|| bind_from_config(config.as_ref()))
-                .unwrap_or_else(default_bind);
-            let effective_auth_file = auth_file.or_else(|| config_auth_file(config.as_ref()));
-            let effective_codex_base_url = codex_base_url
-                .or_else(|| config_string(config.as_ref(), |item| item.codex_base_url.clone()))
-                .unwrap_or_else(|| CodexClient::default_base_url().to_owned());
-            let effective_api_key =
-                api_key.or_else(|| config_string(config.as_ref(), |item| item.api_key.clone()));
-            let (effective_models, effective_extra_models, effective_models_file) =
-                merge_model_options(config.as_ref(), models, extra_models, models_file);
-
-            daemon::install(DaemonInstallOptions {
-                executable: executable.map(Ok).unwrap_or_else(std::env::current_exe)?,
-                bind: effective_bind.to_string(),
-                auth_file: effective_auth_file,
-                codex_base_url: effective_codex_base_url,
-                api_key: effective_api_key,
-                models: effective_models,
-                extra_models: effective_extra_models,
-                models_file: effective_models_file,
-            })
+        DaemonCommand::Install(options) => {
+            daemon::install(resolve_daemon_install_options(options)?)
+        }
+        DaemonCommand::Reinstall(options) => {
+            daemon::reinstall(resolve_daemon_install_options(options)?)
         }
         DaemonCommand::Start => daemon::start(),
         DaemonCommand::Restart => daemon::restart(),
         DaemonCommand::Stop => daemon::stop(),
         DaemonCommand::Uninstall => daemon::uninstall(),
     }
+}
+
+fn resolve_daemon_install_options(
+    options: DaemonInstallCliOptions,
+) -> Result<DaemonInstallOptions> {
+    let config = load_app_config()?;
+    let effective_bind = options
+        .bind
+        .or_else(|| bind_from_config(config.as_ref()))
+        .unwrap_or_else(default_bind);
+    let effective_auth_file = options
+        .auth_file
+        .or_else(|| config_auth_file(config.as_ref()));
+    let effective_codex_base_url = options
+        .codex_base_url
+        .or_else(|| config_string(config.as_ref(), |item| item.codex_base_url.clone()))
+        .unwrap_or_else(|| CodexClient::default_base_url().to_owned());
+    let effective_api_key = options
+        .api_key
+        .or_else(|| config_string(config.as_ref(), |item| item.api_key.clone()));
+    let (effective_models, effective_extra_models, effective_models_file) = merge_model_options(
+        config.as_ref(),
+        options.models,
+        options.extra_models,
+        options.models_file,
+    );
+
+    Ok(DaemonInstallOptions {
+        executable: options
+            .executable
+            .map(Ok)
+            .unwrap_or_else(std::env::current_exe)?,
+        bind: effective_bind.to_string(),
+        auth_file: effective_auth_file,
+        codex_base_url: effective_codex_base_url,
+        api_key: effective_api_key,
+        models: effective_models,
+        extra_models: effective_extra_models,
+        models_file: effective_models_file,
+    })
 }
 
 /// Resolves the persisted runtime config store path.
