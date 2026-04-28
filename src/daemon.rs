@@ -99,6 +99,22 @@ pub fn restart() -> Result<()> {
     }
 }
 
+/// Shows the daemon service status for the current user.
+///
+/// # Errors
+///
+/// Returns an error when the platform service manager rejects the status request.
+pub fn status() -> Result<()> {
+    match platform()? {
+        Platform::MacOs => {
+            let domain = launchd_domain()?;
+            let target = format!("{domain}/{LAUNCHD_LABEL}");
+            run_command("launchctl", ["print", &target])
+        }
+        Platform::Linux => systemctl(["status", SYSTEMD_UNIT, "--no-pager"]),
+    }
+}
+
 /// Removes the daemon service definition and stops it if it is running.
 ///
 /// # Errors
@@ -138,6 +154,7 @@ fn install_launchd(options: &DaemonInstallOptions) -> Result<()> {
     fs::write(&plist, launchd_plist(options, &log_dir))?;
     println!("installed {}", plist.display());
     println!("run `codexia daemon start` to start now; launchd will load it on login");
+    println!("run `codexia daemon status` to inspect the user service");
     Ok(())
 }
 
@@ -153,6 +170,7 @@ fn install_systemd(options: &DaemonInstallOptions) -> Result<()> {
     systemctl(["enable", SYSTEMD_UNIT])?;
     println!("installed {}", unit.display());
     println!("run `codexia daemon start` to start now");
+    println!("inspect it with `codexia daemon status` or `systemctl --user status {SYSTEMD_UNIT}`");
     Ok(())
 }
 

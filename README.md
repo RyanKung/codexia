@@ -183,6 +183,7 @@ Install Codexia as a per-user background daemon:
 codexia daemon install
 codexia daemon reinstall
 codexia daemon start
+codexia daemon status
 codexia daemon restart
 codexia daemon stop
 codexia daemon uninstall
@@ -191,6 +192,13 @@ codexia daemon uninstall
 On macOS, Codexia installs a LaunchAgent at
 `~/Library/LaunchAgents/com.codexia.daemon.plist`. On Linux, it installs a
 systemd user unit at `~/.config/systemd/user/codexia.service`.
+
+On Linux, inspect the per-user service with:
+
+```bash
+codexia daemon status
+systemctl --user status codexia.service
+```
 
 The daemon runs `codexia serve` with the options passed at install time:
 

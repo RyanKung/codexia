@@ -51,6 +51,7 @@ Examples:
   codexia daemon install
   codexia daemon reinstall
   codexia daemon start
+  codexia daemon status
   codexia refresh
   codexia status
   curl -X POST http://127.0.0.1:14550/v1/auth/refresh \\
@@ -173,6 +174,8 @@ enum DaemonCommand {
     Start,
     #[command(about = "Restart the installed Codexia daemon")]
     Restart,
+    #[command(about = "Show the installed Codexia daemon status")]
+    Status,
     #[command(about = "Stop the installed Codexia daemon")]
     Stop,
     #[command(about = "Disable and remove the installed Codexia daemon")]
@@ -283,6 +286,7 @@ fn daemon_command(command: DaemonCommand) -> Result<()> {
         }
         DaemonCommand::Start => daemon::start(),
         DaemonCommand::Restart => daemon::restart(),
+        DaemonCommand::Status => daemon::status(),
         DaemonCommand::Stop => daemon::stop(),
         DaemonCommand::Uninstall => daemon::uninstall(),
     }
