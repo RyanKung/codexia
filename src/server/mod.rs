@@ -15,6 +15,7 @@ use tokio::net::TcpListener;
 mod auth;
 mod handlers;
 mod status_response;
+mod store;
 
 pub use auth::authorize;
 
@@ -26,6 +27,8 @@ pub struct AppState {
     status: StatusClient,
     api_key: Option<Arc<str>>,
     models: ModelList,
+    responses: store::ResponseStore,
+    batches: store::BatchStore,
 }
 
 impl AppState {
@@ -44,6 +47,8 @@ impl AppState {
             codex,
             api_key: api_key.map(Arc::from),
             models,
+            responses: store::ResponseStore::default(),
+            batches: store::BatchStore::default(),
         }
     }
 }
@@ -67,10 +72,24 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/auth/refresh", post(handlers::manual_refresh))
         .route("/v1/status", get(handlers::status))
         .route("/v1/models", get(handlers::models))
+        .route("/v1/responses", post(handlers::responses))
+        .route(
+            "/v1/responses/input_tokens",
+            post(handlers::count_response_input_tokens),
+        )
         .route("/v1/messages", post(handlers::messages))
         .route(
             "/v1/messages/count_tokens",
             post(handlers::count_message_tokens),
+        )
+        .route("/v1/messages/batches", post(handlers::create_message_batch))
+        .route(
+            "/v1/messages/batches/{batch_id}",
+            get(handlers::get_message_batch),
+        )
+        .route(
+            "/v1/messages/batches/{batch_id}/results",
+            get(handlers::message_batch_results),
         )
         .route("/v1/chat/completions", post(handlers::chat_completions))
         .with_state(state)
@@ -90,7 +109,7 @@ mod tests {
         Json,
         body::to_bytes,
         extract::Form,
-        http::{HeaderMap, HeaderValue, StatusCode},
+        http::{HeaderMap, HeaderValue, StatusCode, header::HOST},
         routing::{get, post},
     };
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -461,5 +480,143 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value = serde_json::from_slice::<Value>(&body).unwrap();
         assert!(value["input_tokens"].as_u64().unwrap() > 0);
+    }
+
+    #[tokio::test]
+    async fn responses_returns_response_object() {
+        let dir = TempDir::new().unwrap();
+        let store = AuthStore::new(dir.path().join("auth.json"));
+        store
+            .save(&Credentials {
+                access_token: "access".into(),
+                refresh_token: "refresh".into(),
+                expires_at: now_unix() + 600,
+                account_id: "acc_old".into(),
+            })
+            .unwrap();
+        let http = Client::new();
+        let state = AppState::new(
+            TokenManager::new(
+                store,
+                CodexOAuthClient::new_with_token_url(http.clone(), spawn_refresh_server().await),
+            ),
+            CodexClient::new(http, spawn_codex_server(false).await),
+            Some("secret".into()),
+            ModelList::from_ids(["gpt-5.5"]),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("secret"));
+
+        let response = handlers::responses(
+            axum::extract::State(state.clone()),
+            headers.clone(),
+            Json(
+                serde_json::from_value(json!({
+                    "model": "gpt-5.5",
+                    "instructions": "Be terse.",
+                    "input": "hello"
+                }))
+                .unwrap(),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value = serde_json::from_slice::<Value>(&body).unwrap();
+        assert_eq!(value["object"], "response");
+        assert_eq!(value["status"], "completed");
+        assert_eq!(value["output"][0]["type"], "message");
+    }
+
+    #[tokio::test]
+    async fn models_return_anthropic_shape_when_requested() {
+        let dir = TempDir::new().unwrap();
+        let store = AuthStore::new(dir.path().join("auth.json"));
+        let state = test_state(store, spawn_refresh_server().await, Some("secret".into()));
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("secret"));
+        headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+
+        let response = handlers::models(axum::extract::State(state), headers).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value = serde_json::from_slice::<Value>(&body).unwrap();
+        assert_eq!(value["data"][0]["type"], "model");
+        assert!(value["data"][0]["display_name"].is_string());
+    }
+
+    #[tokio::test]
+    async fn message_batches_can_be_retrieved_with_results() {
+        let dir = TempDir::new().unwrap();
+        let store = AuthStore::new(dir.path().join("auth.json"));
+        store
+            .save(&Credentials {
+                access_token: "access".into(),
+                refresh_token: "refresh".into(),
+                expires_at: now_unix() + 600,
+                account_id: "acc_old".into(),
+            })
+            .unwrap();
+        let http = Client::new();
+        let state = AppState::new(
+            TokenManager::new(
+                store,
+                CodexOAuthClient::new_with_token_url(http.clone(), spawn_refresh_server().await),
+            ),
+            CodexClient::new(http, spawn_codex_server(false).await),
+            Some("secret".into()),
+            ModelList::from_ids(["gpt-5.5"]),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("secret"));
+        headers.insert(HOST, HeaderValue::from_static("localhost:14550"));
+
+        let response = handlers::create_message_batch(
+            axum::extract::State(state.clone()),
+            headers.clone(),
+            Json(
+                serde_json::from_value(json!({
+                    "requests": [{
+                        "custom_id": "req_1",
+                        "params": {
+                            "model": "gpt-5.5",
+                            "max_tokens": 32,
+                            "messages": [{"role": "user", "content": "hello"}]
+                        }
+                    }]
+                }))
+                .unwrap(),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value = serde_json::from_slice::<Value>(&body).unwrap();
+        assert_eq!(value["type"], "message_batch");
+        assert_eq!(value["processing_status"], "ended");
+        let batch_id = value["id"].as_str().unwrap().to_owned();
+
+        let retrieved = handlers::get_message_batch(
+            axum::extract::State(state.clone()),
+            headers.clone(),
+            axum::extract::Path(batch_id.clone()),
+        )
+        .await;
+        assert_eq!(retrieved.status(), StatusCode::OK);
+
+        let results = handlers::message_batch_results(
+            axum::extract::State(state),
+            headers,
+            axum::extract::Path(batch_id),
+        )
+        .await;
+        assert_eq!(results.status(), StatusCode::OK);
+        let body = to_bytes(results.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("\"custom_id\":\"req_1\""));
+        assert!(body.contains("\"type\":\"succeeded\""));
     }
 }

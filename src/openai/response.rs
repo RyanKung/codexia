@@ -1,5 +1,6 @@
 use crate::openai::types::{FunctionCall, ToolCall};
 use serde::Serialize;
+use serde_json::{Map, Value};
 
 /// List response returned by the models endpoint.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -73,6 +74,93 @@ pub struct Usage {
     pub total_tokens: u32,
 }
 
+/// OpenAI-compatible Responses API object.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ResponseObject {
+    /// Response identifier.
+    pub id: String,
+    /// Object kind, always `response`.
+    pub object: &'static str,
+    /// Unix timestamp when the response was created.
+    pub created_at: i64,
+    /// Terminal response status.
+    pub status: &'static str,
+    /// Error details when generation failed.
+    pub error: Option<Value>,
+    /// Incomplete details when generation ended early.
+    pub incomplete_details: Option<Value>,
+    /// Top-level instructions associated with this response.
+    pub instructions: Option<String>,
+    /// Preferred upper bound for generated tokens.
+    pub max_output_tokens: Option<u32>,
+    /// Model identifier that produced the response.
+    pub model: String,
+    /// Output items emitted by the response.
+    pub output: Vec<ResponseOutputItem>,
+    /// Whether tool calls may run in parallel.
+    pub parallel_tool_calls: bool,
+    /// Whether the response was stored for later retrieval.
+    pub store: bool,
+    /// Optional sampling temperature recorded on the response.
+    pub temperature: Option<f64>,
+    /// Tool choice recorded on the response.
+    pub tool_choice: Option<Value>,
+    /// Tool definitions recorded on the response.
+    pub tools: Vec<Value>,
+    /// Optional token accounting information.
+    pub usage: Option<Usage>,
+    /// Optional user metadata preserved on the response.
+    pub metadata: Option<Map<String, Value>>,
+    /// Identifier of the referenced previous response, when supplied.
+    pub previous_response_id: Option<String>,
+}
+
+/// Single output item returned by the Responses API.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ResponseOutputItem {
+    /// Output item identifier.
+    pub id: String,
+    /// Object type, such as `message` or `function_call`.
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    /// Role associated with the output item when it is a message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<&'static str>,
+    /// Item status, always `completed` for fully collected local responses.
+    pub status: &'static str,
+    /// Message content blocks, when the output item is a message.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub content: Vec<ResponseOutputContent>,
+    /// Tool call identifier, when the output item is a function call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
+    /// Tool name, when the output item is a function call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// JSON-encoded tool arguments, when the output item is a function call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<String>,
+}
+
+/// Message content block within a Responses API output item.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ResponseOutputContent {
+    /// Content type, currently `output_text`.
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    /// Text payload emitted by the model.
+    pub text: String,
+    /// Output annotations attached to the text.
+    pub annotations: Vec<Value>,
+}
+
+/// Response returned by `POST /v1/responses/input_tokens`.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ResponseInputTokens {
+    /// Estimated input token count for the submitted request.
+    pub input_tokens: u32,
+}
+
 /// OpenAI-compatible streamed chat completion chunk.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ChatCompletionChunk {
@@ -143,6 +231,47 @@ impl ModelList {
                 })
                 .collect(),
         }
+    }
+}
+
+/// Builds a message output item for the Responses API.
+#[must_use]
+pub fn response_message_item(id: String, text: Option<String>) -> ResponseOutputItem {
+    let content = text
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            vec![ResponseOutputContent {
+                kind: "output_text",
+                text: value,
+                annotations: Vec::new(),
+            }]
+        })
+        .unwrap_or_default();
+
+    ResponseOutputItem {
+        id,
+        kind: "message",
+        role: Some("assistant"),
+        status: "completed",
+        content,
+        call_id: None,
+        name: None,
+        arguments: None,
+    }
+}
+
+/// Builds a function call output item for the Responses API.
+#[must_use]
+pub fn response_function_call_item(id: String, tool_call: ToolCall) -> ResponseOutputItem {
+    ResponseOutputItem {
+        id,
+        kind: "function_call",
+        role: None,
+        status: "completed",
+        content: Vec::new(),
+        call_id: Some(tool_call.id),
+        name: Some(tool_call.function.name),
+        arguments: Some(tool_call.function.arguments),
     }
 }
 

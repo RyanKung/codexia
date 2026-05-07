@@ -221,16 +221,31 @@ gpt-5.3-codex-spark
 gpt-5.4
 gpt-5.4-mini
 gpt-5.5
-gpt-5.5-mini
 ```
 
 Credentials are stored at `~/.codexia/auth.json` by default. Override with
 `--auth-file`, `CODEXIA_AUTH_FILE`, or `CODEXIA_HOME`.
 
+OpenAI compatibility currently covers:
+
+- `GET /v1/models`
+- `POST /v1/chat/completions`
+- `POST /v1/responses`
+- `POST /v1/responses/input_tokens`
+
+`/v1/responses` currently supports `previous_response_id` only as an
+in-memory continuation mechanism within the same running Codexia process. It is
+not exposed as a public retrievable/deletable response resource, and it should
+not be treated as durable storage across daemon restarts or process exits.
+
 Anthropic compatibility currently covers:
 
+- `GET /v1/models` with an `anthropic-version` header
 - `POST /v1/messages`
 - `POST /v1/messages/count_tokens`
+- `POST /v1/messages/batches`
+- `GET /v1/messages/batches/{batch_id}`
+- `GET /v1/messages/batches/{batch_id}/results`
 - `x-api-key` or `authorization: Bearer ...` local auth
 - Anthropic-style SSE events for streaming text and tool use
 

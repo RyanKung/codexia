@@ -116,7 +116,7 @@ enum Command {
     },
     #[command(
         about = "Serve the OpenAI- and Anthropic-compatible HTTP API",
-        long_about = "Serve OpenAI- and Anthropic-compatible endpoints backed by Codex, including /v1/models, /v1/chat/completions, /v1/messages, /v1/messages/count_tokens, and /v1/auth/refresh."
+        long_about = "Serve OpenAI- and Anthropic-compatible endpoints backed by Codex, including /v1/models, /v1/chat/completions, /v1/responses, /v1/messages, /v1/messages/count_tokens, /v1/messages/batches, and /v1/auth/refresh."
     )]
     Serve {
         #[arg(long, value_name = "ADDR", help = "Socket address to listen on")]

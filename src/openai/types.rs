@@ -46,6 +46,128 @@ impl ChatCompletionRequest {
     }
 }
 
+/// OpenAI-compatible Responses API request body.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ResponsesRequest {
+    /// Target model identifier.
+    pub model: String,
+    /// Input payload represented as text or structured input items.
+    #[serde(default)]
+    pub input: Option<ResponseInput>,
+    /// Optional top-level instructions inserted ahead of the conversation.
+    #[serde(default)]
+    pub instructions: Option<String>,
+    /// Whether the response should be streamed as semantic SSE events.
+    #[serde(default)]
+    pub stream: Option<bool>,
+    /// Sampling temperature, when supported by the model.
+    #[serde(default)]
+    pub temperature: Option<f64>,
+    /// Callable tools exposed to the model.
+    #[serde(default)]
+    pub tools: Option<Vec<ChatTool>>,
+    /// Tool selection mode or an explicitly chosen tool.
+    #[serde(default)]
+    pub tool_choice: Option<Value>,
+    /// Optional service tier hint passed through to the upstream.
+    #[serde(default)]
+    pub service_tier: Option<String>,
+    /// Optional reasoning configuration for reasoning-capable models.
+    #[serde(default)]
+    pub reasoning: Option<Value>,
+    /// Preferred upper bound for generated completion tokens.
+    #[serde(default)]
+    pub max_output_tokens: Option<u32>,
+    /// Whether the created response should be retrievable later.
+    #[serde(default)]
+    pub store: Option<bool>,
+    /// Identifier of a previous response to continue from.
+    ///
+    /// In Codexia this is implemented as best-effort in-memory continuation
+    /// within the same running process rather than as a durable response
+    /// resource lifecycle.
+    #[serde(default)]
+    pub previous_response_id: Option<String>,
+    /// User metadata preserved on the stored response object.
+    #[serde(default)]
+    pub metadata: Option<Map<String, Value>>,
+    /// Provider-specific extra request fields preserved verbatim.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl ResponsesRequest {
+    /// Returns whether the request should use streaming responses.
+    #[must_use]
+    pub fn wants_stream(&self) -> bool {
+        self.stream.unwrap_or(false)
+    }
+
+    /// Returns whether the response should be stored for later retrieval.
+    #[must_use]
+    pub fn should_store(&self) -> bool {
+        self.store.unwrap_or(true)
+    }
+}
+
+/// Responses API input can be a plain string or a list of structured items.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum ResponseInput {
+    /// Plain text input sent as a single user turn.
+    Text(String),
+    /// Structured list of message-like input items.
+    Items(Vec<ResponseInputItem>),
+}
+
+/// Structured input item accepted by the Responses API.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ResponseInputItem {
+    /// Object type, commonly `message`.
+    #[serde(default, rename = "type")]
+    pub kind: Option<String>,
+    /// Message role such as `user`, `assistant`, `developer`, `system`, or `tool`.
+    pub role: String,
+    /// Message payload represented as text or structured parts.
+    pub content: ResponseInputContent,
+    /// Optional item identifier supplied by the caller.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Optional participant name for providers that support named messages.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Tool call identifier referenced by a `tool` role item.
+    #[serde(default)]
+    pub tool_call_id: Option<String>,
+}
+
+/// Structured input item content accepted by the Responses API.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum ResponseInputContent {
+    /// Plain text content.
+    Text(String),
+    /// Structured content parts.
+    Parts(Vec<ResponseInputContentPart>),
+}
+
+/// Single structured content part within a Responses input item.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ResponseInputContentPart {
+    /// Part type such as `input_text`, `output_text`, `text`, or `input_image`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Text payload for text parts.
+    #[serde(default)]
+    pub text: Option<String>,
+    /// Image URL or data URL payload for image parts.
+    #[serde(default)]
+    pub image_url: Option<String>,
+    /// Optional image detail hint such as `low`, `high`, or `auto`.
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
 /// Single chat message in an OpenAI-compatible conversation.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ChatMessage {

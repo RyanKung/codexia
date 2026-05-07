@@ -238,6 +238,117 @@ pub struct CountTokensResponse {
     pub input_tokens: u32,
 }
 
+/// Anthropic-compatible models list response.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ModelsResponse {
+    /// Listed models.
+    pub data: Vec<ModelInfo>,
+    /// First model identifier when available.
+    pub first_id: Option<String>,
+    /// Whether more models remain after this page.
+    pub has_more: bool,
+    /// Last model identifier when available.
+    pub last_id: Option<String>,
+}
+
+/// Anthropic-compatible model object.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ModelInfo {
+    /// Model creation timestamp in RFC 3339 form.
+    pub created_at: String,
+    /// Human-readable model name.
+    pub display_name: String,
+    /// Model identifier.
+    pub id: String,
+    /// Object kind, always `model`.
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+}
+
+/// Anthropic message batch creation request body.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MessageBatchCreateRequest {
+    /// Individual message creation requests to process in the batch.
+    pub requests: Vec<MessageBatchRequest>,
+}
+
+/// Single request inside an Anthropic message batch.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MessageBatchRequest {
+    /// Caller-defined identifier used to match results back to inputs.
+    pub custom_id: String,
+    /// Parameters for the embedded message creation request.
+    pub params: MessagesRequest,
+}
+
+/// Anthropic-compatible message batch object.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct MessageBatch {
+    /// Time at which the batch is archived, if ever.
+    pub archived_at: Option<String>,
+    /// Time at which cancellation was initiated, if ever.
+    pub cancel_initiated_at: Option<String>,
+    /// Time at which the batch was created.
+    pub created_at: String,
+    /// Time at which batch processing ended.
+    pub ended_at: Option<String>,
+    /// Time at which the batch will expire.
+    pub expires_at: String,
+    /// Batch identifier.
+    pub id: String,
+    /// Current processing status.
+    pub processing_status: &'static str,
+    /// Counts grouped by terminal request state.
+    pub request_counts: MessageBatchRequestCounts,
+    /// URL where JSONL batch results can be fetched.
+    pub results_url: Option<String>,
+    /// Object kind, always `message_batch`.
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+}
+
+/// Anthropic-compatible request state counters for a batch.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct MessageBatchRequestCounts {
+    /// Number of canceled requests.
+    pub canceled: u32,
+    /// Number of errored requests.
+    pub errored: u32,
+    /// Number of expired requests.
+    pub expired: u32,
+    /// Number of requests still processing.
+    pub processing: u32,
+    /// Number of succeeded requests.
+    pub succeeded: u32,
+}
+
+/// Single line emitted by the Anthropic message batch results endpoint.
+#[derive(Debug, Clone, Serialize)]
+pub struct MessageBatchResult {
+    /// Caller-defined identifier copied from the request.
+    pub custom_id: String,
+    /// Terminal result payload for the request.
+    pub result: MessageBatchResultType,
+}
+
+/// Terminal result variants for Anthropic message batch items.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type")]
+pub enum MessageBatchResultType {
+    /// Successful message creation result.
+    #[serde(rename = "succeeded")]
+    Succeeded {
+        /// Completed message object.
+        message: MessageResponse,
+    },
+    /// Failed message creation result.
+    #[serde(rename = "errored")]
+    Errored {
+        /// Error object returned for the failed request.
+        error: Value,
+    },
+}
+
 /// SSE payload for `message_start`.
 #[derive(Debug, Clone, Serialize)]
 pub struct MessageStartEvent {
@@ -384,6 +495,41 @@ pub fn estimate_input_tokens(request: &MessagesRequest) -> u32 {
     }
 
     estimate_tokens_from_text(&text)
+}
+
+/// Builds an Anthropic-compatible models response from the configured model IDs.
+#[must_use]
+pub fn models_response(ids: &[String]) -> ModelsResponse {
+    let data = ids
+        .iter()
+        .map(|id| ModelInfo {
+            created_at: "2026-01-01T00:00:00Z".to_owned(),
+            display_name: anthropic_display_name(id),
+            id: id.clone(),
+            kind: "model",
+        })
+        .collect::<Vec<_>>();
+    let first_id = data.first().map(|model| model.id.clone());
+    let last_id = data.last().map(|model| model.id.clone());
+
+    ModelsResponse {
+        data,
+        first_id,
+        has_more: false,
+        last_id,
+    }
+}
+
+fn anthropic_display_name(id: &str) -> String {
+    id.split('-')
+        .map(|part| {
+            let mut chars = part.chars();
+            chars.next().map_or_else(String::new, |first| {
+                first.to_uppercase().collect::<String>() + chars.as_str()
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Builds the `message_start` payload emitted ahead of streaming deltas.

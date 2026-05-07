@@ -13,7 +13,6 @@ pub const OPENCLAW_CODEX_MODELS: &[&str] = &[
     "gpt-5.4",
     "gpt-5.4-mini",
     "gpt-5.5",
-    "gpt-5.5-mini",
 ];
 
 /// Resolves the default model identifiers into a trimmed, de-duplicated list.
@@ -60,6 +59,6 @@ mod tests {
         let ids = resolve_model_ids();
 
         assert!(ids.iter().any(|id| id == "gpt-5.5"));
-        assert!(ids.iter().any(|id| id == "gpt-5.5-mini"));
+        assert!(!ids.iter().any(|id| id == "gpt-5.5-mini"));
     }
 }
