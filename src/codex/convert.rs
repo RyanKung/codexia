@@ -40,6 +40,14 @@ pub fn to_codex_request(request: &ChatCompletionRequest) -> Value {
     );
     insert_optional(
         &mut body,
+        "max_output_tokens",
+        request
+            .max_completion_tokens
+            .or(request.max_tokens)
+            .map(Value::from),
+    );
+    insert_optional(
+        &mut body,
         "stop",
         request
             .stop
@@ -307,14 +315,14 @@ mod tests {
     }
 
     #[test]
-    fn does_not_forward_unsupported_chat_completion_token_limit() {
+    fn forwards_supported_chat_completion_token_limit() {
         let body = to_codex_request(&request(json!({
             "model": "gpt-5.4",
             "messages": [],
             "max_completion_tokens": 42
         })));
 
-        assert!(body.get("max_output_tokens").is_none());
+        assert_eq!(body["max_output_tokens"], 42);
     }
 
     #[test]

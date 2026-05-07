@@ -256,6 +256,11 @@ Anthropic compatibility currently covers:
 - `x-api-key` or `authorization: Bearer ...` local auth
 - Anthropic-style SSE events for streaming text and tool use
 
+Message batches execute asynchronously in a background task. Cancellation is
+best-effort at request boundaries inside the batch worker: requests that have
+already started are allowed to finish, while not-yet-started requests are
+marked as `canceled`.
+
 The implementation intentionally follows Ollama's compatibility strategy where
 possible: Anthropic headers are accepted, locally configured auth is enforced,
 and unsupported advanced Anthropic-only features are ignored rather than

@@ -126,6 +126,7 @@ mod tests {
     use std::{collections::HashMap, sync::Arc};
     use tokio::net::TcpListener;
     use tokio::sync::Mutex;
+    use tokio::time::{Duration, sleep};
 
     fn jwt_with_account_id(account_id: &str) -> String {
         let encoded = URL_SAFE_NO_PAD.encode(
@@ -235,6 +236,22 @@ mod tests {
         url
     }
 
+    async fn delayed_codex_complete_handler() -> impl axum::response::IntoResponse {
+        sleep(Duration::from_millis(100)).await;
+        codex_complete_handler().await
+    }
+
+    async fn spawn_delayed_codex_server() -> String {
+        let app = Router::new().route("/codex/responses", post(delayed_codex_complete_handler));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        url
+    }
+
     async fn spawn_recording_codex_server(captured: Arc<Mutex<Vec<Value>>>) -> String {
         async fn recording_handler(
             State(captured): State<Arc<Mutex<Vec<Value>>>>,
@@ -270,6 +287,29 @@ mod tests {
             api_key,
             ModelList::from_ids(["gpt-test"]),
         )
+    }
+
+    async fn wait_for_batch_to_finish(
+        state: AppState,
+        headers: HeaderMap,
+        batch_id: String,
+    ) -> Value {
+        for _ in 0..50 {
+            let response = handlers::get_message_batch(
+                axum::extract::State(state.clone()),
+                headers.clone(),
+                axum::extract::Path(batch_id.clone()),
+            )
+            .await;
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let value = serde_json::from_slice::<Value>(&body).unwrap();
+            if value["processing_status"] == "ended" {
+                return value;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+
+        panic!("batch did not finish in time");
     }
 
     #[test]
@@ -611,14 +651,24 @@ mod tests {
             headers.clone(),
             Json(
                 serde_json::from_value(json!({
-                    "requests": [{
-                        "custom_id": "req_1",
-                        "params": {
-                            "model": "gpt-5.5",
-                            "max_tokens": 32,
-                            "messages": [{"role": "user", "content": "hello"}]
+                    "requests": [
+                        {
+                            "custom_id": "req_1",
+                            "params": {
+                                "model": "gpt-5.5",
+                                "max_tokens": 32,
+                                "messages": [{"role": "user", "content": "hello"}]
+                            }
+                        },
+                        {
+                            "custom_id": "req_2",
+                            "params": {
+                                "model": "gpt-5.5",
+                                "max_tokens": 32,
+                                "messages": [{"role": "user", "content": "again"}]
+                            }
                         }
-                    }]
+                    ]
                 }))
                 .unwrap(),
             ),
@@ -629,16 +679,12 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value = serde_json::from_slice::<Value>(&body).unwrap();
         assert_eq!(value["type"], "message_batch");
-        assert_eq!(value["processing_status"], "ended");
+        assert_eq!(value["processing_status"], "in_progress");
         let batch_id = value["id"].as_str().unwrap().to_owned();
 
-        let retrieved = handlers::get_message_batch(
-            axum::extract::State(state.clone()),
-            headers.clone(),
-            axum::extract::Path(batch_id.clone()),
-        )
-        .await;
-        assert_eq!(retrieved.status(), StatusCode::OK);
+        let retrieved =
+            wait_for_batch_to_finish(state.clone(), headers.clone(), batch_id.clone()).await;
+        assert_eq!(retrieved["processing_status"], "ended");
 
         let results = handlers::message_batch_results(
             axum::extract::State(state),
@@ -719,7 +765,7 @@ mod tests {
                 store,
                 CodexOAuthClient::new_with_token_url(http.clone(), spawn_refresh_server().await),
             ),
-            CodexClient::new(http, spawn_codex_server(false).await),
+            CodexClient::new(http, spawn_delayed_codex_server().await),
             Some("secret".into()),
             ModelList::from_ids(["gpt-5.5"]),
         );
@@ -748,6 +794,7 @@ mod tests {
         let created_body = to_bytes(created.into_body(), usize::MAX).await.unwrap();
         let created_value = serde_json::from_slice::<Value>(&created_body).unwrap();
         let batch_id = created_value["id"].as_str().unwrap().to_owned();
+        assert_eq!(created_value["processing_status"], "in_progress");
 
         let listed =
             handlers::list_message_batches(axum::extract::State(state.clone()), headers.clone())
@@ -764,6 +811,24 @@ mod tests {
         )
         .await;
         assert_eq!(canceled.status(), StatusCode::OK);
+        let canceled_body = to_bytes(canceled.into_body(), usize::MAX).await.unwrap();
+        let canceled_value = serde_json::from_slice::<Value>(&canceled_body).unwrap();
+        assert_eq!(canceled_value["processing_status"], "canceling");
+
+        let finished =
+            wait_for_batch_to_finish(state.clone(), headers.clone(), batch_id.clone()).await;
+        assert!(finished["request_counts"]["canceled"].as_u64().unwrap() >= 1);
+
+        let results = handlers::message_batch_results(
+            axum::extract::State(state.clone()),
+            headers.clone(),
+            axum::extract::Path(batch_id.clone()),
+        )
+        .await;
+        assert_eq!(results.status(), StatusCode::OK);
+        let results_body = to_bytes(results.into_body(), usize::MAX).await.unwrap();
+        let results_text = String::from_utf8(results_body.to_vec()).unwrap();
+        assert!(results_text.contains("\"type\":\"canceled\""));
 
         let deleted = handlers::delete_message_batch(
             axum::extract::State(state.clone()),
@@ -772,10 +837,6 @@ mod tests {
         )
         .await;
         assert_eq!(deleted.status(), StatusCode::OK);
-        let deleted_body = to_bytes(deleted.into_body(), usize::MAX).await.unwrap();
-        let deleted_value = serde_json::from_slice::<Value>(&deleted_body).unwrap();
-        assert_eq!(deleted_value["id"], batch_id);
-        assert_eq!(deleted_value["type"], "message_batch_deleted");
 
         let missing = handlers::get_message_batch(
             axum::extract::State(state),

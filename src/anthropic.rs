@@ -360,6 +360,9 @@ pub enum MessageBatchResultType {
         /// Error object returned for the failed request.
         error: Value,
     },
+    /// Request canceled before execution completed.
+    #[serde(rename = "canceled")]
+    Canceled,
 }
 
 /// Anthropic-compatible deletion confirmation for a message batch.
@@ -440,7 +443,7 @@ pub fn to_openai_request(request: &MessagesRequest) -> Result<ChatCompletionRequ
         reasoning_effort: None,
         max_completion_tokens: request.max_tokens,
         max_tokens: request.max_tokens,
-        parallel_tool_calls: Some(true),
+        parallel_tool_calls: Some(parallel_tool_calls_enabled(request.tool_choice.as_ref())),
         stop: request.stop_sequences.clone(),
         extra: request.extra.clone(),
     })
@@ -887,6 +890,14 @@ fn convert_tool_choice(value: Value) -> Value {
     }
 }
 
+fn parallel_tool_calls_enabled(tool_choice: Option<&Value>) -> bool {
+    match tool_choice {
+        Some(Value::String(choice)) => choice != "none" && choice != "any",
+        Some(Value::Object(object)) => object.get("type").and_then(Value::as_str) != Some("tool"),
+        None | Some(_) => true,
+    }
+}
+
 fn system_prompt_text(system: Option<&SystemPrompt>) -> Option<String> {
     match system? {
         SystemPrompt::Text(text) => Some(text.clone()),
@@ -1017,6 +1028,24 @@ mod tests {
         assert_eq!(converted.messages[1].role, "user");
         assert_eq!(converted.tools.as_ref().unwrap()[0].function.name, "lookup");
         assert_eq!(converted.tool_choice, Some(json!("required")));
+        assert_eq!(converted.parallel_tool_calls, Some(false));
+    }
+
+    #[test]
+    fn explicit_tool_choice_disables_parallel_tool_calls() {
+        let request: MessagesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tool_choice": {"type": "tool", "name": "lookup"}
+        }))
+        .unwrap();
+
+        let converted = to_openai_request(&request).unwrap();
+        assert_eq!(converted.parallel_tool_calls, Some(false));
+        assert_eq!(
+            converted.tool_choice,
+            Some(json!({"type": "function", "function": {"name": "lookup"}}))
+        );
     }
 
     #[test]

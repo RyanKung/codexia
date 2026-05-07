@@ -46,6 +46,8 @@ pub struct StoredBatch {
     pub batch: MessageBatch,
     /// Individual result lines returned by the batch results endpoint.
     pub results: Vec<MessageBatchResult>,
+    /// Whether a caller has requested cancellation.
+    pub cancel_requested: bool,
 }
 
 /// In-memory store for `Anthropic` message batches.
@@ -99,5 +101,15 @@ impl BatchStore {
     /// Removes a stored batch and returns the removed value.
     pub async fn remove(&self, id: &str) -> Option<StoredBatch> {
         self.inner.write().await.remove(id)
+    }
+
+    /// Returns whether cancellation has been requested for the batch.
+    #[must_use]
+    pub async fn cancel_requested(&self, id: &str) -> Option<bool> {
+        self.inner
+            .read()
+            .await
+            .get(id)
+            .map(|stored| stored.cancel_requested)
     }
 }

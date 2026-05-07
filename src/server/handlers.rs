@@ -3,9 +3,9 @@
 use crate::{
     anthropic::{
         CountTokensResponse, MessageBatch, MessageBatchCreateRequest, MessageBatchDeleted,
-        MessageBatchListResponse, MessageBatchRequestCounts, MessageBatchResult,
-        MessageBatchResultType, MessagesRequest, content_block_stop, error_body,
-        estimate_input_tokens, from_openai_response, message_batch_list_response,
+        MessageBatchListResponse, MessageBatchRequest, MessageBatchRequestCounts,
+        MessageBatchResult, MessageBatchResultType, MessagesRequest, content_block_stop,
+        error_body, estimate_input_tokens, from_openai_response, message_batch_list_response,
         message_delta_event, message_start_event, message_stop_event, models_response,
         text_block_start, text_delta, to_openai_request, tool_block_start, tool_json_delta,
     },
@@ -283,7 +283,7 @@ pub async fn count_message_tokens(
     .into_response()
 }
 
-/// Creates and executes an Anthropic-compatible message batch immediately.
+/// Creates an Anthropic-compatible message batch and schedules background execution.
 pub async fn create_message_batch(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -293,71 +293,25 @@ pub async fn create_message_batch(
         return anthropic_error_response(&error);
     }
 
-    let credentials = match state.token_manager.credentials().await {
-        Ok(credentials) => credentials,
-        Err(error) => return anthropic_error_response(&error),
-    };
-
     let batch_id = build_batch_id();
     let created_at = chrono::Utc::now();
-    let ended_at = chrono::Utc::now();
     let results_url = Some(batch_results_url(&headers, &batch_id));
-    let mut results = Vec::with_capacity(request.requests.len());
-    let mut succeeded = 0_u32;
-    let mut errored = 0_u32;
-
-    for item in request.requests {
-        match to_openai_request(&item.params) {
-            Ok(openai_request) => match state
-                .codex
-                .complete_chat(openai_request, &credentials)
-                .await
-            {
-                Ok(response) => {
-                    succeeded = succeeded.saturating_add(1);
-                    results.push(MessageBatchResult {
-                        custom_id: item.custom_id,
-                        result: MessageBatchResultType::Succeeded {
-                            message: from_openai_response(response),
-                        },
-                    });
-                }
-                Err(error) => {
-                    errored = errored.saturating_add(1);
-                    results.push(MessageBatchResult {
-                        custom_id: item.custom_id,
-                        result: MessageBatchResultType::Errored {
-                            error: error_body(&error),
-                        },
-                    });
-                }
-            },
-            Err(error) => {
-                errored = errored.saturating_add(1);
-                results.push(MessageBatchResult {
-                    custom_id: item.custom_id,
-                    result: MessageBatchResultType::Errored {
-                        error: error_body(&error),
-                    },
-                });
-            }
-        }
-    }
+    let total_requests = u32::try_from(request.requests.len()).unwrap_or(u32::MAX);
 
     let batch = MessageBatch {
         archived_at: None,
         cancel_initiated_at: None,
         created_at: created_at.to_rfc3339(),
-        ended_at: Some(ended_at.to_rfc3339()),
+        ended_at: None,
         expires_at: (created_at + chrono::TimeDelta::hours(24)).to_rfc3339(),
         id: batch_id.clone(),
-        processing_status: "ended",
+        processing_status: "in_progress",
         request_counts: MessageBatchRequestCounts {
             canceled: 0,
-            errored,
+            errored: 0,
             expired: 0,
-            processing: 0,
-            succeeded,
+            processing: total_requests,
+            succeeded: 0,
         },
         results_url,
         kind: "message_batch",
@@ -367,9 +321,17 @@ pub async fn create_message_batch(
         .batches
         .insert(crate::server::store::StoredBatch {
             batch: batch.clone(),
-            results,
+            results: Vec::new(),
+            cancel_requested: false,
         })
         .await;
+
+    let batches = state.batches.clone();
+    let token_manager = state.token_manager.clone();
+    let codex = state.codex.clone();
+    tokio::spawn(async move {
+        run_message_batch_worker(batches, token_manager, codex, batch_id, request.requests).await;
+    });
 
     Json(batch).into_response()
 }
@@ -456,11 +418,10 @@ pub async fn cancel_message_batch(
     match state
         .batches
         .update(&batch_id, |stored| {
-            if stored.batch.cancel_initiated_at.is_none()
-                && stored.batch.processing_status != "ended"
-            {
+            if stored.batch.cancel_initiated_at.is_none() && stored.batch.ended_at.is_none() {
                 stored.batch.cancel_initiated_at = Some(chrono::Utc::now().to_rfc3339());
                 stored.batch.processing_status = "canceling";
+                stored.cancel_requested = true;
             }
         })
         .await
@@ -861,6 +822,117 @@ fn batch_results_url(headers: &HeaderMap, batch_id: &str) -> String {
         .and_then(|value| value.to_str().ok())
         .unwrap_or("127.0.0.1:14550");
     format!("http://{host}/v1/messages/batches/{batch_id}/results")
+}
+
+async fn run_message_batch_worker(
+    batches: crate::server::store::BatchStore,
+    token_manager: crate::token::TokenManager,
+    codex: crate::codex::client::CodexClient,
+    batch_id: String,
+    requests: Vec<MessageBatchRequest>,
+) {
+    let mut requests = std::collections::VecDeque::from(requests);
+    while let Some(item) = requests.pop_front() {
+        if batches.cancel_requested(&batch_id).await.unwrap_or(false) {
+            let mut canceled = vec![MessageBatchResult {
+                custom_id: item.custom_id,
+                result: MessageBatchResultType::Canceled,
+            }];
+            canceled.extend(requests.into_iter().map(|pending| MessageBatchResult {
+                custom_id: pending.custom_id,
+                result: MessageBatchResultType::Canceled,
+            }));
+            finalize_canceled_batch(&batches, &batch_id, canceled).await;
+            return;
+        }
+
+        let result = match to_openai_request(&item.params) {
+            Ok(openai_request) => match token_manager.credentials().await {
+                Ok(credentials) => match codex.complete_chat(openai_request, &credentials).await {
+                    Ok(response) => MessageBatchResult {
+                        custom_id: item.custom_id,
+                        result: MessageBatchResultType::Succeeded {
+                            message: from_openai_response(response),
+                        },
+                    },
+                    Err(error) => MessageBatchResult {
+                        custom_id: item.custom_id,
+                        result: MessageBatchResultType::Errored {
+                            error: error_body(&error),
+                        },
+                    },
+                },
+                Err(error) => MessageBatchResult {
+                    custom_id: item.custom_id,
+                    result: MessageBatchResultType::Errored {
+                        error: error_body(&error),
+                    },
+                },
+            },
+            Err(error) => MessageBatchResult {
+                custom_id: item.custom_id,
+                result: MessageBatchResultType::Errored {
+                    error: error_body(&error),
+                },
+            },
+        };
+
+        batches
+            .update(&batch_id, move |stored| {
+                stored.results.push(result.clone());
+                match &result.result {
+                    MessageBatchResultType::Succeeded { .. } => {
+                        stored.batch.request_counts.succeeded =
+                            stored.batch.request_counts.succeeded.saturating_add(1);
+                    }
+                    MessageBatchResultType::Errored { .. } => {
+                        stored.batch.request_counts.errored =
+                            stored.batch.request_counts.errored.saturating_add(1);
+                    }
+                    MessageBatchResultType::Canceled => {
+                        stored.batch.request_counts.canceled =
+                            stored.batch.request_counts.canceled.saturating_add(1);
+                    }
+                }
+                stored.batch.request_counts.processing =
+                    stored.batch.request_counts.processing.saturating_sub(1);
+            })
+            .await;
+    }
+
+    let _ = batches
+        .update(&batch_id, |stored| {
+            stored.batch.processing_status = "ended";
+            stored.batch.ended_at = Some(chrono::Utc::now().to_rfc3339());
+            stored.cancel_requested = false;
+        })
+        .await;
+}
+
+async fn finalize_canceled_batch(
+    batches: &crate::server::store::BatchStore,
+    batch_id: &str,
+    canceled_results: Vec<MessageBatchResult>,
+) {
+    let remaining = u32::try_from(canceled_results.len()).unwrap_or(u32::MAX);
+    let _ = batches
+        .update(batch_id, move |stored| {
+            stored.results.extend(canceled_results);
+            stored.batch.request_counts.canceled = stored
+                .batch
+                .request_counts
+                .canceled
+                .saturating_add(remaining);
+            stored.batch.request_counts.processing = stored
+                .batch
+                .request_counts
+                .processing
+                .saturating_sub(remaining);
+            stored.batch.processing_status = "ended";
+            stored.batch.ended_at = Some(chrono::Utc::now().to_rfc3339());
+            stored.cancel_requested = false;
+        })
+        .await;
 }
 
 fn build_responses_output_items(
