@@ -2,20 +2,23 @@
 
 use crate::{
     anthropic::{
-        CountTokensResponse, MessageBatch, MessageBatchCreateRequest, MessageBatchRequestCounts,
-        MessageBatchResult, MessageBatchResultType, MessagesRequest, content_block_stop,
-        error_body, estimate_input_tokens, from_openai_response, message_delta_event,
-        message_start_event, message_stop_event, models_response, text_block_start, text_delta,
-        to_openai_request, tool_block_start, tool_json_delta,
+        CountTokensResponse, MessageBatch, MessageBatchCreateRequest, MessageBatchDeleted,
+        MessageBatchListResponse, MessageBatchRequestCounts, MessageBatchResult,
+        MessageBatchResultType, MessagesRequest, content_block_stop, error_body,
+        estimate_input_tokens, from_openai_response, message_batch_list_response,
+        message_delta_event, message_start_event, message_stop_event, models_response,
+        text_block_start, text_delta, to_openai_request, tool_block_start, tool_json_delta,
     },
     error::Result,
     openai::{
         response::{
-            ResponseInputTokens, ResponseObject, response_function_call_item, response_message_item,
+            ResponseCompaction, ResponseInputTokens, ResponseObject, response_function_call_item,
+            response_message_item,
         },
         types::{
             ChatCompletionRequest, ChatContent, ChatContentPart, ChatMessage, ImageUrl,
-            ResponseInput, ResponseInputContent, ResponseInputItem, ResponsesRequest,
+            ResponseInput, ResponseInputContent, ResponseInputItem, ResponseMessageInputItem,
+            ResponsesRequest,
         },
     },
     server::{AppState, auth::authorize, status_response::build_status_response},
@@ -29,6 +32,7 @@ use axum::{
         sse::{Event, KeepAlive, Sse},
     },
 };
+use base64::{Engine, engine::general_purpose::STANDARD};
 use futures_util::{Stream, StreamExt, stream};
 use serde_json::{Value, json};
 use std::{convert::Infallible, pin::Pin};
@@ -135,6 +139,32 @@ pub async fn count_response_input_tokens(
 
     Json(ResponseInputTokens {
         input_tokens: estimate_response_input_tokens(&input_items),
+    })
+    .into_response()
+}
+
+/// Runs a local best-effort Responses API compaction pass.
+pub async fn compact_response(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ResponsesRequest>,
+) -> Response {
+    if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
+        return error.into_response();
+    }
+
+    let previous =
+        match load_previous_response(&state, request.previous_response_id.as_deref()).await {
+            Ok(previous) => previous,
+            Err(error) => return error.into_response(),
+        };
+    let input_items = match collect_response_input_items(&request, previous.as_ref()) {
+        Ok(items) => items,
+        Err(error) => return error.into_response(),
+    };
+
+    Json(ResponseCompaction {
+        output: compact_response_items(&input_items),
     })
     .into_response()
 }
@@ -344,6 +374,22 @@ pub async fn create_message_batch(
     Json(batch).into_response()
 }
 
+/// Lists previously created Anthropic message batches in newest-first order.
+pub async fn list_message_batches(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
+        return anthropic_error_response(&error);
+    }
+
+    let batches = state
+        .batches
+        .list()
+        .await
+        .into_iter()
+        .map(|stored| stored.batch)
+        .collect::<Vec<_>>();
+    Json::<MessageBatchListResponse>(message_batch_list_response(batches)).into_response()
+}
+
 /// Retrieves a previously created Anthropic message batch.
 pub async fn get_message_batch(
     State(state): State<AppState>,
@@ -397,6 +443,65 @@ pub async fn message_batch_results(
     }
 }
 
+/// Initiates cancellation for a previously created Anthropic message batch.
+pub async fn cancel_message_batch(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(batch_id): Path<String>,
+) -> Response {
+    if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
+        return anthropic_error_response(&error);
+    }
+
+    match state
+        .batches
+        .update(&batch_id, |stored| {
+            if stored.batch.cancel_initiated_at.is_none()
+                && stored.batch.processing_status != "ended"
+            {
+                stored.batch.cancel_initiated_at = Some(chrono::Utc::now().to_rfc3339());
+                stored.batch.processing_status = "canceling";
+            }
+        })
+        .await
+    {
+        Some(stored) => Json(stored.batch).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(error_body(&crate::Error::config(format!(
+                "message batch `{batch_id}` was not found"
+            )))),
+        )
+            .into_response(),
+    }
+}
+
+/// Deletes a previously completed Anthropic message batch.
+pub async fn delete_message_batch(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(batch_id): Path<String>,
+) -> Response {
+    if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
+        return anthropic_error_response(&error);
+    }
+
+    match state.batches.remove(&batch_id).await {
+        Some(_) => Json(MessageBatchDeleted {
+            id: batch_id,
+            kind: "message_batch_deleted",
+        })
+        .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(error_body(&crate::Error::config(format!(
+                "message batch `{batch_id}` was not found"
+            )))),
+        )
+            .into_response(),
+    }
+}
+
 async fn load_previous_response(
     state: &AppState,
     response_id: Option<&str>,
@@ -417,43 +522,9 @@ fn responses_to_chat_request(
     previous: Option<&crate::server::store::StoredResponse>,
 ) -> Result<(ChatCompletionRequest, Vec<Value>)> {
     let mut messages = previous.map(stored_response_messages).unwrap_or_default();
-    let mut input_items = previous
-        .map(|stored| stored.input_items.clone())
-        .unwrap_or_default();
-
-    if let Some(instructions) = &request.instructions {
-        messages.push(ChatMessage {
-            role: "system".to_owned(),
-            content: Some(ChatContent::Text(instructions.clone())),
-            name: None,
-            tool_call_id: None,
-            tool_calls: None,
-        });
-    }
-
-    match request.input.as_ref() {
-        Some(ResponseInput::Text(text)) => {
-            messages.push(ChatMessage {
-                role: "user".to_owned(),
-                content: Some(ChatContent::Text(text.clone())),
-                name: None,
-                tool_call_id: None,
-                tool_calls: None,
-            });
-            input_items.push(json!({
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "input_text", "text": text}],
-            }));
-        }
-        Some(ResponseInput::Items(items)) => {
-            for item in items {
-                input_items.push(serde_json::to_value(item)?);
-                messages.push(response_input_item_to_chat_message(item));
-            }
-        }
-        None => {}
-    }
+    let input_items = collect_response_input_items(request, previous)?;
+    messages.extend(response_input_items_to_chat_messages(&input_items));
+    maybe_prepend_instructions(&mut messages, request.instructions.as_deref());
 
     Ok((
         ChatCompletionRequest {
@@ -461,6 +532,7 @@ fn responses_to_chat_request(
             messages,
             stream: request.stream,
             temperature: request.temperature,
+            top_p: request.top_p,
             tools: request.tools.clone(),
             tool_choice: request.tool_choice.clone(),
             service_tier: request.service_tier.clone(),
@@ -472,19 +544,87 @@ fn responses_to_chat_request(
                 .map(str::to_owned),
             max_completion_tokens: request.max_output_tokens,
             max_tokens: request.max_output_tokens,
+            parallel_tool_calls: request.parallel_tool_calls,
+            stop: None,
             extra: request.extra.clone(),
         },
         input_items,
     ))
 }
 
-fn response_input_item_to_chat_message(item: &ResponseInputItem) -> ChatMessage {
-    ChatMessage {
-        role: item.role.clone(),
-        content: Some(response_input_content_to_chat(&item.content)),
-        name: item.name.clone(),
-        tool_call_id: item.tool_call_id.clone(),
-        tool_calls: None,
+fn maybe_prepend_instructions(messages: &mut Vec<ChatMessage>, instructions: Option<&str>) {
+    if let Some(instructions) = instructions {
+        messages.insert(
+            0,
+            ChatMessage {
+                role: "system".to_owned(),
+                content: Some(ChatContent::Text(instructions.to_owned())),
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        );
+    }
+}
+
+fn collect_response_input_items(
+    request: &ResponsesRequest,
+    previous: Option<&crate::server::store::StoredResponse>,
+) -> Result<Vec<Value>> {
+    let mut input_items = previous
+        .map(|stored| stored.input_items.clone())
+        .unwrap_or_default();
+
+    match request.input.as_ref() {
+        Some(ResponseInput::Text(text)) => {
+            input_items.push(serde_json::to_value(ResponseInputItem::Message(
+                ResponseMessageInputItem {
+                    kind: Some("message".to_owned()),
+                    role: "user".to_owned(),
+                    content: ResponseInputContent::Parts(vec![json_text_input_part(text)]),
+                    id: None,
+                    name: None,
+                    tool_call_id: None,
+                },
+            ))?);
+        }
+        Some(ResponseInput::Items(items)) => {
+            for item in items {
+                input_items.push(serde_json::to_value(item)?);
+            }
+        }
+        None => {}
+    }
+
+    Ok(input_items)
+}
+
+fn response_input_items_to_chat_messages(input_items: &[Value]) -> Vec<ChatMessage> {
+    input_items
+        .iter()
+        .filter_map(|item| serde_json::from_value::<ResponseInputItem>(item.clone()).ok())
+        .filter_map(|item| response_input_item_to_chat_message(&item))
+        .collect()
+}
+
+fn response_input_item_to_chat_message(item: &ResponseInputItem) -> Option<ChatMessage> {
+    match item {
+        ResponseInputItem::Message(message) => Some(ChatMessage {
+            role: message.role.clone(),
+            content: Some(response_input_content_to_chat(&message.content)),
+            name: message.name.clone(),
+            tool_call_id: message.tool_call_id.clone(),
+            tool_calls: None,
+        }),
+        ResponseInputItem::Compaction(compaction) => {
+            decode_compaction_summary(&compaction.encrypted_content).map(|summary| ChatMessage {
+                role: "developer".to_owned(),
+                content: Some(ChatContent::Text(summary)),
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            })
+        }
     }
 }
 
@@ -518,37 +658,119 @@ fn response_input_content_to_chat(content: &ResponseInputContent) -> ChatContent
 }
 
 fn stored_response_messages(stored: &crate::server::store::StoredResponse) -> Vec<ChatMessage> {
-    stored
-        .input_items
-        .iter()
-        .filter_map(|item| serde_json::from_value::<ResponseInputItem>(item.clone()).ok())
-        .map(|item| response_input_item_to_chat_message(&item))
-        .collect()
+    response_input_items_to_chat_messages(&stored.input_items)
 }
 
 fn estimate_response_input_tokens(input_items: &[Value]) -> u32 {
     let mut text = String::new();
     for item in input_items {
-        if let Some(role) = item.get("role").and_then(Value::as_str) {
-            text.push_str(role);
-        }
-        if let Some(content) = item.get("content") {
-            match content {
-                Value::String(value) => text.push_str(value),
-                Value::Array(parts) => {
-                    for part in parts {
-                        if let Some(value) = part.get("text").and_then(Value::as_str) {
-                            text.push_str(value);
+        if item.get("type").and_then(Value::as_str) == Some("compaction") {
+            if let Some(content) = item.get("encrypted_content").and_then(Value::as_str) {
+                if let Some(summary) = decode_compaction_summary(content) {
+                    text.push_str(&summary);
+                } else {
+                    text.push_str(content);
+                }
+            }
+        } else {
+            if let Some(role) = item.get("role").and_then(Value::as_str) {
+                text.push_str(role);
+            }
+            if let Some(content) = item.get("content") {
+                match content {
+                    Value::String(value) => text.push_str(value),
+                    Value::Array(parts) => {
+                        for part in parts {
+                            if let Some(value) = part.get("text").and_then(Value::as_str) {
+                                text.push_str(value);
+                            }
                         }
                     }
+                    _ => {}
                 }
-                _ => {}
             }
         }
     }
 
     let estimated = text.chars().count().saturating_div(4).max(1);
     u32::try_from(estimated).unwrap_or(u32::MAX)
+}
+
+fn json_text_input_part(text: &str) -> crate::openai::types::ResponseInputContentPart {
+    crate::openai::types::ResponseInputContentPart {
+        kind: "input_text".to_owned(),
+        text: Some(text.to_owned()),
+        image_url: None,
+        detail: None,
+    }
+}
+
+fn compact_response_items(input_items: &[Value]) -> Vec<Value> {
+    let mut output = input_items
+        .iter()
+        .filter(|item| is_compactable_message(item))
+        .cloned()
+        .collect::<Vec<_>>();
+    output.push(json!({
+        "type": "compaction",
+        "encrypted_content": local_compaction_payload(&output),
+    }));
+    output
+}
+
+fn is_compactable_message(item: &Value) -> bool {
+    item.get("type").and_then(Value::as_str) == Some("message")
+        && matches!(
+            item.get("role").and_then(Value::as_str),
+            Some("user" | "developer")
+        )
+}
+
+fn local_compaction_payload(items: &[Value]) -> String {
+    let summary = items
+        .iter()
+        .filter_map(compaction_text_for_item)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let summary = truncate_summary(&summary, 1_024);
+    let payload = json!({
+        "provider": "codexia",
+        "version": 1,
+        "summary": summary,
+    });
+    STANDARD.encode(payload.to_string())
+}
+
+fn compaction_text_for_item(item: &Value) -> Option<String> {
+    let role = item.get("role").and_then(Value::as_str)?;
+    let content = item.get("content")?;
+    let text = match content {
+        Value::String(value) => value.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join(" "),
+        _ => String::new(),
+    };
+    Some(format!("{role}: {text}"))
+}
+
+fn truncate_summary(text: &str, max_len: usize) -> String {
+    if text.chars().count() <= max_len {
+        return text.to_owned();
+    }
+
+    text.chars().take(max_len).collect()
+}
+
+fn decode_compaction_summary(payload: &str) -> Option<String> {
+    let decoded = STANDARD.decode(payload).ok()?;
+    let value = serde_json::from_slice::<Value>(&decoded).ok()?;
+    value
+        .get("summary")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
 }
 
 fn response_object_from_chat(
@@ -583,7 +805,7 @@ fn response_object_from_chat(
         max_output_tokens: request.max_output_tokens,
         model: response.model,
         output,
-        parallel_tool_calls: true,
+        parallel_tool_calls: request.parallel_tool_calls(),
         store: request.should_store(),
         temperature: request.temperature,
         tool_choice: request.tool_choice.clone(),
@@ -686,7 +908,7 @@ fn response_object(
         max_output_tokens: request.max_output_tokens,
         model: request.model.clone(),
         output,
-        parallel_tool_calls: true,
+        parallel_tool_calls: request.parallel_tool_calls(),
         store: request.should_store(),
         temperature: request.temperature,
         tool_choice: request.tool_choice.clone(),

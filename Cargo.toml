@@ -1,6 +1,6 @@
 [package]
 name = "codexia"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2024"
 rust-version = "1.86"
 description = "OpenAI- and Anthropic-compatible local API gateway backed by Codex OAuth."

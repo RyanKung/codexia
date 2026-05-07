@@ -161,6 +161,13 @@ pub struct ResponseInputTokens {
     pub input_tokens: u32,
 }
 
+/// Response returned by `POST /v1/responses/compact`.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ResponseCompaction {
+    /// Compacted input items suitable for later Responses API reuse.
+    pub output: Vec<Value>,
+}
+
 /// OpenAI-compatible streamed chat completion chunk.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ChatCompletionChunk {

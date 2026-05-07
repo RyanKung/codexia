@@ -10,6 +10,9 @@ cargo install codexia
 codexia login
 codexia config
 codexia serve
+
+# later, update to the latest published release
+codexia update
 ```
 
 `login` prints the Codex OAuth URL. Complete the login in a browser, then paste
@@ -231,6 +234,7 @@ OpenAI compatibility currently covers:
 - `GET /v1/models`
 - `POST /v1/chat/completions`
 - `POST /v1/responses`
+- `POST /v1/responses/compact`
 - `POST /v1/responses/input_tokens`
 
 `/v1/responses` currently supports `previous_response_id` only as an
@@ -244,7 +248,10 @@ Anthropic compatibility currently covers:
 - `POST /v1/messages`
 - `POST /v1/messages/count_tokens`
 - `POST /v1/messages/batches`
+- `GET /v1/messages/batches`
 - `GET /v1/messages/batches/{batch_id}`
+- `POST /v1/messages/batches/{batch_id}/cancel`
+- `DELETE /v1/messages/batches/{batch_id}`
 - `GET /v1/messages/batches/{batch_id}/results`
 - `x-api-key` or `authorization: Bearer ...` local auth
 - Anthropic-style SSE events for streaming text and tool use

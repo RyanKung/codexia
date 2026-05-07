@@ -24,7 +24,7 @@ pub fn to_codex_request(request: &ChatCompletionRequest) -> Value {
         "text": { "verbosity": text_verbosity(request) },
         "include": ["reasoning.encrypted_content"],
         "tool_choice": convert_tool_choice(request.tool_choice.as_ref()).unwrap_or_else(|| json!("auto")),
-        "parallel_tool_calls": true
+        "parallel_tool_calls": request.parallel_tool_calls.unwrap_or(true)
     });
 
     insert_optional(
@@ -32,10 +32,21 @@ pub fn to_codex_request(request: &ChatCompletionRequest) -> Value {
         "temperature",
         request.temperature.map(Value::from),
     );
+    insert_optional(&mut body, "top_p", request.top_p.map(Value::from));
     insert_optional(
         &mut body,
         "service_tier",
         request.service_tier.clone().map(Value::from),
+    );
+    insert_optional(
+        &mut body,
+        "stop",
+        request
+            .stop
+            .as_ref()
+            .filter(|stop| !stop.is_empty())
+            .cloned()
+            .map(|stop| json!(stop)),
     );
     if let Some(tools) = request.tools.as_ref().filter(|tools| !tools.is_empty()) {
         body["tools"] = Value::Array(tools.iter().map(convert_tool).collect());
@@ -249,6 +260,21 @@ mod tests {
         assert_eq!(body["instructions"], "be terse");
         assert_eq!(body["temperature"], 0.2);
         assert_eq!(body["input"][0]["content"][0]["type"], "input_text");
+    }
+
+    #[test]
+    fn forwards_sampling_and_stop_controls() {
+        let body = to_codex_request(&request(json!({
+            "model": "gpt-5.5",
+            "messages": [{"role": "user", "content": "hello"}],
+            "top_p": 0.7,
+            "parallel_tool_calls": false,
+            "stop": ["DONE"]
+        })));
+
+        assert_eq!(body["top_p"], 0.7);
+        assert_eq!(body["parallel_tool_calls"], false);
+        assert_eq!(body["stop"], json!(["DONE"]));
     }
 
     #[test]

@@ -68,4 +68,36 @@ impl BatchStore {
     pub async fn get(&self, id: &str) -> Option<StoredBatch> {
         self.inner.read().await.get(id).cloned()
     }
+
+    /// Lists stored batches ordered from newest to oldest.
+    #[must_use]
+    pub async fn list(&self) -> Vec<StoredBatch> {
+        let mut batches = self
+            .inner
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        batches.sort_by(|left, right| right.batch.created_at.cmp(&left.batch.created_at));
+        batches
+    }
+
+    /// Updates a stored batch in place and returns the updated value.
+    pub async fn update<F>(&self, id: &str, update: F) -> Option<StoredBatch>
+    where
+        F: FnOnce(&mut StoredBatch),
+    {
+        let mut guard = self.inner.write().await;
+        let stored = guard.get_mut(id)?;
+        update(stored);
+        let updated = stored.clone();
+        drop(guard);
+        Some(updated)
+    }
+
+    /// Removes a stored batch and returns the removed value.
+    pub async fn remove(&self, id: &str) -> Option<StoredBatch> {
+        self.inner.write().await.remove(id)
+    }
 }

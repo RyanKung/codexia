@@ -15,6 +15,9 @@ pub struct ChatCompletionRequest {
     /// Sampling temperature, when supported by the model.
     #[serde(default)]
     pub temperature: Option<f64>,
+    /// Nucleus sampling parameter, when supported by the model.
+    #[serde(default)]
+    pub top_p: Option<f64>,
     /// Callable tools exposed to the model.
     #[serde(default)]
     pub tools: Option<Vec<ChatTool>>,
@@ -33,6 +36,12 @@ pub struct ChatCompletionRequest {
     /// Legacy upper bound for generated tokens.
     #[serde(default)]
     pub max_tokens: Option<u32>,
+    /// Whether tool calls may execute in parallel.
+    #[serde(default)]
+    pub parallel_tool_calls: Option<bool>,
+    /// Optional stop sequences understood by compatible clients.
+    #[serde(default)]
+    pub stop: Option<Vec<String>>,
     /// Provider-specific extra request fields preserved verbatim.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -63,6 +72,9 @@ pub struct ResponsesRequest {
     /// Sampling temperature, when supported by the model.
     #[serde(default)]
     pub temperature: Option<f64>,
+    /// Nucleus sampling parameter, when supported by the model.
+    #[serde(default)]
+    pub top_p: Option<f64>,
     /// Callable tools exposed to the model.
     #[serde(default)]
     pub tools: Option<Vec<ChatTool>>,
@@ -78,6 +90,9 @@ pub struct ResponsesRequest {
     /// Preferred upper bound for generated completion tokens.
     #[serde(default)]
     pub max_output_tokens: Option<u32>,
+    /// Whether tool calls may execute in parallel.
+    #[serde(default)]
+    pub parallel_tool_calls: Option<bool>,
     /// Whether the created response should be retrievable later.
     #[serde(default)]
     pub store: Option<bool>,
@@ -108,6 +123,12 @@ impl ResponsesRequest {
     pub fn should_store(&self) -> bool {
         self.store.unwrap_or(true)
     }
+
+    /// Returns whether tool calls may execute in parallel.
+    #[must_use]
+    pub fn parallel_tool_calls(&self) -> bool {
+        self.parallel_tool_calls.unwrap_or(true)
+    }
 }
 
 /// Responses API input can be a plain string or a list of structured items.
@@ -122,7 +143,17 @@ pub enum ResponseInput {
 
 /// Structured input item accepted by the Responses API.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ResponseInputItem {
+#[serde(untagged)]
+pub enum ResponseInputItem {
+    /// Message-like input item carrying a role and content payload.
+    Message(ResponseMessageInputItem),
+    /// Opaque compaction item returned by `/v1/responses/compact`.
+    Compaction(ResponseCompactionItem),
+}
+
+/// Message-like structured input item accepted by the Responses API.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ResponseMessageInputItem {
     /// Object type, commonly `message`.
     #[serde(default, rename = "type")]
     pub kind: Option<String>,
@@ -139,6 +170,16 @@ pub struct ResponseInputItem {
     /// Tool call identifier referenced by a `tool` role item.
     #[serde(default)]
     pub tool_call_id: Option<String>,
+}
+
+/// Opaque compaction item returned by the Responses compaction endpoint.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ResponseCompactionItem {
+    /// Object type, always `compaction`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Opaque compaction payload preserved for later reuse.
+    pub encrypted_content: String,
 }
 
 /// Structured input item content accepted by the Responses API.
@@ -307,5 +348,22 @@ mod tests {
             parts[1].image_url.as_ref().unwrap().url,
             "data:image/png;base64,abc"
         );
+    }
+
+    #[test]
+    fn parses_compaction_input_item() {
+        let item: ResponseInputItem = serde_json::from_value(serde_json::json!({
+            "type": "compaction",
+            "encrypted_content": "opaque"
+        }))
+        .unwrap();
+
+        match item {
+            ResponseInputItem::Compaction(compaction) => {
+                assert_eq!(compaction.kind, "compaction");
+                assert_eq!(compaction.encrypted_content, "opaque");
+            }
+            ResponseInputItem::Message(_) => panic!("expected compaction item"),
+        }
     }
 }

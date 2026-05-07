@@ -27,6 +27,7 @@ use std::{
     io::{self, IsTerminal, Write},
     net::SocketAddr,
     path::PathBuf,
+    process::Command as ProcessCommand,
     time::Duration,
 };
 use tokio::time::{MissedTickBehavior, interval};
@@ -54,6 +55,7 @@ Examples:
   codexia daemon status
   codexia refresh
   codexia status
+  codexia update
   curl -X POST http://127.0.0.1:14550/v1/auth/refresh \\
     -H 'authorization: Bearer local-secret'
 
@@ -116,7 +118,7 @@ enum Command {
     },
     #[command(
         about = "Serve the OpenAI- and Anthropic-compatible HTTP API",
-        long_about = "Serve OpenAI- and Anthropic-compatible endpoints backed by Codex, including /v1/models, /v1/chat/completions, /v1/responses, /v1/messages, /v1/messages/count_tokens, /v1/messages/batches, and /v1/auth/refresh."
+        long_about = "Serve OpenAI- and Anthropic-compatible endpoints backed by Codex, including /v1/models, /v1/chat/completions, /v1/responses, /v1/responses/compact, /v1/messages, /v1/messages/count_tokens, /v1/messages/batches, and /v1/auth/refresh."
     )]
     Serve {
         #[arg(long, value_name = "ADDR", help = "Socket address to listen on")]
@@ -146,6 +148,18 @@ enum Command {
     Status {
         #[arg(long, value_name = "PATH", help = "Credential file to read/write")]
         auth_file: Option<PathBuf>,
+    },
+    #[command(
+        about = "Install the latest Codexia release with cargo",
+        long_about = "Run `cargo install --locked --force codexia` so the currently installed Codexia binary is updated to the latest published release. Requires `cargo` to be available on PATH."
+    )]
+    Update {
+        #[arg(
+            long,
+            value_name = "VERSION",
+            help = "Install a specific published version instead of the latest release"
+        )]
+        version: Option<String>,
     },
     #[command(
         about = "Install and control the background Codexia service",
@@ -261,8 +275,38 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Refresh { auth_file } => refresh(auth_store(auth_file)?).await,
         Command::Status { auth_file } => status(auth_store(auth_file)?).await,
+        Command::Update { version } => update(version.as_deref()),
         Command::Daemon { command } => daemon_command(command),
     }
+}
+
+/// Reinstalls Codexia from crates.io through Cargo.
+fn update(version: Option<&str>) -> Result<()> {
+    let mut command = build_update_command(version);
+    println!("running {command:?}");
+    let status = command.status()?;
+    if status.success() {
+        match version {
+            Some(version) => println!("updated codexia to version {version}"),
+            None => println!("updated codexia to the latest published release"),
+        }
+        Ok(())
+    } else {
+        Err(Error::upstream(format!(
+            "cargo install exited with status {status}"
+        )))
+    }
+}
+
+/// Builds the Cargo command used by `codexia update`.
+#[must_use]
+fn build_update_command(version: Option<&str>) -> ProcessCommand {
+    let mut command = ProcessCommand::new("cargo");
+    command.args(["install", "--locked", "--force", "codexia"]);
+    if let Some(version) = version {
+        command.args(["--version", version]);
+    }
+    command
 }
 
 /// Handles interactive configuration, inspection, and reset commands.
@@ -617,7 +661,7 @@ fn token_expiry_message(credentials: &Credentials) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppConfig, bind_from_config};
+    use super::{AppConfig, bind_from_config, build_update_command};
     use codexia::timefmt::format_duration;
 
     #[test]
@@ -636,6 +680,38 @@ mod tests {
         assert_eq!(
             bind_from_config(Some(&config)).map(|item| item.to_string()),
             Some("127.0.0.1:14550".to_owned())
+        );
+    }
+
+    #[test]
+    fn builds_update_command_for_latest_release() {
+        let command = build_update_command(None);
+        let args = command
+            .get_args()
+            .map(|item| item.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(args, ["install", "--locked", "--force", "codexia"]);
+    }
+
+    #[test]
+    fn builds_update_command_for_specific_version() {
+        let command = build_update_command(Some("0.3.3"));
+        let args = command
+            .get_args()
+            .map(|item| item.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            args,
+            [
+                "install",
+                "--locked",
+                "--force",
+                "codexia",
+                "--version",
+                "0.3.3"
+            ]
         );
     }
 }

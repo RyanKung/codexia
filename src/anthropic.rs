@@ -307,6 +307,19 @@ pub struct MessageBatch {
     pub kind: &'static str,
 }
 
+/// Anthropic-compatible list response for message batches.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct MessageBatchListResponse {
+    /// Listed message batches, ordered newest first.
+    pub data: Vec<MessageBatch>,
+    /// First batch identifier when available.
+    pub first_id: Option<String>,
+    /// Whether more batches remain after this page.
+    pub has_more: bool,
+    /// Last batch identifier when available.
+    pub last_id: Option<String>,
+}
+
 /// Anthropic-compatible request state counters for a batch.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct MessageBatchRequestCounts {
@@ -347,6 +360,16 @@ pub enum MessageBatchResultType {
         /// Error object returned for the failed request.
         error: Value,
     },
+}
+
+/// Anthropic-compatible deletion confirmation for a message batch.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct MessageBatchDeleted {
+    /// Identifier of the deleted message batch.
+    pub id: String,
+    /// Object kind, always `message_batch_deleted`.
+    #[serde(rename = "type")]
+    pub kind: &'static str,
 }
 
 /// SSE payload for `message_start`.
@@ -410,12 +433,15 @@ pub fn to_openai_request(request: &MessagesRequest) -> Result<ChatCompletionRequ
         messages,
         stream: request.stream,
         temperature: request.temperature,
+        top_p: request.top_p,
         tools: request.tools.as_ref().map(|tools| convert_tools(tools)),
         tool_choice: request.tool_choice.clone().map(convert_tool_choice),
         service_tier: None,
         reasoning_effort: None,
         max_completion_tokens: request.max_tokens,
         max_tokens: request.max_tokens,
+        parallel_tool_calls: Some(true),
+        stop: request.stop_sequences.clone(),
         extra: request.extra.clone(),
     })
 }
@@ -514,6 +540,20 @@ pub fn models_response(ids: &[String]) -> ModelsResponse {
 
     ModelsResponse {
         data,
+        first_id,
+        has_more: false,
+        last_id,
+    }
+}
+
+/// Builds an Anthropic-compatible list response from stored message batches.
+#[must_use]
+pub fn message_batch_list_response(batches: Vec<MessageBatch>) -> MessageBatchListResponse {
+    let first_id = batches.first().map(|batch| batch.id.clone());
+    let last_id = batches.last().map(|batch| batch.id.clone());
+
+    MessageBatchListResponse {
+        data: batches,
         first_id,
         has_more: false,
         last_id,
