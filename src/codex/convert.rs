@@ -29,22 +29,8 @@ pub fn to_codex_request(request: &ChatCompletionRequest) -> Value {
 
     insert_optional(
         &mut body,
-        "temperature",
-        request.temperature.map(Value::from),
-    );
-    insert_optional(&mut body, "top_p", request.top_p.map(Value::from));
-    insert_optional(
-        &mut body,
         "service_tier",
         request.service_tier.clone().map(Value::from),
-    );
-    insert_optional(
-        &mut body,
-        "max_output_tokens",
-        request
-            .max_completion_tokens
-            .or(request.max_tokens)
-            .map(Value::from),
     );
     insert_optional(
         &mut body,
@@ -266,21 +252,23 @@ mod tests {
 
         assert_eq!(body["model"], "gpt-5.4");
         assert_eq!(body["instructions"], "be terse");
-        assert_eq!(body["temperature"], 0.2);
+        assert!(body.get("temperature").is_none());
         assert_eq!(body["input"][0]["content"][0]["type"], "input_text");
     }
 
     #[test]
-    fn forwards_sampling_and_stop_controls() {
+    fn does_not_forward_unsupported_sampling_controls() {
         let body = to_codex_request(&request(json!({
             "model": "gpt-5.5",
             "messages": [{"role": "user", "content": "hello"}],
+            "temperature": 0.2,
             "top_p": 0.7,
             "parallel_tool_calls": false,
             "stop": ["DONE"]
         })));
 
-        assert_eq!(body["top_p"], 0.7);
+        assert!(body.get("temperature").is_none());
+        assert!(body.get("top_p").is_none());
         assert_eq!(body["parallel_tool_calls"], false);
         assert_eq!(body["stop"], json!(["DONE"]));
     }
@@ -315,14 +303,14 @@ mod tests {
     }
 
     #[test]
-    fn forwards_supported_chat_completion_token_limit() {
+    fn does_not_forward_unsupported_chat_completion_token_limit() {
         let body = to_codex_request(&request(json!({
             "model": "gpt-5.4",
             "messages": [],
             "max_completion_tokens": 42
         })));
 
-        assert_eq!(body["max_output_tokens"], 42);
+        assert!(body.get("max_output_tokens").is_none());
     }
 
     #[test]
