@@ -286,11 +286,15 @@ pub struct FunctionCall {
 /// Tool definition exposed to the model.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ChatTool {
-    /// Tool type, currently `function`.
+    /// Tool type such as `function` or `image_generation`.
     #[serde(rename = "type")]
     pub kind: String,
-    /// Function tool metadata.
-    pub function: FunctionTool,
+    /// Function tool metadata when the tool is a callable function.
+    #[serde(default)]
+    pub function: Option<FunctionTool>,
+    /// Additional hosted-tool fields preserved verbatim.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
 /// Metadata describing a callable function tool.
@@ -307,6 +311,36 @@ pub struct FunctionTool {
     /// Whether the model should adhere strictly to the schema.
     #[serde(default)]
     pub strict: Option<bool>,
+}
+
+/// Classic OpenAI-compatible Images API generation request body.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ImageGenerationRequest {
+    /// Target model identifier.
+    pub model: String,
+    /// Prompt describing the desired image.
+    pub prompt: String,
+    /// Number of images requested.
+    #[serde(default)]
+    pub n: Option<u32>,
+    /// Requested image size such as `1024x1024`.
+    #[serde(default)]
+    pub size: Option<String>,
+    /// Requested quality such as `low`, `medium`, or `high`.
+    #[serde(default)]
+    pub quality: Option<String>,
+    /// Background hint such as `transparent`.
+    #[serde(default)]
+    pub background: Option<String>,
+    /// Preferred output format such as `png`, `jpeg`, or `webp`.
+    #[serde(default)]
+    pub output_format: Option<String>,
+    /// Response format, typically `b64_json` or `url`.
+    #[serde(default)]
+    pub response_format: Option<String>,
+    /// Provider-specific extra request fields preserved verbatim.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
 #[cfg(test)]

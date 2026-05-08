@@ -100,6 +100,7 @@ pub fn router(state: AppState) -> Router {
             get(handlers::message_batch_results),
         )
         .route("/v1/chat/completions", post(handlers::chat_completions))
+        .route("/v1/images/generations", post(handlers::image_generations))
         .with_state(state)
 }
 
@@ -221,12 +222,35 @@ mod tests {
         )
     }
 
+    async fn codex_image_stream_handler() -> impl axum::response::IntoResponse {
+        (
+            [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+            concat!(
+                "event: response.created\n",
+                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_upstream\",\"model\":\"gpt-5.5\",\"output\":[]}}\n\n",
+                "event: response.completed\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_upstream\",\"model\":\"gpt-5.5\",\"output\":[{\"type\":\"image_generation_call\",\"id\":\"ig_1\",\"result\":\"YWJj\",\"output_format\":\"png\",\"revised_prompt\":\"refined prompt\"}],\"usage\":{\"input_tokens\":12,\"output_tokens\":5,\"total_tokens\":17}}}\n\n"
+            ),
+        )
+    }
+
     async fn spawn_codex_server(tool_call: bool) -> String {
         let app = if tool_call {
             Router::new().route("/codex/responses", post(codex_tool_call_handler))
         } else {
             Router::new().route("/codex/responses", post(codex_complete_handler))
         };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        url
+    }
+
+    async fn spawn_image_stream_codex_server() -> String {
+        let app = Router::new().route("/codex/responses", post(codex_image_stream_handler));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move {
@@ -600,6 +624,108 @@ mod tests {
         assert_eq!(value["object"], "response");
         assert_eq!(value["status"], "completed");
         assert_eq!(value["output"][0]["type"], "message");
+    }
+
+    #[tokio::test]
+    async fn responses_stream_image_generation_passthroughs_upstream_events() {
+        let dir = TempDir::new().unwrap();
+        let store = AuthStore::new(dir.path().join("auth.json"));
+        store
+            .save(&Credentials {
+                access_token: "access".into(),
+                refresh_token: "refresh".into(),
+                expires_at: now_unix() + 600,
+                account_id: "acc_old".into(),
+            })
+            .unwrap();
+        let http = Client::new();
+        let state = AppState::new(
+            TokenManager::new(
+                store,
+                CodexOAuthClient::new_with_token_url(http.clone(), spawn_refresh_server().await),
+            ),
+            CodexClient::new(http, spawn_image_stream_codex_server().await),
+            Some("secret".into()),
+            ModelList::from_ids(["gpt-5.5"]),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("secret"));
+
+        let response = handlers::responses(
+            axum::extract::State(state),
+            headers,
+            Json(
+                serde_json::from_value(json!({
+                    "model": "gpt-5.5",
+                    "stream": true,
+                    "input": "draw a cat",
+                    "tools": [{"type":"image_generation","size":"1024x1024"}],
+                    "tool_choice": {"type":"image_generation"}
+                }))
+                .unwrap(),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("event: response.created"));
+        assert!(text.contains("event: response.completed"));
+        assert!(text.contains("\"type\":\"image_generation_call\""));
+        assert!(text.contains("\"result\":\"YWJj\""));
+    }
+
+    #[tokio::test]
+    async fn messages_stream_image_generation_returns_anthropic_image_block_events() {
+        let dir = TempDir::new().unwrap();
+        let store = AuthStore::new(dir.path().join("auth.json"));
+        store
+            .save(&Credentials {
+                access_token: "access".into(),
+                refresh_token: "refresh".into(),
+                expires_at: now_unix() + 600,
+                account_id: "acc_old".into(),
+            })
+            .unwrap();
+        let http = Client::new();
+        let state = AppState::new(
+            TokenManager::new(
+                store,
+                CodexOAuthClient::new_with_token_url(http.clone(), spawn_refresh_server().await),
+            ),
+            CodexClient::new(http, spawn_image_stream_codex_server().await),
+            Some("secret".into()),
+            ModelList::from_ids(["gpt-5.5"]),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("secret"));
+
+        let response = handlers::messages(
+            axum::extract::State(state),
+            headers,
+            Json(
+                serde_json::from_value(json!({
+                    "model": "gpt-5.5",
+                    "stream": true,
+                    "max_tokens": 256,
+                    "messages": [{"role": "user", "content": "draw a cat"}],
+                    "tools": [{"name":"image_generation"}]
+                }))
+                .unwrap(),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("event: message_start"));
+        assert!(text.contains("event: content_block_start"));
+        assert!(text.contains("\"type\":\"image\""));
+        assert!(text.contains("\"media_type\":\"image/png\""));
+        assert!(text.contains("\"data\":\"YWJj\""));
+        assert!(text.contains("event: message_stop"));
     }
 
     #[tokio::test]

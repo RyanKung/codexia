@@ -17,6 +17,8 @@ pub struct ChatOutput {
     pub text: String,
     /// Function calls emitted by the model during the response.
     pub tool_calls: Vec<ToolCall>,
+    /// Generated images emitted by hosted image generation tools.
+    pub images: Vec<crate::openai::response::GeneratedImage>,
     /// Token usage reported by the upstream response, when available.
     pub usage: Option<Usage>,
     /// OpenAI-compatible finish reason derived from the terminal response event.
@@ -51,6 +53,25 @@ pub async fn collect_output(response: Response) -> Result<ChatOutput> {
     Ok(output)
 }
 
+/// Collects the final upstream `response` envelope from a streamed Codex request.
+pub async fn collect_response_value(response: Response) -> Result<Value> {
+    let mut events = Box::pin(sse::json_events(Box::pin(response.bytes_stream())));
+    while let Some(event) = events.next().await {
+        let event = event?;
+        if let Some(message) = event_error(&event) {
+            return Err(Error::upstream(message));
+        }
+        if is_done_event(&event) {
+            return event
+                .get("response")
+                .cloned()
+                .ok_or_else(|| Error::upstream("Codex response completed without a response payload"));
+        }
+    }
+
+    Err(Error::upstream("Codex response stream ended before completion"))
+}
+
 /// Applies one parsed Codex event to an in-progress chat output.
 ///
 /// # Errors
@@ -79,15 +100,13 @@ pub fn apply_event(output: &mut ChatOutput, event: &Value) -> Result<()> {
         }
         // Some responses only expose final text in the completed output array,
         // so backfill it if no incremental text deltas were observed.
-        if output.text.is_empty() {
-            for item in response
-                .get("output")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-            {
-                apply_output_item(output, item, true);
-            }
+        for item in response
+            .get("output")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            apply_output_item(output, item, output.text.is_empty());
         }
     }
 
@@ -185,6 +204,13 @@ fn apply_output_item(output: &mut ChatOutput, item: &Value, fill_text: bool) {
             if let Some(tool_call) = parse_tool_call(item) {
                 if !output.tool_calls.iter().any(|call| call.id == tool_call.id) {
                     output.tool_calls.push(tool_call);
+                }
+            }
+        }
+        Some("image_generation_call") => {
+            if let Some(image) = crate::openai::response::generated_image_from_item(item) {
+                if !output.images.iter().any(|existing| existing.b64_json == image.b64_json) {
+                    output.images.push(image);
                 }
             }
         }

@@ -3,7 +3,7 @@ use crate::{
     codex::{
         convert::to_codex_request,
         events::{
-            collect_output, event_error, event_tool_call, finish_reason, is_done_event,
+            collect_output, collect_response_value, event_error, event_tool_call, finish_reason, is_done_event,
             response_tool_calls, text_delta,
         },
         sse,
@@ -86,6 +86,7 @@ impl CodexClient {
                         Some(output.text)
                     },
                     tool_calls: (!output.tool_calls.is_empty()).then_some(output.tool_calls),
+                    images: (!output.images.is_empty()).then_some(output.images),
                 },
                 finish_reason: output.finish_reason,
             }],
@@ -160,19 +161,42 @@ impl CodexClient {
         Ok(Box::pin(stream))
     }
 
+    /// Sends a non-streaming Responses-style request body and returns the final response envelope.
+    pub async fn complete_response(
+        &self,
+        request: Value,
+        credentials: &Credentials,
+    ) -> Result<Value> {
+        let response = self.send_body(&request, credentials).await?;
+        collect_response_value(response).await
+    }
+
+    /// Sends a streaming Responses-style request body and yields raw upstream JSON SSE events.
+    pub async fn stream_response(
+        &self,
+        request: Value,
+        credentials: &Credentials,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<crate::codex::sse::JsonSseEvent>> + Send>>> {
+        let response = self.send_body(&request, credentials).await?;
+        Ok(Box::pin(sse::json_named_events(Box::pin(response.bytes_stream()))))
+    }
+
     async fn send_chat(
         &self,
         request: &crate::openai::types::ChatCompletionRequest,
         credentials: &Credentials,
     ) -> Result<Response> {
+        self.send_body(&to_codex_request(request), credentials).await
+    }
+
+    async fn send_body(&self, body: &Value, credentials: &Credentials) -> Result<Response> {
         let response = self
             .http
             .post(resolve_codex_url(&self.base_url))
             .headers(codex_headers(credentials)?)
-            .json(&to_codex_request(request))
+            .json(body)
             .send()
             .await?;
-
         if response.status().is_success() {
             Ok(response)
         } else {

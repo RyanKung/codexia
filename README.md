@@ -234,13 +234,38 @@ OpenAI compatibility currently covers:
 - `GET /v1/models`
 - `POST /v1/chat/completions`
 - `POST /v1/responses`
+- `POST /v1/images/generations`
 - `POST /v1/responses/compact`
 - `POST /v1/responses/input_tokens`
+
+On `POST /v1/chat/completions`, Codexia accepts common OpenAI compatibility
+fields such as `temperature`, `max_tokens`, `max_completion_tokens`, and
+`max_output_tokens`, but the current Codex upstream rejects those parameters.
+Codexia therefore accepts them without error and omits them from the upstream
+Codex request, so they should be treated as compatibility no-ops rather than
+effective sampling or output-length controls.
 
 `/v1/responses` currently supports `previous_response_id` only as an
 in-memory continuation mechanism within the same running Codexia process. It is
 not exposed as a public retrievable/deletable response resource, and it should
 not be treated as durable storage across daemon restarts or process exits.
+
+Image generation is exposed in two compatibility shapes:
+
+- OpenAI-style `POST /v1/images/generations`
+- OpenAI Responses hosted tool `{"type":"image_generation"}`
+
+Current image-generation caveats:
+
+- OpenAI `POST /v1/responses` supports streaming image-generation events
+- `POST /v1/images/generations` remains non-streaming
+- Anthropic `POST /v1/messages` image generation streaming is exposed as a
+  Codexia extension that emits `image` content blocks only once the upstream
+  response completes
+- generated images are returned as base64 payloads
+- Anthropic compatibility uses a Codexia extension that returns
+  `content: [{"type":"image","source":{"type":"base64",...}}]` on
+  `POST /v1/messages` when the request includes a tool named `image_generation`
 
 Anthropic compatibility currently covers:
 

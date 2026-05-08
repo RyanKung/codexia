@@ -1,5 +1,5 @@
 use crate::openai::types::{
-    ChatCompletionRequest, ChatContent, ChatContentPart, ChatMessage, ChatTool,
+    ChatCompletionRequest, ChatContent, ChatContentPart, ChatMessage, ChatTool, ResponsesRequest,
 };
 use serde_json::{Value, json};
 
@@ -134,17 +134,26 @@ fn convert_content_part(part: &ChatContentPart) -> Option<Value> {
     }
 }
 
-fn convert_tool(tool: &ChatTool) -> Value {
-    json!({
-        "type": "function",
-        "name": &tool.function.name,
-        "description": tool.function.description.clone().unwrap_or_default(),
-        "parameters": tool.function.parameters.clone().unwrap_or_else(|| json!({ "type": "object" })),
-        "strict": tool.function.strict
-    })
+/// Converts one compatibility-layer tool definition into the upstream Codex shape.
+pub fn convert_tool(tool: &ChatTool) -> Value {
+    if tool.kind == "function" {
+        let function = tool.function.as_ref().expect("function tool metadata missing");
+        json!({
+            "type": "function",
+            "name": &function.name,
+            "description": function.description.clone().unwrap_or_default(),
+            "parameters": function.parameters.clone().unwrap_or_else(|| json!({ "type": "object" })),
+            "strict": function.strict
+        })
+    } else {
+        let mut value = Value::Object(tool.extra.clone());
+        value["type"] = Value::String(tool.kind.clone());
+        value
+    }
 }
 
-fn convert_tool_choice(tool_choice: Option<&Value>) -> Option<Value> {
+/// Normalizes compatibility-layer tool choice values into the upstream Codex shape.
+pub fn convert_tool_choice(tool_choice: Option<&Value>) -> Option<Value> {
     let choice = tool_choice?;
     if choice.is_string() {
         return Some(choice.clone());
@@ -164,6 +173,45 @@ fn convert_tool_choice(tool_choice: Option<&Value>) -> Option<Value> {
         "type": "function",
         "name": name
     }))
+}
+
+/// Converts a Responses request plus normalized input items into the Codex body.
+#[must_use]
+pub fn responses_to_codex_request(request: &ResponsesRequest, input: Vec<Value>) -> Value {
+    let mut body = json!({
+        "model": normalize_model(&request.model),
+        "store": request.should_store(),
+        "stream": request.wants_stream(),
+        "input": input,
+        "text": { "verbosity": request.extra.get("text_verbosity").and_then(Value::as_str).unwrap_or("medium") },
+        "include": ["reasoning.encrypted_content"],
+        "tool_choice": convert_tool_choice(request.tool_choice.as_ref()).unwrap_or_else(|| json!("auto")),
+        "parallel_tool_calls": request.parallel_tool_calls()
+    });
+
+    insert_optional(
+        &mut body,
+        "instructions",
+        request.instructions.clone().map(Value::from),
+    );
+    insert_optional(
+        &mut body,
+        "service_tier",
+        request.service_tier.clone().map(Value::from),
+    );
+    if let Some(tools) = request.tools.as_ref().filter(|tools| !tools.is_empty()) {
+        body["tools"] = Value::Array(tools.iter().map(convert_tool).collect());
+    }
+    if let Some(reasoning) = request.reasoning.clone() {
+        body["reasoning"] = reasoning;
+    }
+    insert_optional(
+        &mut body,
+        "max_output_tokens",
+        request.max_output_tokens.map(Value::from),
+    );
+
+    body
 }
 
 fn message_text(message: &ChatMessage) -> Option<String> {

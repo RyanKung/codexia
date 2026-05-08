@@ -7,7 +7,9 @@
 use crate::{
     Error, Result,
     openai::{
-        response::{ChatCompletionResponse, Usage},
+        response::{
+            ChatCompletionResponse, ResponseObject, Usage, generated_images_from_response_items,
+        },
         types::{
             ChatCompletionRequest, ChatContent, ChatContentPart, ChatMessage, ChatTool,
             FunctionTool, ImageUrl, ToolCall,
@@ -219,6 +221,12 @@ pub enum ResponseContentBlock {
         name: String,
         /// Parsed JSON tool input.
         input: Value,
+    },
+    /// Non-standard Codexia extension for generated image output.
+    #[serde(rename = "image")]
+    Image {
+        /// Base64 image payload.
+        source: ImageSource,
     },
 }
 
@@ -470,6 +478,16 @@ pub fn from_openai_response(response: ChatCompletionResponse) -> MessageResponse
         });
     }
 
+    for image in choice.message.images.into_iter().flatten() {
+        content.push(ResponseContentBlock::Image {
+            source: ImageSource {
+                kind: "base64".to_owned(),
+                media_type: image.media_type.or_else(|| Some("image/png".to_owned())),
+                data: Some(image.b64_json),
+            },
+        });
+    }
+
     let usage = response.usage.unwrap_or(Usage {
         prompt_tokens: 0,
         completion_tokens: 0,
@@ -483,6 +501,66 @@ pub fn from_openai_response(response: ChatCompletionResponse) -> MessageResponse
         model: response.model,
         content,
         stop_reason: map_stop_reason(&choice.finish_reason),
+        stop_sequence: None,
+        usage: ResponseUsage {
+            input_tokens: usage.prompt_tokens,
+            output_tokens: usage.completion_tokens,
+        },
+    }
+}
+
+/// Maps an OpenAI-compatible Responses object into an Anthropic Messages response.
+pub fn from_openai_response_object(response: ResponseObject) -> MessageResponse {
+    let mut content = Vec::new();
+
+    for item in &response.output {
+        match item.kind {
+            "message" => {
+                let text = item
+                    .content
+                    .iter()
+                    .map(|part| part.text.clone())
+                    .collect::<Vec<_>>()
+                    .join("");
+                if !text.is_empty() {
+                    content.push(ResponseContentBlock::Text { text });
+                }
+            }
+            "function_call" => {
+                content.push(ResponseContentBlock::ToolUse {
+                    id: item.call_id.clone().unwrap_or_else(|| item.id.clone()),
+                    name: item.name.clone().unwrap_or_default(),
+                    input: parse_arguments(item.arguments.as_deref().unwrap_or("{}")),
+                });
+            }
+            "image_generation_call" => {}
+            _ => {}
+        }
+    }
+
+    for image in generated_images_from_response_items(&response.output) {
+        content.push(ResponseContentBlock::Image {
+            source: ImageSource {
+                kind: "base64".to_owned(),
+                media_type: image.media_type.or_else(|| Some("image/png".to_owned())),
+                data: Some(image.b64_json),
+            },
+        });
+    }
+
+    let usage = response.usage.unwrap_or(Usage {
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        total_tokens: 0,
+    });
+
+    MessageResponse {
+        id: response.id.replace("resp", "msg"),
+        kind: "message",
+        role: "assistant",
+        model: response.model,
+        content,
+        stop_reason: "end_turn",
         stop_sequence: None,
         usage: ResponseUsage {
             input_tokens: usage.prompt_tokens,
@@ -634,6 +712,25 @@ pub fn tool_block_start(index: u32, tool_call: &ToolCall) -> Result<Event> {
                 "id": tool_call.id,
                 "name": tool_call.function.name,
                 "input": {}
+            }
+        }),
+    )
+}
+
+/// Builds a `content_block_start` event for an image block.
+///
+/// # Errors
+///
+/// Returns an error when the SSE payload cannot be serialized to JSON.
+pub fn image_block_start(index: u32, source: &ImageSource) -> Result<Event> {
+    sse_event(
+        "content_block_start",
+        &json!({
+            "type": "content_block_start",
+            "index": index,
+            "content_block": {
+                "type": "image",
+                "source": source
             }
         }),
     )
@@ -860,13 +957,18 @@ fn convert_tools(tools: &[ToolDefinition]) -> Vec<ChatTool> {
     tools
         .iter()
         .map(|tool| ChatTool {
-            kind: "function".to_owned(),
-            function: FunctionTool {
+            kind: if tool.name == "image_generation" {
+                "image_generation".to_owned()
+            } else {
+                "function".to_owned()
+            },
+            function: (tool.name != "image_generation").then_some(FunctionTool {
                 name: tool.name.clone(),
                 description: tool.description.clone(),
                 parameters: tool.input_schema.clone(),
                 strict: None,
-            },
+            }),
+            extra: Map::new(),
         })
         .collect()
 }
@@ -997,6 +1099,7 @@ fn empty_choice() -> crate::openai::response::ChatChoice {
             role: "assistant",
             content: Some(String::new()),
             tool_calls: None,
+            images: None,
         },
         finish_reason: "stop".to_owned(),
     }
@@ -1026,7 +1129,14 @@ mod tests {
         let converted = to_openai_request(&request).unwrap();
         assert_eq!(converted.messages[0].role, "system");
         assert_eq!(converted.messages[1].role, "user");
-        assert_eq!(converted.tools.as_ref().unwrap()[0].function.name, "lookup");
+        assert_eq!(
+            converted.tools.as_ref().unwrap()[0]
+                .function
+                .as_ref()
+                .unwrap()
+                .name,
+            "lookup"
+        );
         assert_eq!(converted.tool_choice, Some(json!("required")));
         assert_eq!(converted.parallel_tool_calls, Some(false));
     }
@@ -1087,6 +1197,7 @@ mod tests {
                             arguments: "{\"q\":\"x\"}".into(),
                         },
                     }]),
+                    images: None,
                 },
                 finish_reason: "tool_calls".into(),
             }],

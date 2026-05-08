@@ -6,19 +6,23 @@ use crate::{
         MessageBatchListResponse, MessageBatchRequest, MessageBatchRequestCounts,
         MessageBatchResult, MessageBatchResultType, MessagesRequest, content_block_stop,
         error_body, estimate_input_tokens, from_openai_response, message_batch_list_response,
-        message_delta_event, message_start_event, message_stop_event, models_response,
-        text_block_start, text_delta, to_openai_request, tool_block_start, tool_json_delta,
+        from_openai_response_object, image_block_start, message_delta_event,
+        message_start_event, message_stop_event, models_response, text_block_start, text_delta,
+        to_openai_request, tool_block_start, tool_json_delta,
     },
+    codex::{convert::responses_to_codex_request, events::is_done_event},
     error::Result,
     openai::{
         response::{
-            ResponseCompaction, ResponseInputTokens, ResponseObject, response_function_call_item,
-            response_message_item,
+            GeneratedImage, ImageGenerationResponse, ResponseCompaction, ResponseInputTokens,
+            ResponseObject, generated_images_from_output, image_generation_response,
+            response_function_call_item,
+            response_image_generation_item, response_message_item,
         },
         types::{
-            ChatCompletionRequest, ChatContent, ChatContentPart, ChatMessage, ImageUrl,
-            ResponseInput, ResponseInputContent, ResponseInputItem, ResponseMessageInputItem,
-            ResponsesRequest,
+            ChatCompletionRequest, ChatContent, ChatContentPart, ChatMessage, ChatTool,
+            ImageGenerationRequest, ImageUrl, ResponseInput, ResponseInputContent,
+            ResponseInputItem, ResponseMessageInputItem, ResponsesRequest,
         },
     },
     server::{AppState, auth::authorize, status_response::build_status_response},
@@ -84,6 +88,30 @@ pub async fn responses(
             Ok(previous) => previous,
             Err(error) => return error.into_response(),
         };
+
+    if response_request_requires_raw_mode(&request, previous.as_ref()) {
+        let input_items = match collect_response_input_items(&request, previous.as_ref()) {
+            Ok(items) => items,
+            Err(error) => return error.into_response(),
+        };
+        let body = responses_to_codex_request(&request, input_items.clone());
+        if request.wants_stream() {
+            return match state.codex.stream_response(body, &credentials).await {
+                Ok(stream) => openai_raw_responses_sse(stream, request, input_items, state.responses)
+                    .into_response(),
+                Err(error) => error.into_response(),
+            };
+        }
+        return match state.codex.complete_response(body, &credentials).await {
+            Ok(value) => {
+                let response_object = response_object_from_upstream(&request, value);
+                maybe_store_response(&state, &request, response_object.clone(), input_items).await;
+                Json(response_object).into_response()
+            }
+            Err(error) => error.into_response(),
+        };
+    }
+
     let (chat_request, input_items) = match responses_to_chat_request(&request, previous.as_ref()) {
         Ok(converted) => converted,
         Err(error) => return error.into_response(),
@@ -242,6 +270,36 @@ pub async fn messages(
         Ok(credentials) => credentials,
         Err(error) => return anthropic_error_response(&error),
     };
+
+    if anthropic_request_uses_image_generation(&request) {
+        let response_request = anthropic_image_generation_request(&request);
+        let input_items = match collect_response_input_items(&response_request, None) {
+            Ok(items) => items,
+            Err(error) => return anthropic_error_response(&error),
+        };
+        let body = responses_to_codex_request(&response_request, input_items.clone());
+
+        if request.wants_stream() {
+            return match state.codex.stream_response(body, &credentials).await {
+                Ok(stream) => anthropic_raw_image_sse_response(
+                    stream,
+                    request.model.clone(),
+                    estimate_input_tokens(&request),
+                )
+                .into_response(),
+                Err(error) => anthropic_error_response(&error),
+            };
+        }
+
+        return match state.codex.complete_response(body, &credentials).await {
+            Ok(value) => {
+                let response_object = response_object_from_upstream(&response_request, value);
+                Json(from_openai_response_object(response_object)).into_response()
+            }
+            Err(error) => anthropic_error_response(&error),
+        };
+    }
+
     let openai_request = match to_openai_request(&request) {
         Ok(request) => request,
         Err(error) => return anthropic_error_response(&error),
@@ -264,6 +322,46 @@ pub async fn messages(
             Ok(response) => Json(from_openai_response(response)).into_response(),
             Err(error) => anthropic_error_response(&error),
         }
+    }
+}
+
+/// OpenAI-compatible Images API handler backed by the Codex Responses image tool.
+pub async fn image_generations(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ImageGenerationRequest>,
+) -> Response {
+    if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
+        return error.into_response();
+    }
+
+    let credentials = match state.token_manager.credentials().await {
+        Ok(credentials) => credentials,
+        Err(error) => return error.into_response(),
+    };
+
+    let response_request = image_generation_responses_request(&request);
+    let input_items = match collect_response_input_items(&response_request, None) {
+        Ok(items) => items,
+        Err(error) => return error.into_response(),
+    };
+    let body = responses_to_codex_request(&response_request, input_items);
+
+    match state.codex.complete_response(body, &credentials).await {
+        Ok(value) => {
+            let images = generated_images_from_output(
+                value.get("output")
+                    .and_then(Value::as_array)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+            );
+            Json::<ImageGenerationResponse>(image_generation_response(
+                crate::config::now_unix(),
+                images,
+            ))
+            .into_response()
+        }
+        Err(error) => error.into_response(),
     }
 }
 
@@ -513,6 +611,164 @@ fn responses_to_chat_request(
     ))
 }
 
+fn response_request_requires_raw_mode(
+    request: &ResponsesRequest,
+    previous: Option<&crate::server::store::StoredResponse>,
+) -> bool {
+    request
+        .tools
+        .as_ref()
+        .is_some_and(|tools| tools.iter().any(is_image_generation_tool))
+        || previous_stores_generated_images(previous)
+}
+
+fn previous_stores_generated_images(previous: Option<&crate::server::store::StoredResponse>) -> bool {
+    previous
+        .map(|stored| {
+            stored
+                .input_items
+                .iter()
+                .any(|item| item.get("type").and_then(Value::as_str) == Some("image_generation_call"))
+        })
+        .unwrap_or(false)
+}
+
+fn is_image_generation_tool(tool: &ChatTool) -> bool {
+    tool.kind == "image_generation"
+}
+
+fn anthropic_request_uses_image_generation(request: &MessagesRequest) -> bool {
+    request
+        .tools
+        .as_ref()
+        .is_some_and(|tools| tools.iter().any(|tool| tool.name == "image_generation"))
+}
+
+fn anthropic_image_generation_request(request: &MessagesRequest) -> ResponsesRequest {
+    let openai = to_openai_request(request).unwrap_or_else(|_| ChatCompletionRequest {
+        model: request.model.clone(),
+        messages: Vec::new(),
+        stream: Some(false),
+        temperature: request.temperature,
+        top_p: request.top_p,
+        tools: None,
+        tool_choice: None,
+        service_tier: None,
+        reasoning_effort: None,
+        max_completion_tokens: request.max_tokens,
+        max_tokens: request.max_tokens,
+        parallel_tool_calls: Some(false),
+        stop: request.stop_sequences.clone(),
+        extra: request.extra.clone(),
+    });
+
+    ResponsesRequest {
+        model: openai.model,
+        input: Some(ResponseInput::Items(
+            openai
+                .messages
+                .into_iter()
+                .map(chat_message_to_response_input_item)
+                .collect(),
+        )),
+        instructions: None,
+        stream: Some(false),
+        temperature: openai.temperature,
+        top_p: openai.top_p,
+        tools: openai.tools,
+        tool_choice: openai.tool_choice,
+        service_tier: None,
+        reasoning: None,
+        max_output_tokens: request.max_tokens,
+        parallel_tool_calls: Some(false),
+        store: Some(false),
+        previous_response_id: None,
+        metadata: None,
+        extra: request.extra.clone(),
+    }
+}
+
+fn image_generation_responses_request(request: &ImageGenerationRequest) -> ResponsesRequest {
+    let mut tool = ChatTool {
+        kind: "image_generation".to_owned(),
+        function: None,
+        extra: serde_json::Map::new(),
+    };
+    if let Some(size) = &request.size {
+        tool.extra.insert("size".to_owned(), Value::String(size.clone()));
+    }
+    if let Some(quality) = &request.quality {
+        tool.extra
+            .insert("quality".to_owned(), Value::String(quality.clone()));
+    }
+    if let Some(background) = &request.background {
+        tool.extra
+            .insert("background".to_owned(), Value::String(background.clone()));
+    }
+    if let Some(output_format) = &request.output_format {
+        tool.extra.insert(
+            "output_format".to_owned(),
+            Value::String(output_format.clone()),
+        );
+    }
+    if let Some(n) = request.n {
+        tool.extra.insert("n".to_owned(), Value::from(n));
+    }
+
+    ResponsesRequest {
+        model: request.model.clone(),
+        input: Some(ResponseInput::Text(request.prompt.clone())),
+        instructions: None,
+        stream: Some(false),
+        temperature: None,
+        top_p: None,
+        tools: Some(vec![tool]),
+        tool_choice: Some(json!({"type": "image_generation"})),
+        service_tier: None,
+        reasoning: None,
+        max_output_tokens: None,
+        parallel_tool_calls: Some(false),
+        store: Some(false),
+        previous_response_id: None,
+        metadata: None,
+        extra: request.extra.clone(),
+    }
+}
+
+fn chat_message_to_response_input_item(message: ChatMessage) -> ResponseInputItem {
+    ResponseInputItem::Message(ResponseMessageInputItem {
+        kind: Some("message".to_owned()),
+        role: message.role,
+        content: message
+            .content
+            .map(chat_content_to_response_input_content)
+            .unwrap_or_else(|| ResponseInputContent::Parts(Vec::new())),
+        id: None,
+        name: message.name,
+        tool_call_id: message.tool_call_id,
+    })
+}
+
+fn chat_content_to_response_input_content(content: ChatContent) -> ResponseInputContent {
+    match content {
+        ChatContent::Text(text) => ResponseInputContent::Parts(vec![json_text_input_part(&text)]),
+        ChatContent::Parts(parts) => ResponseInputContent::Parts(
+            parts.into_iter()
+                .filter_map(|part| match part.kind.as_str() {
+                    "text" => part.text.map(|text| json_text_input_part(&text)),
+                    "image_url" => part.image_url.map(|image| crate::openai::types::ResponseInputContentPart {
+                        kind: "input_image".to_owned(),
+                        text: None,
+                        image_url: Some(image.url),
+                        detail: image.detail,
+                    }),
+                    _ => None,
+                })
+                .collect(),
+        ),
+    }
+}
+
 fn maybe_prepend_instructions(messages: &mut Vec<ChatMessage>, instructions: Option<&str>) {
     if let Some(instructions) = instructions {
         messages.insert(
@@ -745,6 +1001,7 @@ fn response_object_from_chat(
                 role: "assistant",
                 content: None,
                 tool_calls: None,
+                images: None,
             },
             finish_reason: "stop".to_owned(),
         }
@@ -753,6 +1010,7 @@ fn response_object_from_chat(
         &response.id,
         choice.message.content.as_deref().unwrap_or_default(),
         choice.message.tool_calls.unwrap_or_default(),
+        choice.message.images.unwrap_or_default(),
     );
 
     ResponseObject {
@@ -783,6 +1041,49 @@ fn response_object_from_chat(
     }
 }
 
+fn response_object_from_upstream(request: &ResponsesRequest, response: Value) -> ResponseObject {
+    let created_at = response
+        .get("created_at")
+        .and_then(Value::as_i64)
+        .unwrap_or_else(crate::config::now_unix);
+    let output = response_output_items_from_upstream(
+        response
+            .get("output")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]),
+    );
+
+    ResponseObject {
+        id: response
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(build_response_id),
+        object: "response",
+        created_at,
+        status: "completed",
+        error: None,
+        incomplete_details: None,
+        instructions: request.instructions.clone(),
+        max_output_tokens: request.max_output_tokens,
+        model: response
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or(&request.model)
+            .to_owned(),
+        output,
+        parallel_tool_calls: request.parallel_tool_calls(),
+        store: request.should_store(),
+        temperature: request.temperature,
+        tool_choice: request.tool_choice.clone(),
+        tools: response_tool_values(request.tools.clone()),
+        usage: parse_upstream_usage(response.get("usage")),
+        metadata: request.metadata.clone(),
+        previous_response_id: request.previous_response_id.clone(),
+    }
+}
+
 async fn maybe_store_response(
     state: &AppState,
     request: &ResponsesRequest,
@@ -793,11 +1094,16 @@ async fn maybe_store_response(
         state
             .responses
             .insert(crate::server::store::StoredResponse {
+                input_items: stored_response_input_items(input_items, &response),
                 response,
-                input_items,
             })
             .await;
     }
+}
+
+fn stored_response_input_items(mut input_items: Vec<Value>, response: &ResponseObject) -> Vec<Value> {
+    input_items.extend(response_output_to_input_items(&response.output));
+    input_items
 }
 
 fn build_response_id() -> String {
@@ -939,6 +1245,7 @@ fn build_responses_output_items(
     response_id: &str,
     output_text: &str,
     tool_calls: Vec<crate::openai::types::ToolCall>,
+    images: Vec<GeneratedImage>,
 ) -> Vec<crate::openai::response::ResponseOutputItem> {
     let mut output = vec![response_message_item(
         format!("msg_{response_id}"),
@@ -950,6 +1257,13 @@ fn build_responses_output_items(
             tool_call,
         ));
     }
+    for (index, image) in images.into_iter().enumerate() {
+        output.push(response_image_generation_item(
+            format!("ig_{response_id}_{index}"),
+            image.b64_json,
+            image.revised_prompt,
+        ));
+    }
     output
 }
 
@@ -959,6 +1273,147 @@ fn response_tool_values(tools: Option<Vec<crate::openai::types::ChatTool>>) -> V
         .into_iter()
         .filter_map(|tool| serde_json::to_value(tool).ok())
         .collect()
+}
+
+fn response_output_items_from_upstream(items: &[Value]) -> Vec<crate::openai::response::ResponseOutputItem> {
+    let mut output = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        match item.get("type").and_then(Value::as_str) {
+            Some("message") => {
+                let text = item
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|part| match part.get("type").and_then(Value::as_str) {
+                        Some("output_text") => part.get("text").and_then(Value::as_str),
+                        Some("refusal") => part.get("refusal").and_then(Value::as_str),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                output.push(response_message_item(
+                    item.get("id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| format!("msg_{index}")),
+                    Some(text),
+                ));
+            }
+            Some("function_call") => {
+                let tool_call = crate::openai::types::ToolCall {
+                    id: item
+                        .get("call_id")
+                        .or_else(|| item.get("id"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    kind: "function".to_owned(),
+                    function: crate::openai::types::FunctionCall {
+                        name: item
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                        arguments: item
+                            .get("arguments")
+                            .and_then(Value::as_str)
+                            .unwrap_or("{}")
+                            .to_owned(),
+                    },
+                };
+                output.push(response_function_call_item(
+                    item.get("id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| format!("fc_{index}")),
+                    tool_call,
+                ));
+            }
+            Some("image_generation_call") => {
+                if let Some(image) = crate::openai::response::generated_image_from_item(item) {
+                    output.push(response_image_generation_item(
+                        item.get("id")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| format!("ig_{index}")),
+                        image.b64_json,
+                        image.revised_prompt,
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    output
+}
+
+fn response_output_to_input_items(
+    items: &[crate::openai::response::ResponseOutputItem],
+) -> Vec<Value> {
+    let mut output = Vec::new();
+    for item in items {
+        match item.kind {
+            "message" => {
+                let content = item
+                    .content
+                    .iter()
+                    .map(|part| json!({
+                        "type": "output_text",
+                        "text": part.text,
+                        "annotations": part.annotations,
+                    }))
+                    .collect::<Vec<_>>();
+                output.push(json!({
+                    "type": "message",
+                    "role": item.role.unwrap_or("assistant"),
+                    "status": item.status,
+                    "id": item.id,
+                    "content": content,
+                }));
+            }
+            "function_call" => output.push(json!({
+                "type": "function_call",
+                "id": item.id,
+                "call_id": item.call_id,
+                "name": item.name,
+                "arguments": item.arguments,
+            })),
+            "image_generation_call" => output.push(json!({
+                "type": "image_generation_call",
+                "id": item.id,
+                "result": item.result,
+                "revised_prompt": item.revised_prompt,
+            })),
+            _ => {}
+        }
+    }
+    output
+}
+
+fn parse_upstream_usage(value: Option<&Value>) -> Option<crate::openai::response::Usage> {
+    let value = value?;
+    let prompt_tokens = value
+        .get("input_tokens")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(0);
+    let completion_tokens = value
+        .get("output_tokens")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(0);
+    let total_tokens = value
+        .get("total_tokens")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or_else(|| prompt_tokens.saturating_add(completion_tokens));
+
+    Some(crate::openai::response::Usage {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+    })
 }
 
 fn response_object(
@@ -1141,7 +1596,12 @@ fn openai_responses_sse(
                     }
 
                     if let Some(reason) = choice.finish_reason {
-                        let output = build_responses_output_items(&response_id, &output_text, tool_calls);
+                        let output = build_responses_output_items(
+                            &response_id,
+                            &output_text,
+                            tool_calls,
+                            Vec::new(),
+                        );
                         let completed = response_object(
                             &request,
                             response_id.clone(),
@@ -1151,9 +1611,11 @@ fn openai_responses_sse(
                             None,
                         );
                         if request.should_store() {
+                            let stored_items =
+                                stored_response_input_items(input_items.clone(), &completed);
                             store.insert(crate::server::store::StoredResponse {
                                 response: completed.clone(),
-                                input_items: input_items.clone(),
+                                input_items: stored_items,
                             }).await;
                         }
                         yield Ok(response_output_text_done_event(
@@ -1165,6 +1627,52 @@ fn openai_responses_sse(
                         yield Ok(response_completed_event(sequence_number, &reason, &completed));
                         return;
                     }
+                }
+                Err(error) => {
+                    yield Ok(response_error_event(&error));
+                    return;
+                }
+            }
+        }
+    };
+
+    Sse::new(mapped).keep_alive(KeepAlive::default())
+}
+
+fn openai_raw_responses_sse(
+    stream: Pin<Box<dyn Stream<Item = Result<crate::codex::sse::JsonSseEvent>> + Send>>,
+    request: ResponsesRequest,
+    input_items: Vec<Value>,
+    store: crate::server::store::ResponseStore,
+) -> Sse<impl Stream<Item = std::result::Result<Event, Infallible>>> {
+    let mapped = async_stream::stream! {
+        let mut stream = stream;
+
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(item) => {
+                    if is_done_event(&item.value) {
+                        if let Some(response) = item.value.get("response").cloned() {
+                            let completed = response_object_from_upstream(&request, response);
+                            if request.should_store() {
+                                let stored_items =
+                                    stored_response_input_items(input_items.clone(), &completed);
+                                store.insert(crate::server::store::StoredResponse {
+                                    response: completed,
+                                    input_items: stored_items,
+                                }).await;
+                            }
+                        }
+                    }
+
+                    let event_name = item
+                        .event
+                        .clone()
+                        .or_else(|| item.value.get("type").and_then(Value::as_str).map(str::to_owned))
+                        .unwrap_or_else(|| "message".to_owned());
+                    yield Ok(Event::default()
+                        .event(event_name)
+                        .data(serde_json::to_string(&item.value).unwrap_or_default()));
                 }
                 Err(error) => {
                     yield Ok(response_error_event(&error));
@@ -1273,6 +1781,87 @@ fn anthropic_sse_response(
             yield_event_or_error!(content_block_stop(current_index));
         }
         for event in [message_delta_event("stop", output_tokens), message_stop_event()] {
+            yield_event_or_error!(event);
+        }
+    };
+
+    Sse::new(mapped).keep_alive(KeepAlive::default())
+}
+
+fn anthropic_raw_image_sse_response(
+    stream: Pin<Box<dyn Stream<Item = Result<crate::codex::sse::JsonSseEvent>> + Send>>,
+    model: String,
+    input_tokens: u32,
+) -> Sse<impl Stream<Item = std::result::Result<Event, Infallible>>> {
+    let mapped = async_stream::stream! {
+        macro_rules! yield_event_or_error {
+            ($event:expr) => {
+                match $event {
+                    Ok(event) => yield Ok(event),
+                    Err(error) => {
+                        yield Ok(anthropic_error_event(&error));
+                        return;
+                    }
+                }
+            };
+        }
+
+        let id = format!("msg_{}", rand::random::<u64>());
+        let mut stream = stream;
+        let mut current_index = 0_u32;
+        let mut output_tokens = 0_u32;
+
+        yield_event_or_error!(message_start_event(&id, &model, input_tokens));
+
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(item) => {
+                    if !is_done_event(&item.value) {
+                        continue;
+                    }
+
+                    let Some(response) = item.value.get("response") else {
+                        continue;
+                    };
+
+                    output_tokens = parse_upstream_usage(response.get("usage"))
+                        .map(|usage| usage.completion_tokens)
+                        .unwrap_or(0);
+
+                    let output_items = response
+                        .get("output")
+                        .and_then(Value::as_array)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]);
+                    let images = generated_images_from_output(output_items);
+
+                    for image in images {
+                        let source = crate::anthropic::ImageSource {
+                            kind: "base64".to_owned(),
+                            media_type: image.media_type.or_else(|| Some("image/png".to_owned())),
+                            data: Some(image.b64_json),
+                        };
+                        yield_event_or_error!(image_block_start(current_index, &source));
+                        yield_event_or_error!(content_block_stop(current_index));
+                        current_index += 1;
+                    }
+
+                    for event in [
+                        message_delta_event("end_turn", output_tokens),
+                        message_stop_event(),
+                    ] {
+                        yield_event_or_error!(event);
+                    }
+                    return;
+                }
+                Err(error) => {
+                    yield Ok(anthropic_error_event(&error));
+                    return;
+                }
+            }
+        }
+
+        for event in [message_delta_event("end_turn", output_tokens), message_stop_event()] {
             yield_event_or_error!(event);
         }
     };
