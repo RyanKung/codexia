@@ -3,8 +3,8 @@ use crate::{
     codex::{
         convert::to_codex_request,
         events::{
-            collect_output, collect_response_value, event_error, event_tool_call, finish_reason, is_done_event,
-            response_tool_calls, text_delta,
+            collect_output, collect_response_value, event_error, event_tool_call, finish_reason,
+            is_done_event, response_tool_calls, text_delta,
         },
         sse,
     },
@@ -178,7 +178,9 @@ impl CodexClient {
         credentials: &Credentials,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<crate::codex::sse::JsonSseEvent>> + Send>>> {
         let response = self.send_body(&request, credentials).await?;
-        Ok(Box::pin(sse::json_named_events(Box::pin(response.bytes_stream()))))
+        Ok(Box::pin(sse::json_named_events(Box::pin(
+            response.bytes_stream(),
+        ))))
     }
 
     async fn send_chat(
@@ -186,7 +188,8 @@ impl CodexClient {
         request: &crate::openai::types::ChatCompletionRequest,
         credentials: &Credentials,
     ) -> Result<Response> {
-        self.send_body(&to_codex_request(request), credentials).await
+        self.send_body(&to_codex_request(request), credentials)
+            .await
     }
 
     async fn send_body(&self, body: &Value, credentials: &Credentials) -> Result<Response> {

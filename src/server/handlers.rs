@@ -5,10 +5,10 @@ use crate::{
         CountTokensResponse, MessageBatch, MessageBatchCreateRequest, MessageBatchDeleted,
         MessageBatchListResponse, MessageBatchRequest, MessageBatchRequestCounts,
         MessageBatchResult, MessageBatchResultType, MessagesRequest, content_block_stop,
-        error_body, estimate_input_tokens, from_openai_response, message_batch_list_response,
-        from_openai_response_object, image_block_start, message_delta_event,
-        message_start_event, message_stop_event, models_response, text_block_start, text_delta,
-        to_openai_request, tool_block_start, tool_json_delta,
+        error_body, estimate_input_tokens, from_openai_response, from_openai_response_object,
+        image_block_start, message_batch_list_response, message_delta_event, message_start_event,
+        message_stop_event, models_response, text_block_start, text_delta, to_openai_request,
+        tool_block_start, tool_json_delta,
     },
     codex::{convert::responses_to_codex_request, events::is_done_event},
     error::Result,
@@ -16,8 +16,7 @@ use crate::{
         response::{
             GeneratedImage, ImageGenerationResponse, ResponseCompaction, ResponseInputTokens,
             ResponseObject, generated_images_from_output, image_generation_response,
-            response_function_call_item,
-            response_image_generation_item, response_message_item,
+            response_function_call_item, response_image_generation_item, response_message_item,
         },
         types::{
             ChatCompletionRequest, ChatContent, ChatContentPart, ChatMessage, ChatTool,
@@ -97,8 +96,10 @@ pub async fn responses(
         let body = responses_to_codex_request(&request, input_items.clone());
         if request.wants_stream() {
             return match state.codex.stream_response(body, &credentials).await {
-                Ok(stream) => openai_raw_responses_sse(stream, request, input_items, state.responses)
-                    .into_response(),
+                Ok(stream) => {
+                    openai_raw_responses_sse(stream, request, input_items, state.responses)
+                        .into_response()
+                }
                 Err(error) => error.into_response(),
             };
         }
@@ -350,7 +351,8 @@ pub async fn image_generations(
     match state.codex.complete_response(body, &credentials).await {
         Ok(value) => {
             let images = generated_images_from_output(
-                value.get("output")
+                value
+                    .get("output")
                     .and_then(Value::as_array)
                     .map(Vec::as_slice)
                     .unwrap_or(&[]),
@@ -622,13 +624,14 @@ fn response_request_requires_raw_mode(
         || previous_stores_generated_images(previous)
 }
 
-fn previous_stores_generated_images(previous: Option<&crate::server::store::StoredResponse>) -> bool {
+fn previous_stores_generated_images(
+    previous: Option<&crate::server::store::StoredResponse>,
+) -> bool {
     previous
         .map(|stored| {
-            stored
-                .input_items
-                .iter()
-                .any(|item| item.get("type").and_then(Value::as_str) == Some("image_generation_call"))
+            stored.input_items.iter().any(|item| {
+                item.get("type").and_then(Value::as_str) == Some("image_generation_call")
+            })
         })
         .unwrap_or(false)
 }
@@ -695,7 +698,8 @@ fn image_generation_responses_request(request: &ImageGenerationRequest) -> Respo
         extra: serde_json::Map::new(),
     };
     if let Some(size) = &request.size {
-        tool.extra.insert("size".to_owned(), Value::String(size.clone()));
+        tool.extra
+            .insert("size".to_owned(), Value::String(size.clone()));
     }
     if let Some(quality) = &request.quality {
         tool.extra
@@ -753,15 +757,19 @@ fn chat_content_to_response_input_content(content: ChatContent) -> ResponseInput
     match content {
         ChatContent::Text(text) => ResponseInputContent::Parts(vec![json_text_input_part(&text)]),
         ChatContent::Parts(parts) => ResponseInputContent::Parts(
-            parts.into_iter()
+            parts
+                .into_iter()
                 .filter_map(|part| match part.kind.as_str() {
                     "text" => part.text.map(|text| json_text_input_part(&text)),
-                    "image_url" => part.image_url.map(|image| crate::openai::types::ResponseInputContentPart {
-                        kind: "input_image".to_owned(),
-                        text: None,
-                        image_url: Some(image.url),
-                        detail: image.detail,
-                    }),
+                    "image_url" => {
+                        part.image_url
+                            .map(|image| crate::openai::types::ResponseInputContentPart {
+                                kind: "input_image".to_owned(),
+                                text: None,
+                                image_url: Some(image.url),
+                                detail: image.detail,
+                            })
+                    }
                     _ => None,
                 })
                 .collect(),
@@ -1101,7 +1109,10 @@ async fn maybe_store_response(
     }
 }
 
-fn stored_response_input_items(mut input_items: Vec<Value>, response: &ResponseObject) -> Vec<Value> {
+fn stored_response_input_items(
+    mut input_items: Vec<Value>,
+    response: &ResponseObject,
+) -> Vec<Value> {
     input_items.extend(response_output_to_input_items(&response.output));
     input_items
 }
@@ -1275,7 +1286,9 @@ fn response_tool_values(tools: Option<Vec<crate::openai::types::ChatTool>>) -> V
         .collect()
 }
 
-fn response_output_items_from_upstream(items: &[Value]) -> Vec<crate::openai::response::ResponseOutputItem> {
+fn response_output_items_from_upstream(
+    items: &[Value],
+) -> Vec<crate::openai::response::ResponseOutputItem> {
     let mut output = Vec::new();
     for (index, item) in items.iter().enumerate() {
         match item.get("type").and_then(Value::as_str) {
@@ -1358,11 +1371,13 @@ fn response_output_to_input_items(
                 let content = item
                     .content
                     .iter()
-                    .map(|part| json!({
-                        "type": "output_text",
-                        "text": part.text,
-                        "annotations": part.annotations,
-                    }))
+                    .map(|part| {
+                        json!({
+                            "type": "output_text",
+                            "text": part.text,
+                            "annotations": part.annotations,
+                        })
+                    })
                     .collect::<Vec<_>>();
                 output.push(json!({
                     "type": "message",

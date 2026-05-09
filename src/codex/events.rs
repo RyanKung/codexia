@@ -62,14 +62,15 @@ pub async fn collect_response_value(response: Response) -> Result<Value> {
             return Err(Error::upstream(message));
         }
         if is_done_event(&event) {
-            return event
-                .get("response")
-                .cloned()
-                .ok_or_else(|| Error::upstream("Codex response completed without a response payload"));
+            return event.get("response").cloned().ok_or_else(|| {
+                Error::upstream("Codex response completed without a response payload")
+            });
         }
     }
 
-    Err(Error::upstream("Codex response stream ended before completion"))
+    Err(Error::upstream(
+        "Codex response stream ended before completion",
+    ))
 }
 
 /// Applies one parsed Codex event to an in-progress chat output.
@@ -209,7 +210,11 @@ fn apply_output_item(output: &mut ChatOutput, item: &Value, fill_text: bool) {
         }
         Some("image_generation_call") => {
             if let Some(image) = crate::openai::response::generated_image_from_item(item) {
-                if !output.images.iter().any(|existing| existing.b64_json == image.b64_json) {
+                if !output
+                    .images
+                    .iter()
+                    .any(|existing| existing.b64_json == image.b64_json)
+                {
                     output.images.push(image);
                 }
             }

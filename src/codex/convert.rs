@@ -137,7 +137,10 @@ fn convert_content_part(part: &ChatContentPart) -> Option<Value> {
 /// Converts one compatibility-layer tool definition into the upstream Codex shape.
 pub fn convert_tool(tool: &ChatTool) -> Value {
     if tool.kind == "function" {
-        let function = tool.function.as_ref().expect("function tool metadata missing");
+        let function = tool
+            .function
+            .as_ref()
+            .expect("function tool metadata missing");
         json!({
             "type": "function",
             "name": &function.name,

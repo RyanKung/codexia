@@ -145,11 +145,7 @@ fn find_frame_end_bytes(buffer: &[u8]) -> Option<usize> {
         .windows(2)
         .position(|window| window == b"\n\n")
         .into_iter()
-        .chain(
-            buffer
-                .windows(4)
-                .position(|window| window == b"\r\n\r\n"),
-        )
+        .chain(buffer.windows(4).position(|window| window == b"\r\n\r\n"))
         .min()
 }
 
@@ -182,8 +178,8 @@ fn parse_frame(frame: &str) -> Option<SseEvent> {
 }
 
 fn parse_frame_bytes(frame: &[u8]) -> Result<Option<SseEvent>> {
-    let text = std::str::from_utf8(frame)
-        .map_err(|_| Error::upstream("upstream SSE was not UTF-8"))?;
+    let text =
+        std::str::from_utf8(frame).map_err(|_| Error::upstream("upstream SSE was not UTF-8"))?;
     Ok(parse_frame(text))
 }
 

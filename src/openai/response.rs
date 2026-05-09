@@ -340,7 +340,10 @@ pub fn response_image_generation_item(
 
 /// Builds an empty Images API response payload.
 #[must_use]
-pub fn image_generation_response(created: i64, data: Vec<GeneratedImage>) -> ImageGenerationResponse {
+pub fn image_generation_response(
+    created: i64,
+    data: Vec<GeneratedImage>,
+) -> ImageGenerationResponse {
     ImageGenerationResponse { created, data }
 }
 
@@ -398,7 +401,8 @@ pub fn generated_images_from_output(items: &[Value]) -> Vec<GeneratedImage> {
 /// Extracts every generated image from a serialized response output item list.
 #[must_use]
 pub fn generated_images_from_response_items(items: &[ResponseOutputItem]) -> Vec<GeneratedImage> {
-    items.iter()
+    items
+        .iter()
         .filter_map(|item| {
             let raw = item.result.as_deref()?;
             Some(GeneratedImage {

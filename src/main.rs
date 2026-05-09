@@ -263,6 +263,7 @@ async fn run(cli: Cli) -> Result<()> {
                 auth_store(effective_auth_file)?,
                 CodexOAuthClient::new(http.clone()),
             );
+            token_manager.credentials().await?;
             let codex = CodexClient::new(http, CodexClient::default_base_url());
             let model_list = resolve_model_list()?;
             println!("listening on http://{effective_bind}");
@@ -639,10 +640,16 @@ fn spawn_token_expiry_display(token_manager: TokenManager) {
 
 /// Builds a one-line token expiry status string for the current credentials snapshot.
 async fn token_expiry_status(token_manager: &TokenManager) -> String {
-    token_manager.credentials_snapshot().await.map_or_else(
-        || "token status unavailable: not logged in; run `codexia login` first".to_owned(),
-        |credentials| token_expiry_message(&credentials),
-    )
+    match token_manager.credentials_snapshot().await {
+        Some(credentials) if credentials.expires_at > now_unix() => {
+            token_expiry_message(&credentials)
+        }
+        Some(_) => token_manager.credentials().await.map_or_else(
+            |error| format!("token refresh failed: {error}"),
+            |credentials| token_expiry_message(&credentials),
+        ),
+        None => "token status unavailable: not logged in; run `codexia login` first".to_owned(),
+    }
 }
 
 /// Renders a human-readable expiry message for one credential set.
