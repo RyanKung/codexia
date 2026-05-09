@@ -3,6 +3,29 @@
 Rust gateway that logs in with OpenAI Codex OAuth and exposes OpenAI- and
 Anthropic-compatible APIs.
 
+## Usage Boundaries
+
+Codexia is intended for local, personal compatibility testing and self-hosted
+automation against credentials you are authorized to use.
+
+Before you deploy or distribute it, keep these boundaries in mind:
+
+- do not treat Codexia as an official OpenAI or Anthropic product or integration
+- do not use OpenAI or Anthropic logos, trade dress, or branding in a way that implies endorsement
+- do not share one person's OAuth-backed access with other users, customers, or a public service
+- do not resell, sublicense, or expose pooled account access through Codexia
+- review the upstream terms, policies, and any workplace data-handling requirements that apply to your account
+
+If you need multi-user, customer-facing, or revenue-generating usage, you
+should get legal review first and prefer a deployment model based on official
+commercial API access rather than consumer-style OAuth credentials.
+
+See [LEGAL.md](LEGAL.md) for a more detailed risk breakdown.
+
+Codexia itself is licensed under LGPLv3, which does not prohibit commercial
+use of the software. That does not mean your upstream account terms allow
+commercial deployment, shared access, resale, or hosted service operation.
+
 ## Usage
 
 ```bash
@@ -298,9 +321,15 @@ The OAuth flow follows OpenClaw/pi-ai's Codex flow: PKCE, manual paste of the
 
 ## Disclaimer
 
-Codexia is an unofficial tool and is not affiliated with, endorsed by, or
-supported by OpenAI. Use it at your own risk and make sure your usage complies
-with the terms that apply to your account and the upstream services.
+Codexia is an unofficial compatibility tool. It is not affiliated with,
+endorsed by, or supported by OpenAI or Anthropic.
+
+You are responsible for making sure your usage complies with the terms,
+policies, account restrictions, and data-handling obligations that apply to
+your upstream account and deployment environment. In particular, do not assume
+that personal OAuth-backed access can be shared, resold, or safely exposed as a
+multi-user hosted service. The LGPLv3 license for this repository does not
+change those upstream restrictions.
 
 ## License
 

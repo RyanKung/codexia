@@ -69,8 +69,10 @@ Files:
 
 Disclaimer:
   Codexia is an unofficial tool and is not affiliated with, endorsed by, or
-  supported by OpenAI. Use it at your own risk and make sure your usage complies
-  with the terms that apply to your account and the upstream services.
+  supported by OpenAI or Anthropic. Use it at your own risk, make sure your
+  usage complies with the terms that apply to your account and the upstream
+  services, and do not assume the LGPLv3 license overrides upstream account
+  restrictions on sharing or reselling personal OAuth-backed access.
 
 Copyright:
   Copyright (c) 2026 Codexia contributors. Licensed under the GNU Lesser
