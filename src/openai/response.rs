@@ -319,7 +319,7 @@ pub fn response_function_call_item(id: String, tool_call: ToolCall) -> ResponseO
 
 /// Builds an image generation output item for the Responses API.
 #[must_use]
-pub fn response_image_generation_item(
+pub const fn response_image_generation_item(
     id: String,
     result: String,
     revised_prompt: Option<String>,
@@ -340,7 +340,7 @@ pub fn response_image_generation_item(
 
 /// Builds an empty Images API response payload.
 #[must_use]
-pub fn image_generation_response(
+pub const fn image_generation_response(
     created: i64,
     data: Vec<GeneratedImage>,
 ) -> ImageGenerationResponse {
@@ -368,7 +368,7 @@ pub fn generated_image_from_item(item: &Value) -> Option<GeneratedImage> {
 
 fn parse_image_payload(raw: &str, item: &Value) -> (Option<String>, String) {
     if let Some(rest) = raw.strip_prefix("data:") {
-        if let Some((header, data)) = rest.split_once(",") {
+        if let Some((header, data)) = rest.split_once(',') {
             let media_type = header
                 .split(';')
                 .next()

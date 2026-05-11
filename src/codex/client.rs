@@ -162,6 +162,11 @@ impl CodexClient {
     }
 
     /// Sends a non-streaming Responses-style request body and returns the final response envelope.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the upstream request fails or the response stream
+    /// cannot be collected into one final response value.
     pub async fn complete_response(
         &self,
         request: Value,
@@ -172,6 +177,10 @@ impl CodexClient {
     }
 
     /// Sends a streaming Responses-style request body and yields raw upstream JSON SSE events.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the upstream request cannot be started.
     pub async fn stream_response(
         &self,
         request: Value,

@@ -18,7 +18,7 @@ pub struct SseEvent {
 }
 
 /// Parsed JSON payload plus the original SSE event name when present.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JsonSseEvent {
     /// Optional SSE event name from the `event:` field.
     pub event: Option<String>,
@@ -123,7 +123,7 @@ fn drain_events_bytes(buffer: &mut Vec<u8>) -> Result<Vec<SseEvent>> {
 }
 
 fn drain_last_event_bytes(buffer: &mut Vec<u8>) -> Result<Vec<SseEvent>> {
-    if buffer.iter().all(|byte| byte.is_ascii_whitespace()) {
+    if buffer.iter().all(u8::is_ascii_whitespace) {
         return Ok(Vec::new());
     }
 

@@ -93,7 +93,7 @@ pub async fn responses(
             Ok(items) => items,
             Err(error) => return error.into_response(),
         };
-        let body = responses_to_codex_request(&request, input_items.clone());
+        let body = responses_to_codex_request(&request, &input_items);
         if request.wants_stream() {
             return match state.codex.stream_response(body, &credentials).await {
                 Ok(stream) => {
@@ -105,7 +105,7 @@ pub async fn responses(
         }
         return match state.codex.complete_response(body, &credentials).await {
             Ok(value) => {
-                let response_object = response_object_from_upstream(&request, value);
+                let response_object = response_object_from_upstream(&request, &value);
                 maybe_store_response(&state, &request, response_object.clone(), input_items).await;
                 Json(response_object).into_response()
             }
@@ -278,7 +278,7 @@ pub async fn messages(
             Ok(items) => items,
             Err(error) => return anthropic_error_response(&error),
         };
-        let body = responses_to_codex_request(&response_request, input_items.clone());
+        let body = responses_to_codex_request(&response_request, &input_items);
 
         if request.wants_stream() {
             return match state.codex.stream_response(body, &credentials).await {
@@ -294,7 +294,7 @@ pub async fn messages(
 
         return match state.codex.complete_response(body, &credentials).await {
             Ok(value) => {
-                let response_object = response_object_from_upstream(&response_request, value);
+                let response_object = response_object_from_upstream(&response_request, &value);
                 Json(from_openai_response_object(response_object)).into_response()
             }
             Err(error) => anthropic_error_response(&error),
@@ -346,7 +346,7 @@ pub async fn image_generations(
         Ok(items) => items,
         Err(error) => return error.into_response(),
     };
-    let body = responses_to_codex_request(&response_request, input_items);
+    let body = responses_to_codex_request(&response_request, &input_items);
 
     match state.codex.complete_response(body, &credentials).await {
         Ok(value) => {
@@ -354,8 +354,7 @@ pub async fn image_generations(
                 value
                     .get("output")
                     .and_then(Value::as_array)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]),
+                    .map_or(&[], Vec::as_slice),
             );
             Json::<ImageGenerationResponse>(image_generation_response(
                 crate::config::now_unix(),
@@ -627,13 +626,11 @@ fn response_request_requires_raw_mode(
 fn previous_stores_generated_images(
     previous: Option<&crate::server::store::StoredResponse>,
 ) -> bool {
-    previous
-        .map(|stored| {
-            stored.input_items.iter().any(|item| {
-                item.get("type").and_then(Value::as_str) == Some("image_generation_call")
-            })
+    previous.is_some_and(|stored| {
+        stored.input_items.iter().any(|item| {
+            item.get("type").and_then(Value::as_str) == Some("image_generation_call")
         })
-        .unwrap_or(false)
+    })
 }
 
 fn is_image_generation_tool(tool: &ChatTool) -> bool {
@@ -743,10 +740,10 @@ fn chat_message_to_response_input_item(message: ChatMessage) -> ResponseInputIte
     ResponseInputItem::Message(ResponseMessageInputItem {
         kind: Some("message".to_owned()),
         role: message.role,
-        content: message
-            .content
-            .map(chat_content_to_response_input_content)
-            .unwrap_or_else(|| ResponseInputContent::Parts(Vec::new())),
+        content: message.content.map_or_else(
+            || ResponseInputContent::Parts(Vec::new()),
+            chat_content_to_response_input_content,
+        ),
         id: None,
         name: message.name,
         tool_call_id: message.tool_call_id,
@@ -1049,7 +1046,7 @@ fn response_object_from_chat(
     }
 }
 
-fn response_object_from_upstream(request: &ResponsesRequest, response: Value) -> ResponseObject {
+fn response_object_from_upstream(request: &ResponsesRequest, response: &Value) -> ResponseObject {
     let created_at = response
         .get("created_at")
         .and_then(Value::as_i64)
@@ -1058,16 +1055,14 @@ fn response_object_from_upstream(request: &ResponsesRequest, response: Value) ->
         response
             .get("output")
             .and_then(Value::as_array)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]),
+            .map_or(&[], Vec::as_slice),
     );
 
     ResponseObject {
         id: response
             .get("id")
             .and_then(Value::as_str)
-            .map(str::to_owned)
-            .unwrap_or_else(build_response_id),
+            .map_or_else(build_response_id, str::to_owned),
         object: "response",
         created_at,
         status: "completed",
@@ -1308,8 +1303,7 @@ fn response_output_items_from_upstream(
                 output.push(response_message_item(
                     item.get("id")
                         .and_then(Value::as_str)
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| format!("msg_{index}")),
+                        .map_or_else(|| format!("msg_{index}"), str::to_owned),
                     Some(text),
                 ));
             }
@@ -1338,8 +1332,7 @@ fn response_output_items_from_upstream(
                 output.push(response_function_call_item(
                     item.get("id")
                         .and_then(Value::as_str)
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| format!("fc_{index}")),
+                        .map_or_else(|| format!("fc_{index}"), str::to_owned),
                     tool_call,
                 ));
             }
@@ -1348,8 +1341,7 @@ fn response_output_items_from_upstream(
                     output.push(response_image_generation_item(
                         item.get("id")
                             .and_then(Value::as_str)
-                            .map(str::to_owned)
-                            .unwrap_or_else(|| format!("ig_{index}")),
+                            .map_or_else(|| format!("ig_{index}"), str::to_owned),
                         image.b64_json,
                         image.revised_prompt,
                     ));
@@ -1668,7 +1660,7 @@ fn openai_raw_responses_sse(
                 Ok(item) => {
                     if is_done_event(&item.value) {
                         if let Some(response) = item.value.get("response").cloned() {
-                            let completed = response_object_from_upstream(&request, response);
+                            let completed = response_object_from_upstream(&request, &response);
                             if request.should_store() {
                                 let stored_items =
                                     stored_response_input_items(input_items.clone(), &completed);
@@ -1840,14 +1832,12 @@ fn anthropic_raw_image_sse_response(
                     };
 
                     output_tokens = parse_upstream_usage(response.get("usage"))
-                        .map(|usage| usage.completion_tokens)
-                        .unwrap_or(0);
+                        .map_or(0, |usage| usage.completion_tokens);
 
                     let output_items = response
                         .get("output")
                         .and_then(Value::as_array)
-                        .map(Vec::as_slice)
-                        .unwrap_or(&[]);
+                        .map_or(&[] as &[Value], Vec::as_slice);
                     let images = generated_images_from_output(output_items);
 
                     for image in images {

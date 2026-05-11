@@ -54,6 +54,11 @@ pub async fn collect_output(response: Response) -> Result<ChatOutput> {
 }
 
 /// Collects the final upstream `response` envelope from a streamed Codex request.
+///
+/// # Errors
+///
+/// Returns an error when the upstream stream reports a failure or ends before
+/// emitting a final response envelope.
 pub async fn collect_response_value(response: Response) -> Result<Value> {
     let mut events = Box::pin(sse::json_events(Box::pin(response.bytes_stream())));
     while let Some(event) = events.next().await {

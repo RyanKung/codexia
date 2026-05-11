@@ -135,6 +135,12 @@ fn convert_content_part(part: &ChatContentPart) -> Option<Value> {
 }
 
 /// Converts one compatibility-layer tool definition into the upstream Codex shape.
+///
+/// # Panics
+///
+/// Panics when a tool declares `"function"` as its type but omits the
+/// corresponding function metadata payload.
+#[must_use]
 pub fn convert_tool(tool: &ChatTool) -> Value {
     if tool.kind == "function" {
         let function = tool
@@ -180,7 +186,7 @@ pub fn convert_tool_choice(tool_choice: Option<&Value>) -> Option<Value> {
 
 /// Converts a Responses request plus normalized input items into the Codex body.
 #[must_use]
-pub fn responses_to_codex_request(request: &ResponsesRequest, input: Vec<Value>) -> Value {
+pub fn responses_to_codex_request(request: &ResponsesRequest, input: &[Value]) -> Value {
     let mut body = json!({
         "model": normalize_model(&request.model),
         "store": request.should_store(),

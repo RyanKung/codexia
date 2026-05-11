@@ -510,6 +510,7 @@ pub fn from_openai_response(response: ChatCompletionResponse) -> MessageResponse
 }
 
 /// Maps an OpenAI-compatible Responses object into an Anthropic Messages response.
+#[must_use]
 pub fn from_openai_response_object(response: ResponseObject) -> MessageResponse {
     let mut content = Vec::new();
 
@@ -520,8 +521,7 @@ pub fn from_openai_response_object(response: ResponseObject) -> MessageResponse 
                     .content
                     .iter()
                     .map(|part| part.text.clone())
-                    .collect::<Vec<_>>()
-                    .join("");
+                    .collect::<String>();
                 if !text.is_empty() {
                     content.push(ResponseContentBlock::Text { text });
                 }
@@ -533,7 +533,6 @@ pub fn from_openai_response_object(response: ResponseObject) -> MessageResponse 
                     input: parse_arguments(item.arguments.as_deref().unwrap_or("{}")),
                 });
             }
-            "image_generation_call" => {}
             _ => {}
         }
     }
