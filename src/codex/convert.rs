@@ -53,6 +53,8 @@ pub fn to_codex_request(request: &ChatCompletionRequest) -> Value {
         });
     }
 
+    strip_unsupported_keys(&mut body);
+
     body
 }
 
@@ -215,6 +217,8 @@ pub fn responses_to_codex_request(request: &ResponsesRequest, input: &[Value]) -
         body["reasoning"] = reasoning;
     }
 
+    strip_unsupported_keys(&mut body);
+
     body
 }
 
@@ -266,6 +270,23 @@ fn insert_optional(body: &mut Value, key: &str, value: Option<Value>) {
     }
 }
 
+fn strip_unsupported_keys(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            object.remove("cache_control");
+            for nested in object.values_mut() {
+                strip_unsupported_keys(nested);
+            }
+        }
+        Value::Array(array) => {
+            for nested in array {
+                strip_unsupported_keys(nested);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
 trait TupleMapFirst<A, B> {
     fn map_first<C>(self, map: impl FnOnce(A) -> C) -> (C, B);
 }
@@ -283,6 +304,26 @@ mod tests {
 
     fn request(value: Value) -> ChatCompletionRequest {
         serde_json::from_value(value).unwrap()
+    }
+
+    fn assert_key_absent_recursive(value: &Value, key: &str) {
+        match value {
+            Value::Object(object) => {
+                assert!(
+                    !object.contains_key(key),
+                    "unexpected key `{key}` in object: {value}"
+                );
+                for nested in object.values() {
+                    assert_key_absent_recursive(nested, key);
+                }
+            }
+            Value::Array(array) => {
+                for nested in array {
+                    assert_key_absent_recursive(nested, key);
+                }
+            }
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+        }
     }
 
     #[test]
@@ -362,7 +403,7 @@ mod tests {
             "max_completion_tokens": 42
         })));
 
-        assert!(body.get("max_output_tokens").is_none());
+        assert_key_absent_recursive(&body, "max_output_tokens");
     }
 
     #[test]
@@ -422,6 +463,55 @@ mod tests {
 
         let body = responses_to_codex_request(&request, &input);
 
-        assert!(body.get("max_output_tokens").is_none());
+        assert_key_absent_recursive(&body, "max_output_tokens");
+    }
+
+    #[test]
+    fn strips_cache_control_recursively_from_chat_requests() {
+        let body = to_codex_request(&request(json!({
+            "model": "gpt-5.4",
+            "messages": [{
+                "role": "user",
+                "content": "hello"
+            }],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "parameters": {"type": "object"}
+                },
+                "cache_control": {"type": "ephemeral"}
+            }]
+        })));
+
+        assert_key_absent_recursive(&body, "cache_control");
+    }
+
+    #[test]
+    fn strips_cache_control_recursively_from_responses_requests() {
+        let request: ResponsesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "parameters": {"type": "object"}
+                },
+                "cache_control": {"type": "ephemeral"}
+            }]
+        }))
+        .unwrap();
+        let input = vec![json!({
+            "role": "developer",
+            "content": [{
+                "type": "input_text",
+                "text": "be terse",
+                "cache_control": {"type": "ephemeral"}
+            }]
+        })];
+
+        let body = responses_to_codex_request(&request, &input);
+
+        assert_key_absent_recursive(&body, "cache_control");
     }
 }

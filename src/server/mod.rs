@@ -457,6 +457,82 @@ mod tests {
         url
     }
 
+    async fn spawn_strict_recording_codex_server(captured: Arc<Mutex<Vec<Value>>>) -> String {
+        async fn strict_recording_handler(
+            State(captured): State<Arc<Mutex<Vec<Value>>>>,
+            Json(body): Json<Value>,
+        ) -> impl axum::response::IntoResponse {
+            if let Some(path) = find_forbidden_key_path(&body, "cache_control") {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "detail": format!("Unknown parameter: '{path}'.")
+                    })),
+                );
+            }
+            if let Some(path) = find_forbidden_key_path(&body, "max_output_tokens") {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "detail": format!("Unsupported parameter: {path}")
+                    })),
+                );
+            }
+
+            captured.lock().await.push(body);
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "id": "resp_strict",
+                    "model": "gpt-5.5",
+                    "output": [{"type":"message","content":[{"type":"output_text","text":"OK"}]}],
+                    "usage": {"input_tokens":12,"output_tokens":5,"total_tokens":17}
+                })),
+            )
+        }
+
+        let app = Router::new()
+            .route("/codex/responses", post(strict_recording_handler))
+            .with_state(captured);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        url
+    }
+
+    fn find_forbidden_key_path(value: &Value, key: &str) -> Option<String> {
+        match value {
+            Value::Object(object) => {
+                if object.contains_key(key) {
+                    return Some(key.to_owned());
+                }
+
+                object.iter().find_map(|(name, nested)| {
+                    find_forbidden_key_path(nested, key).map(|suffix| {
+                        if suffix.starts_with('[') {
+                            format!("{name}{suffix}")
+                        } else {
+                            format!("{name}.{suffix}")
+                        }
+                    })
+                })
+            }
+            Value::Array(array) => array.iter().enumerate().find_map(|(index, nested)| {
+                find_forbidden_key_path(nested, key).map(|suffix| {
+                    if suffix.starts_with('[') {
+                        format!("[{index}]{suffix}")
+                    } else {
+                        format!("[{index}].{suffix}")
+                    }
+                })
+            }),
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => None,
+        }
+    }
+
     fn test_state(store: AuthStore, token_url: String, api_key: Option<String>) -> AppState {
         let http = Client::new();
         AppState::new(
@@ -1538,7 +1614,10 @@ mod tests {
                 store,
                 CodexOAuthClient::new_with_token_url(http.clone(), spawn_refresh_server().await),
             ),
-            CodexClient::new(http, spawn_recording_codex_server(captured.clone()).await),
+            CodexClient::new(
+                http,
+                spawn_strict_recording_codex_server(captured.clone()).await,
+            ),
             Some("secret".into()),
             ModelList::from_ids(["gpt-5.5"]),
         );
@@ -1695,7 +1774,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn messages_preserve_cache_control_in_upstream_request() {
+    async fn messages_strip_cache_control_from_upstream_request() {
         let dir = TempDir::new().unwrap();
         let store = AuthStore::new(dir.path().join("auth.json"));
         store
@@ -1746,14 +1825,82 @@ mod tests {
         };
         assert_eq!(body["instructions"], "");
         assert_eq!(body["input"][0]["role"], "developer");
-        assert_eq!(
-            body["input"][0]["content"][0]["cache_control"]["type"],
-            "ephemeral"
+        assert!(
+            body["input"][0]["content"][0]
+                .get("cache_control")
+                .is_none()
         );
-        assert_eq!(
-            body["input"][1]["content"][0]["cache_control"]["type"],
-            "ephemeral"
+        assert!(
+            body["input"][1]["content"][0]
+                .get("cache_control")
+                .is_none()
         );
-        assert_eq!(body["tools"][0]["cache_control"]["type"], "ephemeral");
+        assert!(body["tools"][0].get("cache_control").is_none());
+    }
+
+    #[tokio::test]
+    async fn responses_strip_cache_control_from_upstream_request() {
+        let dir = TempDir::new().unwrap();
+        let store = AuthStore::new(dir.path().join("auth.json"));
+        store
+            .save(&Credentials {
+                access_token: "access".into(),
+                refresh_token: "refresh".into(),
+                expires_at: now_unix() + 600,
+                account_id: "acc_old".into(),
+            })
+            .unwrap();
+        let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let http = Client::new();
+        let state = AppState::new(
+            TokenManager::new(
+                store,
+                CodexOAuthClient::new_with_token_url(http.clone(), spawn_refresh_server().await),
+            ),
+            CodexClient::new(
+                http,
+                spawn_strict_recording_codex_server(captured.clone()).await,
+            ),
+            Some("secret".into()),
+            ModelList::from_ids(["gpt-5.5"]),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("secret"));
+
+        let response = handlers::responses(
+            axum::extract::State(state),
+            headers,
+            Json(
+                serde_json::from_value(json!({
+                    "model": "gpt-5.5",
+                    "input": [{
+                        "type": "message",
+                        "role": "developer",
+                        "content": [{
+                            "type": "input_text",
+                            "text": "be terse",
+                            "cache_control": {"type": "ephemeral"}
+                        }]
+                    }],
+                    "tools": [{
+                        "type": "function",
+                        "function": {
+                            "name": "lookup",
+                            "parameters": {"type": "object"}
+                        },
+                        "cache_control": {"type": "ephemeral"}
+                    }]
+                }))
+                .unwrap(),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = {
+            let captured = captured.lock().await;
+            captured.last().cloned().unwrap()
+        };
+        assert!(find_forbidden_key_path(&body, "cache_control").is_none());
     }
 }
