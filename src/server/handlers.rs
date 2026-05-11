@@ -627,9 +627,10 @@ fn previous_stores_generated_images(
     previous: Option<&crate::server::store::StoredResponse>,
 ) -> bool {
     previous.is_some_and(|stored| {
-        stored.input_items.iter().any(|item| {
-            item.get("type").and_then(Value::as_str) == Some("image_generation_call")
-        })
+        stored
+            .input_items
+            .iter()
+            .any(|item| item.get("type").and_then(Value::as_str) == Some("image_generation_call"))
     })
 }
 
