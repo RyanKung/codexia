@@ -9,7 +9,6 @@ pub(super) use conversion::{
     response_request_requires_raw_mode, responses_to_chat_request,
 };
 pub(super) use storage::{
-    build_response_id, build_responses_output_items, maybe_store_response, parse_upstream_usage,
-    response_object, response_object_from_chat, response_object_from_upstream,
-    stored_response_input_items,
+    build_response_id, build_responses_output_items, maybe_store_response, response_object,
+    response_object_from_chat, response_object_from_upstream, stored_response_input_items,
 };

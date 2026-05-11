@@ -1,12 +1,12 @@
 use super::responses::{
-    build_responses_output_items, parse_upstream_usage, response_object,
-    response_object_from_upstream, stored_response_input_items,
+    build_responses_output_items, response_object, response_object_from_upstream,
+    stored_response_input_items,
 };
 use crate::{
     anthropic::{
         content_block_stop, error_body, image_block_start, message_delta_event,
-        message_start_event, message_stop_event, text_block_start, text_delta, tool_block_start,
-        tool_json_delta,
+        message_start_event, message_stop_event, signature_delta, text_block_start, text_delta,
+        thinking_block_start, thinking_delta, tool_block_start, tool_json_delta,
     },
     codex::events::{event_error, finish_reason, is_done_event},
     error::Result,
@@ -282,9 +282,16 @@ pub(super) fn anthropic_raw_messages_sse_response(
         let mut stream = stream;
         let mut open_text_blocks = std::collections::BTreeSet::<u32>::new();
         let mut open_tool_blocks = std::collections::BTreeSet::<u32>::new();
+        let mut open_thinking_blocks = std::collections::BTreeSet::<u32>::new();
         let mut seen_tool_blocks = std::collections::BTreeSet::<u32>::new();
         let mut tool_meta = std::collections::HashMap::<String, ToolMeta>::new();
-        let mut output_tokens = 0_u32;
+        let mut usage = crate::anthropic::ResponseUsage {
+            input_tokens,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+            output_tokens: 0,
+            server_tool_use: None,
+        };
 
         yield_event_or_error!(message_start_event(&id, &model, input_tokens));
 
@@ -297,6 +304,9 @@ pub(super) fn anthropic_raw_messages_sse_response(
                     }
 
                     match item.value.get("type").and_then(Value::as_str) {
+                        Some("ping") => {
+                            yield Ok(Event::default().event("ping").data("{\"type\":\"ping\"}"));
+                        }
                         Some("response.output_text.delta") => {
                             let index = output_index(&item.value);
                             let delta = item
@@ -308,8 +318,8 @@ pub(super) fn anthropic_raw_messages_sse_response(
                                 if open_text_blocks.insert(index) {
                                     yield_event_or_error!(text_block_start(index));
                                 }
-                                output_tokens =
-                                    output_tokens.saturating_add(estimate_stream_tokens(delta));
+                                usage.output_tokens =
+                                    usage.output_tokens.saturating_add(estimate_stream_tokens(delta));
                                 yield_event_or_error!(text_delta(index, delta));
                             }
                         }
@@ -352,8 +362,8 @@ pub(super) fn anthropic_raw_messages_sse_response(
                                 }
                             }
                             if !delta.is_empty() {
-                                output_tokens =
-                                    output_tokens.saturating_add(estimate_stream_tokens(delta));
+                                usage.output_tokens =
+                                    usage.output_tokens.saturating_add(estimate_stream_tokens(delta));
                                 yield_event_or_error!(tool_json_delta(index, delta));
                             }
                         }
@@ -372,7 +382,7 @@ pub(super) fn anthropic_raw_messages_sse_response(
                                         yield_event_or_error!(tool_block_start(index, &tool_call));
                                     }
                                     if !tool_call.function.arguments.is_empty() {
-                                        output_tokens = output_tokens.saturating_add(
+                                        usage.output_tokens = usage.output_tokens.saturating_add(
                                             estimate_stream_tokens(&tool_call.function.arguments),
                                         );
                                         yield_event_or_error!(tool_json_delta(
@@ -384,6 +394,42 @@ pub(super) fn anthropic_raw_messages_sse_response(
                                 if open_tool_blocks.remove(&index) || first_seen {
                                     yield_event_or_error!(content_block_stop(index));
                                 }
+                            } else if let Some(thinking) = reasoning_text_from_event_item(&item.value) {
+                                let index = output_index(&item.value);
+                                if open_thinking_blocks.insert(index) {
+                                    yield_event_or_error!(thinking_block_start(index));
+                                }
+                                if !thinking.is_empty() {
+                                    usage.output_tokens = usage
+                                        .output_tokens
+                                        .saturating_add(estimate_stream_tokens(&thinking));
+                                    yield_event_or_error!(thinking_delta(index, &thinking));
+                                }
+                                if let Some(signature) = reasoning_signature_from_event_item(&item.value) {
+                                    yield_event_or_error!(signature_delta(index, &signature));
+                                }
+                                if open_thinking_blocks.remove(&index) {
+                                    yield_event_or_error!(content_block_stop(index));
+                                }
+                            }
+                        }
+                        Some(
+                            "response.reasoning_text.delta"
+                            | "response.reasoning_summary_text.delta",
+                        ) => {
+                            let index = output_index(&item.value);
+                            let delta = item
+                                .value
+                                .get("delta")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default();
+                            if !delta.is_empty() {
+                                if open_thinking_blocks.insert(index) {
+                                    yield_event_or_error!(thinking_block_start(index));
+                                }
+                                usage.output_tokens =
+                                    usage.output_tokens.saturating_add(estimate_stream_tokens(delta));
+                                yield_event_or_error!(thinking_delta(index, delta));
                             }
                         }
                         _ => {}
@@ -391,8 +437,7 @@ pub(super) fn anthropic_raw_messages_sse_response(
                     if is_done_event(&item.value) {
                         let mut stop_reason = finish_reason(&item.value);
                         if let Some(response) = item.value.get("response") {
-                            output_tokens = parse_upstream_usage(response.get("usage"))
-                                .map_or(output_tokens, |usage| usage.completion_tokens);
+                            merge_final_anthropic_usage(&mut usage, response.get("usage"));
                             if response_has_function_call(response) {
                                 "tool_calls".clone_into(&mut stop_reason);
                             }
@@ -410,6 +455,9 @@ pub(super) fn anthropic_raw_messages_sse_response(
                                     kind: "base64".to_owned(),
                                     media_type: image.media_type.or_else(|| Some("image/png".to_owned())),
                                     data: Some(image.b64_json),
+                                    text: None,
+                                    url: None,
+                                    file_id: None,
                                 };
                                 let index = u32::try_from(index).unwrap_or(u32::MAX);
                                 yield_event_or_error!(image_block_start(index, &source));
@@ -423,9 +471,12 @@ pub(super) fn anthropic_raw_messages_sse_response(
                         for index in std::mem::take(&mut open_tool_blocks) {
                             yield_event_or_error!(content_block_stop(index));
                         }
+                        for index in std::mem::take(&mut open_thinking_blocks) {
+                            yield_event_or_error!(content_block_stop(index));
+                        }
 
                         for event in [
-                            message_delta_event(&stop_reason, output_tokens),
+                            message_delta_event(&stop_reason, &usage),
                             message_stop_event(),
                         ] {
                             yield_event_or_error!(event);
@@ -446,7 +497,10 @@ pub(super) fn anthropic_raw_messages_sse_response(
         for index in open_tool_blocks {
             yield_event_or_error!(content_block_stop(index));
         }
-        for event in [message_delta_event("stop", output_tokens), message_stop_event()] {
+        for index in open_thinking_blocks {
+            yield_event_or_error!(content_block_stop(index));
+        }
+        for event in [message_delta_event("stop", &usage), message_stop_event()] {
             yield_event_or_error!(event);
         }
     };
@@ -549,6 +603,74 @@ fn response_has_function_call(response: &Value) -> bool {
                 .iter()
                 .any(|entry| entry.get("type").and_then(Value::as_str) == Some("function_call"))
         })
+}
+
+fn merge_final_anthropic_usage(usage: &mut crate::anthropic::ResponseUsage, value: Option<&Value>) {
+    if let Some(value) = value {
+        if let Some(input_tokens) = value
+            .get("input_tokens")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+        {
+            usage.input_tokens = input_tokens;
+        }
+        if let Some(output_tokens) = value
+            .get("output_tokens")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+        {
+            usage.output_tokens = output_tokens;
+        }
+        usage.cache_creation_input_tokens = value
+            .get("cache_creation_input_tokens")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok());
+        usage.cache_read_input_tokens = value
+            .get("cache_read_input_tokens")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok());
+        usage.server_tool_use = value
+            .get("server_tool_use")
+            .filter(|value| !value.is_null())
+            .cloned();
+    }
+}
+
+fn reasoning_text_from_event_item(event: &Value) -> Option<String> {
+    let item = event.get("item")?;
+    if item.get("type").and_then(Value::as_str) != Some("reasoning") {
+        return None;
+    }
+
+    let summary_text = item
+        .get("summary")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("");
+    if !summary_text.is_empty() {
+        return Some(summary_text);
+    }
+
+    let content_text = item
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("");
+    (!content_text.is_empty()).then_some(content_text)
+}
+
+fn reasoning_signature_from_event_item(event: &Value) -> Option<String> {
+    event
+        .get("item")
+        .and_then(|item| item.get("encrypted_content"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
 }
 
 #[derive(Clone)]

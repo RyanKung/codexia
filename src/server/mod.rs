@@ -250,6 +250,54 @@ mod tests {
         )
     }
 
+    async fn codex_reasoning_handler() -> impl axum::response::IntoResponse {
+        (
+            [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_reasoning\",\"model\":\"gpt-5.5\",\"status\":\"completed\",\"output\":[{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"work\"}],\"encrypted_content\":\"sig\"},{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"OK\"}]}],\"usage\":{\"input_tokens\":12,\"output_tokens\":5,\"total_tokens\":17}}}\n\n",
+        )
+    }
+
+    async fn codex_reasoning_stream_handler() -> impl axum::response::IntoResponse {
+        (
+            [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+            concat!(
+                "event: ping\n",
+                "data: {\"type\":\"ping\"}\n\n",
+                "event: response.reasoning_text.delta\n",
+                "data: {\"type\":\"response.reasoning_text.delta\",\"output_index\":0,\"item_id\":\"rs_1\",\"content_index\":0,\"delta\":\"step\"}\n\n",
+                "event: response.output_item.done\n",
+                "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"step\"}],\"encrypted_content\":\"sig\"}}\n\n",
+                "event: response.output_text.delta\n",
+                "data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"item_id\":\"msg_1\",\"content_index\":0,\"delta\":\"OK\"}\n\n",
+                "event: response.output_text.done\n",
+                "data: {\"type\":\"response.output_text.done\",\"output_index\":1,\"item_id\":\"msg_1\",\"content_index\":0,\"text\":\"OK\"}\n\n",
+                "event: response.completed\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_reasoning_stream\",\"model\":\"gpt-5.5\",\"status\":\"completed\",\"output\":[{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"step\"}],\"encrypted_content\":\"sig\"},{\"type\":\"message\",\"id\":\"msg_1\",\"content\":[{\"type\":\"output_text\",\"text\":\"OK\"}]}],\"usage\":{\"input_tokens\":12,\"output_tokens\":5,\"total_tokens\":17}}}\n\n"
+            ),
+        )
+    }
+
+    async fn codex_cache_usage_handler() -> impl axum::response::IntoResponse {
+        (
+            [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+            "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"OK\"}]}],\"usage\":{\"input_tokens\":12,\"cache_creation_input_tokens\":100,\"cache_read_input_tokens\":200,\"output_tokens\":5,\"total_tokens\":317,\"server_tool_use\":{\"web_search_requests\":1}}}}\n\n",
+        )
+    }
+
+    async fn codex_cache_usage_stream_handler() -> impl axum::response::IntoResponse {
+        (
+            [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+            concat!(
+                "event: response.output_text.delta\n",
+                "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"OK\"}\n\n",
+                "event: response.output_text.done\n",
+                "data: {\"type\":\"response.output_text.done\",\"output_index\":0,\"text\":\"OK\"}\n\n",
+                "event: response.completed\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_cache\",\"model\":\"gpt-5.5\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"OK\"}]}],\"usage\":{\"input_tokens\":12,\"cache_creation_input_tokens\":100,\"cache_read_input_tokens\":200,\"output_tokens\":5,\"total_tokens\":317,\"server_tool_use\":{\"web_search_requests\":1}}}}\n\n"
+            ),
+        )
+    }
+
     async fn codex_incomplete_handler() -> impl axum::response::IntoResponse {
         (
             [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
@@ -314,8 +362,52 @@ mod tests {
         url
     }
 
+    async fn spawn_reasoning_codex_server() -> String {
+        let app = Router::new().route("/codex/responses", post(codex_reasoning_handler));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        url
+    }
+
+    async fn spawn_reasoning_stream_codex_server() -> String {
+        let app = Router::new().route("/codex/responses", post(codex_reasoning_stream_handler));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        url
+    }
+
     async fn spawn_bad_request_codex_server() -> String {
         let app = Router::new().route("/codex/responses", post(codex_bad_request_handler));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        url
+    }
+
+    async fn spawn_cache_usage_codex_server() -> String {
+        let app = Router::new().route("/codex/responses", post(codex_cache_usage_handler));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        url
+    }
+
+    async fn spawn_cache_usage_stream_codex_server() -> String {
+        let app = Router::new().route("/codex/responses", post(codex_cache_usage_stream_handler));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move {
@@ -618,6 +710,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn messages_return_thinking_blocks_from_reasoning_output() {
+        let dir = TempDir::new().unwrap();
+        let store = AuthStore::new(dir.path().join("auth.json"));
+        store
+            .save(&Credentials {
+                access_token: "access".into(),
+                refresh_token: "refresh".into(),
+                expires_at: now_unix() + 600,
+                account_id: "acc_old".into(),
+            })
+            .unwrap();
+        let http = Client::new();
+        let state = AppState::new(
+            TokenManager::new(
+                store,
+                CodexOAuthClient::new_with_token_url(http.clone(), spawn_refresh_server().await),
+            ),
+            CodexClient::new(http, spawn_reasoning_codex_server().await),
+            Some("secret".into()),
+            ModelList::from_ids(["gpt-5.5"]),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("secret"));
+        headers.insert(
+            "anthropic-beta",
+            HeaderValue::from_static("extended-thinking-2025-05-14"),
+        );
+
+        let response = handlers::messages(
+            axum::extract::State(state),
+            headers,
+            Json(
+                serde_json::from_value(json!({
+                    "model": "gpt-5.5",
+                    "max_tokens": 128,
+                    "thinking": {"type": "enabled", "budget_tokens": 4096},
+                    "messages": [{"role": "user", "content": "hello"}]
+                }))
+                .unwrap(),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value = serde_json::from_slice::<Value>(&body).unwrap();
+        assert_eq!(value["content"][0]["type"], "thinking");
+        assert_eq!(value["content"][0]["thinking"], "work");
+        assert_eq!(value["content"][0]["signature"], "sig");
+        assert_eq!(value["content"][1]["type"], "text");
+    }
+
+    #[tokio::test]
+    async fn messages_preserve_cache_usage_fields() {
+        let dir = TempDir::new().unwrap();
+        let store = AuthStore::new(dir.path().join("auth.json"));
+        store
+            .save(&Credentials {
+                access_token: "access".into(),
+                refresh_token: "refresh".into(),
+                expires_at: now_unix() + 600,
+                account_id: "acc_old".into(),
+            })
+            .unwrap();
+        let http = Client::new();
+        let state = AppState::new(
+            TokenManager::new(
+                store,
+                CodexOAuthClient::new_with_token_url(http.clone(), spawn_refresh_server().await),
+            ),
+            CodexClient::new(http, spawn_cache_usage_codex_server().await),
+            Some("secret".into()),
+            ModelList::from_ids(["gpt-5.5"]),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("secret"));
+
+        let response = handlers::messages(
+            axum::extract::State(state),
+            headers,
+            Json(
+                serde_json::from_value(json!({
+                    "model": "gpt-5.5",
+                    "max_tokens": 128,
+                    "messages": [{"role": "user", "content": "hello"}]
+                }))
+                .unwrap(),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value = serde_json::from_slice::<Value>(&body).unwrap();
+        assert_eq!(value["usage"]["cache_creation_input_tokens"], 100);
+        assert_eq!(value["usage"]["cache_read_input_tokens"], 200);
+        assert_eq!(value["usage"]["server_tool_use"]["web_search_requests"], 1);
+    }
+
+    #[tokio::test]
     async fn count_message_tokens_returns_estimate() {
         let dir = TempDir::new().unwrap();
         let store = AuthStore::new(dir.path().join("auth.json"));
@@ -632,6 +824,42 @@ mod tests {
                 serde_json::from_value(json!({
                     "model": "gpt-5.5",
                     "messages": [{"role": "user", "content": "Reply with the single word OK"}]
+                }))
+                .unwrap(),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value = serde_json::from_slice::<Value>(&body).unwrap();
+        assert!(value["input_tokens"].as_u64().unwrap() > 0);
+    }
+
+    #[tokio::test]
+    async fn count_message_tokens_include_documents_tools_and_thinking() {
+        let dir = TempDir::new().unwrap();
+        let store = AuthStore::new(dir.path().join("auth.json"));
+        let state = test_state(store, spawn_refresh_server().await, Some("secret".into()));
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("secret"));
+        headers.insert(
+            "anthropic-beta",
+            HeaderValue::from_static("extended-thinking-2025-05-14"),
+        );
+
+        let response = handlers::count_message_tokens(
+            axum::extract::State(state),
+            headers,
+            Json(
+                serde_json::from_value(json!({
+                    "model": "gpt-5.5",
+                    "thinking": {"type": "enabled", "budget_tokens": 2048},
+                    "tools": [{"name": "lookup", "description": "fetch docs", "input_schema": {"type": "object", "properties": {"q": {"type": "string"}}}}],
+                    "messages": [{
+                        "role": "user",
+                        "content": [{"type": "document", "source": {"type": "text", "text": "document body"}}]
+                    }]
                 }))
                 .unwrap(),
             ),
@@ -843,6 +1071,109 @@ mod tests {
         assert!(text.contains("\"partial_json\":\"{\\\"q\\\":\\\"x\\\"}\""));
         assert!(text.contains("\"stop_reason\":\"tool_use\""));
         assert!(text.contains("event: message_stop"));
+    }
+
+    #[tokio::test]
+    async fn messages_stream_reasoning_returns_thinking_events() {
+        let dir = TempDir::new().unwrap();
+        let store = AuthStore::new(dir.path().join("auth.json"));
+        store
+            .save(&Credentials {
+                access_token: "access".into(),
+                refresh_token: "refresh".into(),
+                expires_at: now_unix() + 600,
+                account_id: "acc_old".into(),
+            })
+            .unwrap();
+        let http = Client::new();
+        let state = AppState::new(
+            TokenManager::new(
+                store,
+                CodexOAuthClient::new_with_token_url(http.clone(), spawn_refresh_server().await),
+            ),
+            CodexClient::new(http, spawn_reasoning_stream_codex_server().await),
+            Some("secret".into()),
+            ModelList::from_ids(["gpt-5.5"]),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("secret"));
+        headers.insert(
+            "anthropic-beta",
+            HeaderValue::from_static("extended-thinking-2025-05-14"),
+        );
+
+        let response = handlers::messages(
+            axum::extract::State(state),
+            headers,
+            Json(
+                serde_json::from_value(json!({
+                    "model": "gpt-5.5",
+                    "stream": true,
+                    "max_tokens": 256,
+                    "thinking": {"type": "enabled", "budget_tokens": 4096},
+                    "messages": [{"role": "user", "content": "hello"}]
+                }))
+                .unwrap(),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("event: ping"));
+        assert!(text.contains("\"type\":\"thinking\""));
+        assert!(text.contains("\"type\":\"thinking_delta\""));
+        assert!(text.contains("\"type\":\"signature_delta\""));
+        assert!(text.contains("event: message_stop"));
+    }
+
+    #[tokio::test]
+    async fn messages_stream_preserve_cache_usage_fields() {
+        let dir = TempDir::new().unwrap();
+        let store = AuthStore::new(dir.path().join("auth.json"));
+        store
+            .save(&Credentials {
+                access_token: "access".into(),
+                refresh_token: "refresh".into(),
+                expires_at: now_unix() + 600,
+                account_id: "acc_old".into(),
+            })
+            .unwrap();
+        let http = Client::new();
+        let state = AppState::new(
+            TokenManager::new(
+                store,
+                CodexOAuthClient::new_with_token_url(http.clone(), spawn_refresh_server().await),
+            ),
+            CodexClient::new(http, spawn_cache_usage_stream_codex_server().await),
+            Some("secret".into()),
+            ModelList::from_ids(["gpt-5.5"]),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("secret"));
+
+        let response = handlers::messages(
+            axum::extract::State(state),
+            headers,
+            Json(
+                serde_json::from_value(json!({
+                    "model": "gpt-5.5",
+                    "stream": true,
+                    "max_tokens": 256,
+                    "messages": [{"role": "user", "content": "hello"}]
+                }))
+                .unwrap(),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("\"cache_creation_input_tokens\":100"));
+        assert!(text.contains("\"cache_read_input_tokens\":200"));
+        assert!(text.contains("\"web_search_requests\":1"));
     }
 
     #[tokio::test]
@@ -1261,5 +1592,168 @@ mod tests {
         let instructions = body["instructions"].as_str().unwrap();
         assert!(instructions.contains("developer: be terse"));
         assert!(instructions.contains("user: hello"));
+    }
+
+    #[tokio::test]
+    async fn messages_send_empty_instructions_when_system_is_absent() {
+        let dir = TempDir::new().unwrap();
+        let store = AuthStore::new(dir.path().join("auth.json"));
+        store
+            .save(&Credentials {
+                access_token: "access".into(),
+                refresh_token: "refresh".into(),
+                expires_at: now_unix() + 600,
+                account_id: "acc_old".into(),
+            })
+            .unwrap();
+        let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let http = Client::new();
+        let state = AppState::new(
+            TokenManager::new(
+                store,
+                CodexOAuthClient::new_with_token_url(http.clone(), spawn_refresh_server().await),
+            ),
+            CodexClient::new(http, spawn_recording_codex_server(captured.clone()).await),
+            Some("secret".into()),
+            ModelList::from_ids(["gpt-5.5"]),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("secret"));
+
+        let response = handlers::messages(
+            axum::extract::State(state),
+            headers,
+            Json(
+                serde_json::from_value(json!({
+                    "model": "gpt-5.5",
+                    "max_tokens": 128,
+                    "messages": [{"role": "user", "content": "hello"}]
+                }))
+                .unwrap(),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = {
+            let captured = captured.lock().await;
+            captured.last().cloned().unwrap()
+        };
+        assert_eq!(body["instructions"], "");
+    }
+
+    #[tokio::test]
+    async fn messages_accept_anthropic_beta_without_forwarding_internal_keys() {
+        let dir = TempDir::new().unwrap();
+        let store = AuthStore::new(dir.path().join("auth.json"));
+        store
+            .save(&Credentials {
+                access_token: "access".into(),
+                refresh_token: "refresh".into(),
+                expires_at: now_unix() + 600,
+                account_id: "acc_old".into(),
+            })
+            .unwrap();
+        let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let http = Client::new();
+        let state = AppState::new(
+            TokenManager::new(
+                store,
+                CodexOAuthClient::new_with_token_url(http.clone(), spawn_refresh_server().await),
+            ),
+            CodexClient::new(http, spawn_recording_codex_server(captured.clone()).await),
+            Some("secret".into()),
+            ModelList::from_ids(["gpt-5.5"]),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("secret"));
+        headers.insert(
+            "anthropic-beta",
+            HeaderValue::from_static("extended-thinking-2025-05-14"),
+        );
+
+        let response = handlers::messages(
+            axum::extract::State(state),
+            headers,
+            Json(
+                serde_json::from_value(json!({
+                    "model": "gpt-5.5",
+                    "max_tokens": 128,
+                    "messages": [{"role": "user", "content": "hello"}]
+                }))
+                .unwrap(),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = {
+            let captured = captured.lock().await;
+            captured.last().cloned().unwrap()
+        };
+        assert!(body.get("codexia_anthropic_beta").is_none());
+    }
+
+    #[tokio::test]
+    async fn messages_preserve_cache_control_in_upstream_request() {
+        let dir = TempDir::new().unwrap();
+        let store = AuthStore::new(dir.path().join("auth.json"));
+        store
+            .save(&Credentials {
+                access_token: "access".into(),
+                refresh_token: "refresh".into(),
+                expires_at: now_unix() + 600,
+                account_id: "acc_old".into(),
+            })
+            .unwrap();
+        let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let http = Client::new();
+        let state = AppState::new(
+            TokenManager::new(
+                store,
+                CodexOAuthClient::new_with_token_url(http.clone(), spawn_refresh_server().await),
+            ),
+            CodexClient::new(http, spawn_recording_codex_server(captured.clone()).await),
+            Some("secret".into()),
+            ModelList::from_ids(["gpt-5.5"]),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("secret"));
+
+        let response = handlers::messages(
+            axum::extract::State(state),
+            headers,
+            Json(
+                serde_json::from_value(json!({
+                    "model": "gpt-5.5",
+                    "max_tokens": 128,
+                    "system": [{"type": "text", "text": "be terse", "cache_control": {"type": "ephemeral"}}],
+                    "tools": [{"name": "lookup", "input_schema": {"type": "object"}, "cache_control": {"type": "ephemeral"}}],
+                    "messages": [{
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "hello", "cache_control": {"type": "ephemeral"}}]
+                    }]
+                }))
+                .unwrap(),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = {
+            let captured = captured.lock().await;
+            captured.last().cloned().unwrap()
+        };
+        assert_eq!(body["instructions"], "");
+        assert_eq!(body["input"][0]["role"], "developer");
+        assert_eq!(
+            body["input"][0]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        assert_eq!(
+            body["input"][1]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        assert_eq!(body["tools"][0]["cache_control"]["type"], "ephemeral");
     }
 }

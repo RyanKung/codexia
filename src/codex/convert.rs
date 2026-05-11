@@ -147,13 +147,17 @@ pub fn convert_tool(tool: &ChatTool) -> Value {
             .function
             .as_ref()
             .expect("function tool metadata missing");
-        json!({
+        let mut value = json!({
             "type": "function",
             "name": &function.name,
             "description": function.description.clone().unwrap_or_default(),
             "parameters": function.parameters.clone().unwrap_or_else(|| json!({ "type": "object" })),
             "strict": function.strict
-        })
+        });
+        if let Some(object) = value.as_object_mut() {
+            object.extend(tool.extra.clone());
+        }
+        value
     } else {
         let mut value = Value::Object(tool.extra.clone());
         value["type"] = Value::String(tool.kind.clone());
@@ -192,17 +196,13 @@ pub fn responses_to_codex_request(request: &ResponsesRequest, input: &[Value]) -
         "store": request.should_store(),
         "stream": request.wants_stream(),
         "input": input,
+        "instructions": request.instructions.as_deref().unwrap_or(""),
         "text": { "verbosity": request.extra.get("text_verbosity").and_then(Value::as_str).unwrap_or("medium") },
         "include": ["reasoning.encrypted_content"],
         "tool_choice": convert_tool_choice(request.tool_choice.as_ref()).unwrap_or_else(|| json!("auto")),
         "parallel_tool_calls": request.parallel_tool_calls()
     });
 
-    insert_optional(
-        &mut body,
-        "instructions",
-        request.instructions.clone().map(Value::from),
-    );
     insert_optional(
         &mut body,
         "service_tier",
@@ -393,5 +393,22 @@ mod tests {
         })));
 
         assert_eq!(body["tool_choice"], "required");
+    }
+
+    #[test]
+    fn responses_request_always_includes_instructions() {
+        let request: ResponsesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "input": "hello"
+        }))
+        .unwrap();
+        let input = vec![json!({
+            "role": "user",
+            "content": [{"type": "input_text", "text": "hello"}]
+        })];
+
+        let body = responses_to_codex_request(&request, &input);
+
+        assert_eq!(body["instructions"], "");
     }
 }

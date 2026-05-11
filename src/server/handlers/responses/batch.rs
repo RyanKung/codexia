@@ -1,6 +1,10 @@
 use crate::anthropic::{
     MessageBatchRequest, MessageBatchResult, MessageBatchResultType, error_body,
-    from_openai_response, to_openai_request,
+    from_openai_response_value,
+};
+use crate::codex::convert::responses_to_codex_request;
+use crate::server::handlers::responses::{
+    anthropic_responses_request, collect_response_input_items,
 };
 use axum::http::{HeaderMap, header::HOST};
 
@@ -45,13 +49,22 @@ pub(in crate::server::handlers) async fn run_message_batch_worker(
             return;
         }
 
-        let result = match to_openai_request(&item.params) {
-            Ok(openai_request) => match token_manager.credentials().await {
-                Ok(credentials) => match codex.complete_chat(openai_request, &credentials).await {
+        let result = match anthropic_responses_request(&item.params).and_then(|response_request| {
+            collect_response_input_items(&response_request, None)
+                .map(|input_items| (response_request, input_items))
+        }) {
+            Ok((response_request, input_items)) => match token_manager.credentials().await {
+                Ok(credentials) => match codex
+                    .complete_response(
+                        responses_to_codex_request(&response_request, &input_items),
+                        &credentials,
+                    )
+                    .await
+                {
                     Ok(response) => MessageBatchResult {
                         custom_id: item.custom_id,
                         result: MessageBatchResultType::Succeeded {
-                            message: from_openai_response(response),
+                            message: from_openai_response_value(&response, &response_request.model),
                         },
                     },
                     Err(error) => MessageBatchResult {

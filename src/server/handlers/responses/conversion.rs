@@ -1,5 +1,8 @@
 use crate::{
-    anthropic::{MessagesRequest, to_openai_request},
+    anthropic::{
+        ContentBlock, Message, MessageContent, MessagesRequest, SystemPrompt, ToolResultContent,
+        to_openai_request,
+    },
     error::Result,
     openai::types::{
         ChatCompletionRequest, ChatContent, ChatContentPart, ChatMessage, ChatTool,
@@ -91,30 +94,32 @@ pub(in crate::server::handlers) fn anthropic_responses_request(
     request: &MessagesRequest,
 ) -> Result<ResponsesRequest> {
     let openai = to_openai_request(request)?;
+    let raw_input_items = anthropic_raw_input_items(request);
+    let mut extra = request.extra.clone();
+    extra.remove("codexia_anthropic_beta");
+    extra.remove("codexia_anthropic_version");
+    extra.insert(
+        "codexia_raw_input_items".to_owned(),
+        Value::Array(raw_input_items),
+    );
 
     Ok(ResponsesRequest {
         model: openai.model,
-        input: Some(ResponseInput::Items(
-            openai
-                .messages
-                .into_iter()
-                .map(chat_message_to_response_input_item)
-                .collect(),
-        )),
-        instructions: None,
+        input: None,
+        instructions: Some(String::new()),
         stream: openai.stream,
         temperature: openai.temperature,
         top_p: openai.top_p,
         tools: openai.tools,
         tool_choice: openai.tool_choice,
         service_tier: None,
-        reasoning: None,
+        reasoning: anthropic_reasoning(request.thinking.as_ref()),
         max_output_tokens: request.max_tokens,
         parallel_tool_calls: openai.parallel_tool_calls,
         store: Some(false),
         previous_response_id: None,
         metadata: None,
-        extra: request.extra.clone(),
+        extra,
     })
 }
 
@@ -168,44 +173,6 @@ pub(in crate::server::handlers) fn image_generation_responses_request(
     }
 }
 
-fn chat_message_to_response_input_item(message: ChatMessage) -> ResponseInputItem {
-    ResponseInputItem::Message(ResponseMessageInputItem {
-        kind: Some("message".to_owned()),
-        role: message.role,
-        content: message.content.map_or_else(
-            || ResponseInputContent::Parts(Vec::new()),
-            chat_content_to_response_input_content,
-        ),
-        id: None,
-        name: message.name,
-        tool_call_id: message.tool_call_id,
-    })
-}
-
-fn chat_content_to_response_input_content(content: ChatContent) -> ResponseInputContent {
-    match content {
-        ChatContent::Text(text) => ResponseInputContent::Parts(vec![json_text_input_part(&text)]),
-        ChatContent::Parts(parts) => ResponseInputContent::Parts(
-            parts
-                .into_iter()
-                .filter_map(|part| match part.kind.as_str() {
-                    "text" => part.text.map(|text| json_text_input_part(&text)),
-                    "image_url" => {
-                        part.image_url
-                            .map(|image| crate::openai::types::ResponseInputContentPart {
-                                kind: "input_image".to_owned(),
-                                text: None,
-                                image_url: Some(image.url),
-                                detail: image.detail,
-                            })
-                    }
-                    _ => None,
-                })
-                .collect(),
-        ),
-    }
-}
-
 fn maybe_prepend_instructions(messages: &mut Vec<ChatMessage>, instructions: Option<&str>) {
     if let Some(instructions) = instructions {
         messages.insert(
@@ -228,6 +195,15 @@ pub(in crate::server::handlers) fn collect_response_input_items(
     let mut input_items = previous
         .map(|stored| stored.input_items.clone())
         .unwrap_or_default();
+
+    if let Some(raw_items) = request
+        .extra
+        .get("codexia_raw_input_items")
+        .and_then(Value::as_array)
+    {
+        input_items.extend(raw_items.iter().cloned());
+        return Ok(input_items);
+    }
 
     match request.input.as_ref() {
         Some(ResponseInput::Text(text)) => {
@@ -315,8 +291,24 @@ fn stored_response_messages(stored: &crate::server::store::StoredResponse) -> Ve
     response_input_items_to_chat_messages(&stored.input_items)
 }
 
-pub(in crate::server::handlers) fn estimate_response_input_tokens(input_items: &[Value]) -> u32 {
+pub(in crate::server::handlers) fn estimate_response_input_tokens(
+    request: &ResponsesRequest,
+    input_items: &[Value],
+) -> u32 {
     let mut text = String::new();
+    if let Some(instructions) = request.instructions.as_deref() {
+        text.push_str(instructions);
+    }
+    if let Some(reasoning) = request.reasoning.as_ref() {
+        text.push_str(&reasoning.to_string());
+    }
+    if let Some(tools) = request.tools.as_ref() {
+        for tool in tools {
+            if let Ok(value) = serde_json::to_string(tool) {
+                text.push_str(&value);
+            }
+        }
+    }
     for item in input_items {
         if item.get("type").and_then(Value::as_str) == Some("compaction") {
             if let Some(content) = item.get("encrypted_content").and_then(Value::as_str) {
@@ -338,6 +330,11 @@ pub(in crate::server::handlers) fn estimate_response_input_tokens(input_items: &
                             if let Some(value) = part.get("text").and_then(Value::as_str) {
                                 text.push_str(value);
                             }
+                            if let Some(value) = part.get("image_url").and_then(Value::as_str) {
+                                text.push_str("[image:");
+                                text.push_str(value);
+                                text.push(']');
+                            }
                         }
                     }
                     _ => {}
@@ -356,6 +353,259 @@ fn json_text_input_part(text: &str) -> crate::openai::types::ResponseInputConten
         text: Some(text.to_owned()),
         image_url: None,
         detail: None,
+    }
+}
+
+fn anthropic_reasoning(thinking: Option<&Value>) -> Option<Value> {
+    let thinking = thinking?;
+    let budget_tokens = thinking.get("budget_tokens").and_then(Value::as_u64);
+    let effort = match budget_tokens {
+        Some(tokens) if tokens >= 8_192 => "high",
+        Some(tokens) if tokens >= 2_048 => "medium",
+        Some(_) => "low",
+        None => "medium",
+    };
+
+    Some(json!({
+        "effort": effort,
+        "summary": "detailed"
+    }))
+}
+
+fn anthropic_raw_input_items(request: &MessagesRequest) -> Vec<Value> {
+    let mut items = request
+        .system
+        .as_ref()
+        .map_or_else(Vec::new, anthropic_system_items);
+    for message in &request.messages {
+        items.extend(anthropic_message_items(message));
+    }
+    items
+}
+
+fn anthropic_system_items(system: &SystemPrompt) -> Vec<Value> {
+    let parts = match system {
+        SystemPrompt::Text(text) => vec![json!({"type": "input_text", "text": text})],
+        SystemPrompt::Blocks(blocks) => blocks
+            .iter()
+            .filter_map(|block| {
+                block.text.as_ref().map(|text| {
+                    let mut value = json!({"type": "input_text", "text": text});
+                    if let Some(cache_control) = &block.cache_control {
+                        value["cache_control"] = cache_control.clone();
+                    }
+                    value
+                })
+            })
+            .collect(),
+    };
+
+    if parts.is_empty() {
+        Vec::new()
+    } else {
+        vec![json!({
+            "type": "message",
+            "role": "developer",
+            "content": parts
+        })]
+    }
+}
+
+fn anthropic_message_items(message: &Message) -> Vec<Value> {
+    match (&message.role[..], &message.content) {
+        ("user", MessageContent::Text(text)) => {
+            let content = vec![json!({"type": "input_text", "text": text})];
+            vec![raw_message_item("user", &content)]
+        }
+        ("assistant", MessageContent::Text(text)) => vec![json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": text, "annotations": []}],
+            "status": "completed"
+        })],
+        ("user", MessageContent::Blocks(blocks)) => anthropic_user_block_items(blocks),
+        ("assistant", MessageContent::Blocks(blocks)) => anthropic_assistant_block_items(blocks),
+        _ => Vec::new(),
+    }
+}
+
+fn anthropic_user_block_items(blocks: &[ContentBlock]) -> Vec<Value> {
+    let mut items = Vec::new();
+    let mut parts = Vec::new();
+    for block in blocks {
+        if block.kind == "tool_result" {
+            flush_raw_message_item(&mut items, "user", &mut parts);
+            let mut item = json!({
+                "type": "function_call_output",
+                "call_id": block.tool_use_id.clone().unwrap_or_default(),
+                "output": anthropic_tool_result_text(block.content.as_ref()),
+            });
+            if let Some(cache_control) = &block.cache_control {
+                item["cache_control"] = cache_control.clone();
+            }
+            items.push(item);
+        } else if let Some(part) = anthropic_user_content_part(block) {
+            parts.push(part);
+        }
+    }
+    flush_raw_message_item(&mut items, "user", &mut parts);
+    items
+}
+
+fn anthropic_assistant_block_items(blocks: &[ContentBlock]) -> Vec<Value> {
+    let mut items = Vec::new();
+    let mut text_parts = Vec::new();
+    for block in blocks {
+        if block.kind == "tool_use" {
+            flush_raw_assistant_text_item(&mut items, &mut text_parts);
+            let mut item = json!({
+                "type": "function_call",
+                "call_id": block.id.clone().unwrap_or_default(),
+                "name": block.name.clone().unwrap_or_default(),
+                "arguments": block.input.clone().unwrap_or_else(|| json!({})).to_string(),
+            });
+            if let Some(cache_control) = &block.cache_control {
+                item["cache_control"] = cache_control.clone();
+            }
+            items.push(item);
+        } else if let Some(part) = anthropic_assistant_content_part(block) {
+            text_parts.push(part);
+        }
+    }
+    flush_raw_assistant_text_item(&mut items, &mut text_parts);
+    items
+}
+
+fn anthropic_user_content_part(block: &ContentBlock) -> Option<Value> {
+    match block.kind.as_str() {
+        "text" | "input_text" => Some(cacheable_value(
+            json!({"type": "input_text", "text": anthropic_text_like_block_text(block)?}),
+            block.cache_control.as_ref(),
+        )),
+        "image" => anthropic_image_data_url(block.source.as_ref()).map(|image_url| {
+            cacheable_value(
+                json!({"type": "input_image", "image_url": image_url, "detail": "auto"}),
+                block.cache_control.as_ref(),
+            )
+        }),
+        "document" => Some(cacheable_value(
+            json!({"type": "input_text", "text": anthropic_document_text(block)?}),
+            block.cache_control.as_ref(),
+        )),
+        "thinking" => Some(cacheable_value(
+            json!({"type": "input_text", "text": block.thinking.clone()?}),
+            block.cache_control.as_ref(),
+        )),
+        _ => None,
+    }
+}
+
+fn anthropic_assistant_content_part(block: &ContentBlock) -> Option<Value> {
+    match block.kind.as_str() {
+        "text" | "input_text" | "document" | "thinking" => {
+            let text = match block.kind.as_str() {
+                "document" => anthropic_document_text(block)?,
+                "thinking" => block.thinking.clone()?,
+                _ => anthropic_text_like_block_text(block)?,
+            };
+            Some(cacheable_value(
+                json!({"type": "output_text", "text": text, "annotations": []}),
+                block.cache_control.as_ref(),
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn cacheable_value(mut value: Value, cache_control: Option<&Value>) -> Value {
+    if let Some(cache_control) = cache_control {
+        value["cache_control"] = cache_control.clone();
+    }
+    value
+}
+
+fn raw_message_item(role: &str, content: &[Value]) -> Value {
+    json!({
+        "type": "message",
+        "role": role,
+        "content": content
+    })
+}
+
+fn flush_raw_message_item(items: &mut Vec<Value>, role: &str, parts: &mut Vec<Value>) {
+    if parts.is_empty() {
+        return;
+    }
+    let content = std::mem::take(parts);
+    items.push(raw_message_item(role, &content));
+}
+
+fn flush_raw_assistant_text_item(items: &mut Vec<Value>, parts: &mut Vec<Value>) {
+    if parts.is_empty() {
+        return;
+    }
+    items.push(json!({
+        "type": "message",
+        "role": "assistant",
+        "content": std::mem::take(parts),
+        "status": "completed"
+    }));
+}
+
+fn anthropic_text_like_block_text(block: &ContentBlock) -> Option<String> {
+    block
+        .text
+        .clone()
+        .or_else(|| block.thinking.clone())
+        .or_else(|| block.source.as_ref().and_then(|source| source.text.clone()))
+}
+
+fn anthropic_image_data_url(source: Option<&crate::anthropic::ImageSource>) -> Option<String> {
+    let source = source?;
+    let media_type = source.media_type.as_deref().unwrap_or("image/png");
+    let data = source.data.as_deref()?;
+    Some(format!("data:{media_type};base64,{data}"))
+}
+
+fn anthropic_document_text(block: &ContentBlock) -> Option<String> {
+    let mut fragments = Vec::new();
+    if let Some(text) = block.text.as_deref() {
+        fragments.push(text.to_owned());
+    }
+    if let Some(source) = block.source.as_ref() {
+        if let Some(text) = source.text.as_deref() {
+            fragments.push(text.to_owned());
+        }
+        if let Some(data) = source.data.as_deref() {
+            fragments.push(data.to_owned());
+        }
+        if let Some(url) = source.url.as_deref() {
+            fragments.push(format!("[document:{url}]"));
+        }
+        if let Some(file_id) = source.file_id.as_deref() {
+            fragments.push(format!("[document_file:{file_id}]"));
+        }
+    }
+    if let Some(content) = block.document_content.as_ref() {
+        for nested in content {
+            if let Some(text) = anthropic_text_like_block_text(nested) {
+                fragments.push(text);
+            }
+        }
+    }
+    let combined = fragments.join("\n");
+    (!combined.is_empty()).then_some(combined)
+}
+
+fn anthropic_tool_result_text(content: Option<&ToolResultContent>) -> String {
+    match content {
+        Some(ToolResultContent::Text(text)) => text.clone(),
+        Some(ToolResultContent::Blocks(blocks)) => blocks
+            .iter()
+            .filter_map(anthropic_text_like_block_text)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        None => String::new(),
     }
 }
 
@@ -425,4 +675,69 @@ fn decode_compaction_summary(payload: &str) -> Option<String> {
         .get("summary")
         .and_then(Value::as_str)
         .map(str::to_owned)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn anthropic_messages_map_system_to_instructions_and_thinking_to_reasoning() {
+        let request: MessagesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "system": "be terse",
+            "thinking": {"type": "enabled", "budget_tokens": 4096},
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .unwrap();
+
+        let converted = anthropic_responses_request(&request).unwrap();
+
+        assert_eq!(converted.instructions.as_deref(), Some(""));
+        assert_eq!(
+            converted
+                .reasoning
+                .as_ref()
+                .and_then(|value| value.get("effort"))
+                .and_then(Value::as_str),
+            Some("medium")
+        );
+        let items = converted
+            .extra
+            .get("codexia_raw_input_items")
+            .and_then(Value::as_array)
+            .unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["role"], "developer");
+    }
+
+    #[test]
+    fn anthropic_messages_preserve_assistant_block_order_in_raw_items() {
+        let request: MessagesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "messages": [{
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "before"},
+                    {"type": "tool_use", "id": "call_1", "name": "lookup", "input": {"q": "x"}},
+                    {"type": "text", "text": "after"}
+                ]
+            }]
+        }))
+        .unwrap();
+
+        let converted = anthropic_responses_request(&request).unwrap();
+        let items = converted
+            .extra
+            .get("codexia_raw_input_items")
+            .and_then(Value::as_array)
+            .unwrap();
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0]["type"], "message");
+        assert_eq!(items[0]["content"][0]["text"], "before");
+        assert_eq!(items[1]["type"], "function_call");
+        assert_eq!(items[2]["type"], "message");
+        assert_eq!(items[2]["content"][0]["text"], "after");
+    }
 }

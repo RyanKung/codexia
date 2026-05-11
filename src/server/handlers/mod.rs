@@ -7,7 +7,7 @@ use crate::{
     anthropic::{
         CountTokensResponse, MessageBatch, MessageBatchCreateRequest, MessageBatchDeleted,
         MessageBatchListResponse, MessageBatchRequestCounts, MessagesRequest, error_body,
-        estimate_input_tokens, from_openai_response_object, message_batch_list_response,
+        estimate_input_tokens, from_openai_response_value, message_batch_list_response,
     },
     codex::convert::responses_to_codex_request,
     openai::{
@@ -165,7 +165,7 @@ pub async fn count_response_input_tokens(
     };
 
     Json(ResponseInputTokens {
-        input_tokens: estimate_response_input_tokens(&input_items),
+        input_tokens: estimate_response_input_tokens(&request, &input_items),
     })
     .into_response()
 }
@@ -259,11 +259,13 @@ pub async fn chat_completions(
 pub async fn messages(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<MessagesRequest>,
+    Json(mut request): Json<MessagesRequest>,
 ) -> Response {
     if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
         return anthropic_error_response(&error);
     }
+
+    apply_anthropic_headers(&headers, &mut request);
 
     let credentials = match state.token_manager.credentials().await {
         Ok(credentials) => credentials,
@@ -280,7 +282,7 @@ pub async fn messages(
     };
     let body = responses_to_codex_request(&response_request, &input_items);
 
-    let input_tokens = estimate_input_tokens(&request);
+    let input_tokens = estimate_response_input_tokens(&response_request, &input_items);
     let model = request.model.clone();
 
     if request.wants_stream() {
@@ -292,10 +294,7 @@ pub async fn messages(
         }
     } else {
         match state.codex.complete_response(body, &credentials).await {
-            Ok(value) => {
-                let response_object = response_object_from_upstream(&response_request, &value);
-                Json(from_openai_response_object(response_object)).into_response()
-            }
+            Ok(value) => Json(from_openai_response_value(&value, &request.model)).into_response(),
             Err(error) => anthropic_error_response(&error),
         }
     }
@@ -345,26 +344,35 @@ pub async fn image_generations(
 pub async fn count_message_tokens(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<MessagesRequest>,
+    Json(mut request): Json<MessagesRequest>,
 ) -> Response {
     if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
         return anthropic_error_response(&error);
     }
 
-    Json(CountTokensResponse {
-        input_tokens: estimate_input_tokens(&request),
-    })
-    .into_response()
+    apply_anthropic_headers(&headers, &mut request);
+    let input_tokens = anthropic_responses_request(&request)
+        .and_then(|response_request| {
+            collect_response_input_items(&response_request, None)
+                .map(|input_items| estimate_response_input_tokens(&response_request, &input_items))
+        })
+        .unwrap_or_else(|_| estimate_input_tokens(&request));
+
+    Json(CountTokensResponse { input_tokens }).into_response()
 }
 
 /// Creates an Anthropic-compatible message batch and schedules background execution.
 pub async fn create_message_batch(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<MessageBatchCreateRequest>,
+    Json(mut request): Json<MessageBatchCreateRequest>,
 ) -> Response {
     if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
         return anthropic_error_response(&error);
+    }
+
+    for item in &mut request.requests {
+        apply_anthropic_headers(&headers, &mut item.params);
     }
 
     let batch_id = build_batch_id();
@@ -408,6 +416,33 @@ pub async fn create_message_batch(
     });
 
     Json(batch).into_response()
+}
+
+fn apply_anthropic_headers(headers: &HeaderMap, request: &mut MessagesRequest) {
+    if let Some(version) = headers
+        .get("anthropic-version")
+        .and_then(|value| value.to_str().ok())
+    {
+        request.extra.insert(
+            "codexia_anthropic_version".to_owned(),
+            Value::String(version.to_owned()),
+        );
+    }
+
+    let betas = headers
+        .get_all("anthropic-beta")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| Value::String(value.to_owned()))
+        .collect::<Vec<_>>();
+    if !betas.is_empty() {
+        request
+            .extra
+            .insert("codexia_anthropic_beta".to_owned(), Value::Array(betas));
+    }
 }
 
 /// Lists previously created Anthropic message batches in newest-first order.

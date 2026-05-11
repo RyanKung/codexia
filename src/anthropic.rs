@@ -8,7 +8,8 @@ use crate::{
     Error, Result,
     openai::{
         response::{
-            ChatCompletionResponse, ResponseObject, Usage, generated_images_from_response_items,
+            ChatCompletionResponse, ResponseObject, Usage, generated_images_from_output,
+            generated_images_from_response_items,
         },
         types::{
             ChatCompletionRequest, ChatContent, ChatContentPart, ChatMessage, ChatTool,
@@ -106,6 +107,9 @@ pub struct SystemBlock {
     /// Optional text payload carried by the block.
     #[serde(default)]
     pub text: Option<String>,
+    /// Optional prompt caching directive attached to this block.
+    #[serde(default)]
+    pub cache_control: Option<Value>,
 }
 
 /// Minimal Anthropic content block support needed by SDKs and Claude Code.
@@ -117,9 +121,15 @@ pub struct ContentBlock {
     /// Inline text payload for text-like blocks.
     #[serde(default)]
     pub text: Option<String>,
+    /// Optional prompt caching directive attached to this block.
+    #[serde(default)]
+    pub cache_control: Option<Value>,
     /// Image source for image blocks.
     #[serde(default)]
     pub source: Option<ImageSource>,
+    /// Optional nested content for document-like blocks.
+    #[serde(default)]
+    pub document_content: Option<Vec<ContentBlock>>,
     /// Tool use identifier for `tool_use` blocks.
     #[serde(default)]
     pub id: Option<String>,
@@ -135,6 +145,9 @@ pub struct ContentBlock {
     /// Structured or plain-text tool result content.
     #[serde(default)]
     pub content: Option<ToolResultContent>,
+    /// Whether a tool result represents an error.
+    #[serde(default)]
+    pub is_error: Option<bool>,
     /// Reasoning text for `thinking` blocks.
     #[serde(default)]
     pub thinking: Option<String>,
@@ -155,6 +168,15 @@ pub struct ImageSource {
     /// Base64-encoded image payload.
     #[serde(default)]
     pub data: Option<String>,
+    /// Inline text payload for text-backed sources.
+    #[serde(default)]
+    pub text: Option<String>,
+    /// URL-backed sources when the caller references a remote asset.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// File-backed sources when the caller references an uploaded file.
+    #[serde(default)]
+    pub file_id: Option<String>,
 }
 
 /// Tool result content may arrive as a string or as a list of text blocks.
@@ -178,6 +200,9 @@ pub struct ToolDefinition {
     /// JSON Schema describing accepted tool input.
     #[serde(default)]
     pub input_schema: Option<Value>,
+    /// Optional prompt caching directive attached to this tool definition.
+    #[serde(default)]
+    pub cache_control: Option<Value>,
 }
 
 /// Anthropic Messages API response body.
@@ -228,6 +253,15 @@ pub enum ResponseContentBlock {
         /// Base64 image payload.
         source: ImageSource,
     },
+    /// Thinking output surfaced by reasoning-capable upstream models.
+    #[serde(rename = "thinking")]
+    Thinking {
+        /// Reasoning text emitted by the model.
+        thinking: String,
+        /// Opaque signature carried by Anthropic thinking blocks.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
 }
 
 /// Anthropic usage fields for Messages responses.
@@ -235,8 +269,17 @@ pub enum ResponseContentBlock {
 pub struct ResponseUsage {
     /// Estimated or reported prompt token count.
     pub input_tokens: u32,
+    /// Number of prompt tokens written into cache on this request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens: Option<u32>,
+    /// Number of prompt tokens read from cache on this request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_read_input_tokens: Option<u32>,
     /// Estimated or reported output token count.
     pub output_tokens: u32,
+    /// Optional hosted server-tool usage summary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_tool_use: Option<Value>,
 }
 
 /// Anthropic token counting response body.
@@ -484,6 +527,9 @@ pub fn from_openai_response(response: ChatCompletionResponse) -> MessageResponse
                 kind: "base64".to_owned(),
                 media_type: image.media_type.or_else(|| Some("image/png".to_owned())),
                 data: Some(image.b64_json),
+                text: None,
+                url: None,
+                file_id: None,
             },
         });
     }
@@ -504,7 +550,10 @@ pub fn from_openai_response(response: ChatCompletionResponse) -> MessageResponse
         stop_sequence: None,
         usage: ResponseUsage {
             input_tokens: usage.prompt_tokens,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
             output_tokens: usage.completion_tokens,
+            server_tool_use: None,
         },
     }
 }
@@ -543,6 +592,9 @@ pub fn from_openai_response_object(response: ResponseObject) -> MessageResponse 
                 kind: "base64".to_owned(),
                 media_type: image.media_type.or_else(|| Some("image/png".to_owned())),
                 data: Some(image.b64_json),
+                text: None,
+                url: None,
+                file_id: None,
             },
         });
     }
@@ -564,9 +616,142 @@ pub fn from_openai_response_object(response: ResponseObject) -> MessageResponse 
         stop_sequence: None,
         usage: ResponseUsage {
             input_tokens: usage.prompt_tokens,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
             output_tokens: usage.completion_tokens,
+            server_tool_use: None,
         },
     }
+}
+
+/// Maps a raw OpenAI/Codex Responses payload into an Anthropic Messages response.
+#[must_use]
+pub fn from_openai_response_value(response: &Value, fallback_model: &str) -> MessageResponse {
+    let output = response
+        .get("output")
+        .and_then(Value::as_array)
+        .map_or(&[] as &[Value], Vec::as_slice);
+    let mut content = output
+        .iter()
+        .flat_map(response_content_blocks_from_value)
+        .collect::<Vec<_>>();
+    content.extend(
+        generated_images_from_output(output)
+            .into_iter()
+            .map(|image| ResponseContentBlock::Image {
+                source: ImageSource {
+                    kind: "base64".to_owned(),
+                    media_type: image.media_type.or_else(|| Some("image/png".to_owned())),
+                    data: Some(image.b64_json),
+                    text: None,
+                    url: None,
+                    file_id: None,
+                },
+            }),
+    );
+
+    let usage = response
+        .get("usage")
+        .and_then(parse_anthropic_usage_value)
+        .unwrap_or_else(|| default_response_usage(0, 0));
+
+    MessageResponse {
+        id: response
+            .get("id")
+            .and_then(Value::as_str)
+            .map_or_else(|| "msg_local".to_owned(), |id| id.replace("resp", "msg")),
+        kind: "message",
+        role: "assistant",
+        model: response
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or(fallback_model)
+            .to_owned(),
+        content,
+        stop_reason: response_stop_reason_value(response),
+        stop_sequence: None,
+        usage,
+    }
+}
+
+fn response_content_blocks_from_value(item: &Value) -> Vec<ResponseContentBlock> {
+    match item.get("type").and_then(Value::as_str) {
+        Some("message") => response_message_blocks_from_value(item),
+        Some("function_call") => vec![ResponseContentBlock::ToolUse {
+            id: item
+                .get("call_id")
+                .or_else(|| item.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            name: item
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            input: parse_arguments(
+                item.get("arguments")
+                    .and_then(Value::as_str)
+                    .unwrap_or("{}"),
+            ),
+        }],
+        Some("reasoning") => response_reasoning_blocks_from_value(item),
+        _ => Vec::new(),
+    }
+}
+
+fn response_message_blocks_from_value(item: &Value) -> Vec<ResponseContentBlock> {
+    let text = item
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|part| match part.get("type").and_then(Value::as_str) {
+            Some("output_text") => part.get("text").and_then(Value::as_str),
+            Some("refusal") => part.get("refusal").and_then(Value::as_str),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        vec![ResponseContentBlock::Text { text }]
+    }
+}
+
+fn response_reasoning_blocks_from_value(item: &Value) -> Vec<ResponseContentBlock> {
+    let thinking = item
+        .get("summary")
+        .and_then(Value::as_array)
+        .map_or_else(String::new, |parts| joined_reasoning_text(parts));
+    let thinking = if thinking.is_empty() {
+        item.get("content")
+            .and_then(Value::as_array)
+            .map_or_else(String::new, |parts| joined_reasoning_text(parts))
+    } else {
+        thinking
+    };
+
+    if thinking.is_empty() {
+        Vec::new()
+    } else {
+        vec![ResponseContentBlock::Thinking {
+            thinking,
+            signature: item
+                .get("encrypted_content")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        }]
+    }
+}
+
+fn joined_reasoning_text(parts: &[Value]) -> String {
+    parts
+        .iter()
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 /// Produces a compact token estimate for `/v1/messages/count_tokens`.
@@ -599,6 +784,10 @@ pub fn estimate_input_tokens(request: &MessagesRequest) -> u32 {
                 text.push_str(&schema.to_string());
             }
         }
+    }
+
+    if let Some(thinking) = request.thinking.as_ref() {
+        text.push_str(&thinking.to_string());
     }
 
     estimate_tokens_from_text(&text)
@@ -673,7 +862,10 @@ pub fn message_start_event(id: &str, model: &str, input_tokens: u32) -> Result<E
                 stop_sequence: None,
                 usage: ResponseUsage {
                     input_tokens,
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
                     output_tokens: 0,
+                    server_tool_use: None,
                 },
             },
         },
@@ -736,6 +928,22 @@ pub fn image_block_start(index: u32, source: &ImageSource) -> Result<Event> {
     )
 }
 
+/// Builds a `content_block_start` event for a thinking block.
+///
+/// # Errors
+///
+/// Returns an error when the SSE payload cannot be serialized to JSON.
+pub fn thinking_block_start(index: u32) -> Result<Event> {
+    sse_event(
+        "content_block_start",
+        &json!({
+            "type": "content_block_start",
+            "index": index,
+            "content_block": {"type": "thinking", "thinking": ""}
+        }),
+    )
+}
+
 /// Builds a `content_block_delta` event for text content.
 ///
 /// # Errors
@@ -768,6 +976,38 @@ pub fn tool_json_delta(index: u32, arguments: &str) -> Result<Event> {
     )
 }
 
+/// Builds a `content_block_delta` event for thinking content.
+///
+/// # Errors
+///
+/// Returns an error when the SSE payload cannot be serialized to JSON.
+pub fn thinking_delta(index: u32, thinking: &str) -> Result<Event> {
+    sse_event(
+        "content_block_delta",
+        &json!({
+            "type": "content_block_delta",
+            "index": index,
+            "delta": {"type": "thinking_delta", "thinking": thinking}
+        }),
+    )
+}
+
+/// Builds a `content_block_delta` signature event for a thinking block.
+///
+/// # Errors
+///
+/// Returns an error when the SSE payload cannot be serialized to JSON.
+pub fn signature_delta(index: u32, signature: &str) -> Result<Event> {
+    sse_event(
+        "content_block_delta",
+        &json!({
+            "type": "content_block_delta",
+            "index": index,
+            "delta": {"type": "signature_delta", "signature": signature}
+        }),
+    )
+}
+
 /// Builds a `content_block_stop` event.
 ///
 /// # Errors
@@ -788,7 +1028,7 @@ pub fn content_block_stop(index: u32) -> Result<Event> {
 /// # Errors
 ///
 /// Returns an error when the SSE payload cannot be serialized to JSON.
-pub fn message_delta_event(stop_reason: &str, output_tokens: u32) -> Result<Event> {
+pub fn message_delta_event(stop_reason: &str, usage: &ResponseUsage) -> Result<Event> {
     sse_event(
         "message_delta",
         &json!({
@@ -797,9 +1037,7 @@ pub fn message_delta_event(stop_reason: &str, output_tokens: u32) -> Result<Even
                 "stop_reason": map_stop_reason(stop_reason),
                 "stop_sequence": null
             },
-            "usage": {
-                "output_tokens": output_tokens
-            }
+            "usage": usage
         }),
     )
 }
@@ -860,9 +1098,9 @@ fn append_user_message(messages: &mut Vec<ChatMessage>, message: &Message) {
             let mut parts = Vec::new();
             for block in blocks {
                 match block.kind.as_str() {
-                    "text" => parts.push(ChatContentPart {
+                    "text" | "input_text" => parts.push(ChatContentPart {
                         kind: "text".to_owned(),
-                        text: block.text.clone(),
+                        text: text_like_block_text(block),
                         image_url: None,
                     }),
                     "image" => {
@@ -874,26 +1112,32 @@ fn append_user_message(messages: &mut Vec<ChatMessage>, message: &Message) {
                             });
                         }
                     }
-                    "tool_result" => messages.push(ChatMessage {
-                        role: "tool".to_owned(),
-                        content: Some(ChatContent::Text(tool_result_text(block.content.as_ref()))),
-                        name: None,
-                        tool_call_id: block.tool_use_id.clone(),
-                        tool_calls: None,
-                    }),
+                    "document" => {
+                        if let Some(text) = document_text(block) {
+                            parts.push(ChatContentPart {
+                                kind: "text".to_owned(),
+                                text: Some(text),
+                                image_url: None,
+                            });
+                        }
+                    }
+                    "tool_result" => {
+                        flush_user_parts(messages, &mut parts);
+                        messages.push(ChatMessage {
+                            role: "tool".to_owned(),
+                            content: Some(ChatContent::Text(tool_result_text(
+                                block.content.as_ref(),
+                            ))),
+                            name: None,
+                            tool_call_id: block.tool_use_id.clone(),
+                            tool_calls: None,
+                        });
+                    }
                     _ => {}
                 }
             }
 
-            if !parts.is_empty() {
-                messages.push(ChatMessage {
-                    role: "user".to_owned(),
-                    content: Some(ChatContent::Parts(parts)),
-                    name: None,
-                    tool_call_id: None,
-                    tool_calls: None,
-                });
-            }
+            flush_user_parts(messages, &mut parts);
         }
     }
 }
@@ -914,7 +1158,9 @@ fn append_assistant_message(messages: &mut Vec<ChatMessage>, message: &Message) 
             let text = blocks
                 .iter()
                 .filter_map(|block| match block.kind.as_str() {
-                    "text" => block.text.clone(),
+                    "text" | "input_text" => text_like_block_text(block),
+                    "document" => document_text(block),
+                    "thinking" => block.thinking.clone(),
                     _ => None,
                 })
                 .collect::<Vec<_>>()
@@ -971,7 +1217,14 @@ fn convert_tools(tools: &[ToolDefinition]) -> Vec<ChatTool> {
                 parameters: tool.input_schema.clone(),
                 strict: None,
             }),
-            extra: Map::new(),
+            extra: tool
+                .cache_control
+                .as_ref()
+                .map_or_else(Map::new, |cache_control| {
+                    let mut extra = Map::new();
+                    extra.insert("cache_control".to_owned(), cache_control.clone());
+                    extra
+                }),
         })
         .collect()
 }
@@ -1003,7 +1256,7 @@ fn parallel_tool_calls_enabled(tool_choice: Option<&Value>) -> bool {
     }
 }
 
-fn system_prompt_text(system: Option<&SystemPrompt>) -> Option<String> {
+pub(crate) fn system_prompt_text(system: Option<&SystemPrompt>) -> Option<String> {
     match system? {
         SystemPrompt::Text(text) => Some(text.clone()),
         SystemPrompt::Blocks(blocks) => {
@@ -1035,6 +1288,61 @@ fn tool_result_text(content: Option<&ToolResultContent>) -> String {
             .join("\n"),
         None => String::new(),
     }
+}
+
+fn flush_user_parts(messages: &mut Vec<ChatMessage>, parts: &mut Vec<ChatContentPart>) {
+    if parts.is_empty() {
+        return;
+    }
+
+    messages.push(ChatMessage {
+        role: "user".to_owned(),
+        content: Some(ChatContent::Parts(std::mem::take(parts))),
+        name: None,
+        tool_call_id: None,
+        tool_calls: None,
+    });
+}
+
+fn text_like_block_text(block: &ContentBlock) -> Option<String> {
+    block
+        .text
+        .clone()
+        .or_else(|| block.thinking.clone())
+        .or_else(|| block.source.as_ref().and_then(|source| source.text.clone()))
+}
+
+fn document_text(block: &ContentBlock) -> Option<String> {
+    let mut fragments = Vec::new();
+    if let Some(text) = block.text.as_deref() {
+        fragments.push(text.to_owned());
+    }
+    if let Some(source) = block.source.as_ref() {
+        if let Some(text) = source.text.as_deref() {
+            fragments.push(text.to_owned());
+        }
+        if let Some(data) = source.data.as_deref() {
+            fragments.push(data.to_owned());
+        }
+        if let Some(url) = source.url.as_deref() {
+            fragments.push(format!("[document:{url}]"));
+        }
+        if let Some(file_id) = source.file_id.as_deref() {
+            fragments.push(format!("[document_file:{file_id}]"));
+        }
+    }
+    if let Some(content) = block.document_content.as_ref() {
+        for nested in content {
+            let mut text = String::new();
+            append_block_text(&mut text, nested);
+            if !text.is_empty() {
+                fragments.push(text);
+            }
+        }
+    }
+
+    let combined = fragments.join("\n");
+    (!combined.is_empty()).then_some(combined)
 }
 
 fn parse_arguments(arguments: &str) -> Value {
@@ -1073,6 +1381,73 @@ fn response_stop_reason(response: &ResponseObject) -> &'static str {
     "end_turn"
 }
 
+fn response_stop_reason_value(response: &Value) -> &'static str {
+    if response
+        .get("output")
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            items
+                .iter()
+                .any(|item| item.get("type").and_then(Value::as_str) == Some("function_call"))
+        })
+    {
+        return "tool_use";
+    }
+
+    if response.get("status").and_then(Value::as_str) == Some("incomplete") {
+        return response
+            .get("incomplete_details")
+            .and_then(|details| details.get("reason"))
+            .and_then(Value::as_str)
+            .map_or("max_tokens", map_stop_reason);
+    }
+
+    response
+        .get("stop_reason")
+        .or_else(|| response.get("finish_reason"))
+        .and_then(Value::as_str)
+        .map_or("end_turn", map_stop_reason)
+}
+
+const fn default_response_usage(input_tokens: u32, output_tokens: u32) -> ResponseUsage {
+    ResponseUsage {
+        input_tokens,
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
+        output_tokens,
+        server_tool_use: None,
+    }
+}
+
+fn parse_anthropic_usage_value(value: &Value) -> Option<ResponseUsage> {
+    let prompt_tokens = value
+        .get("input_tokens")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())?;
+    let completion_tokens = value
+        .get("output_tokens")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(0);
+
+    Some(ResponseUsage {
+        input_tokens: prompt_tokens,
+        cache_creation_input_tokens: value
+            .get("cache_creation_input_tokens")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok()),
+        cache_read_input_tokens: value
+            .get("cache_read_input_tokens")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok()),
+        output_tokens: completion_tokens,
+        server_tool_use: value
+            .get("server_tool_use")
+            .filter(|value| !value.is_null())
+            .cloned(),
+    })
+}
+
 fn estimate_tokens_from_text(text: &str) -> u32 {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -1087,9 +1462,14 @@ fn estimate_tokens_from_text(text: &str) -> u32 {
 
 fn append_block_text(text: &mut String, block: &ContentBlock) {
     match block.kind.as_str() {
-        "text" => {
-            if let Some(value) = &block.text {
-                text.push_str(value);
+        "text" | "input_text" => {
+            if let Some(value) = text_like_block_text(block) {
+                text.push_str(&value);
+            }
+        }
+        "document" => {
+            if let Some(value) = document_text(block) {
+                text.push_str(&value);
             }
         }
         "tool_use" => {
@@ -1203,6 +1583,85 @@ mod tests {
     }
 
     #[test]
+    fn preserves_user_content_around_tool_results() {
+        let request: MessagesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "prefix"},
+                    {"type": "tool_result", "tool_use_id": "call_1", "content": "done"},
+                    {"type": "text", "text": "suffix"}
+                ]
+            }]
+        }))
+        .unwrap();
+
+        let converted = to_openai_request(&request).unwrap();
+        assert_eq!(converted.messages.len(), 3);
+        assert_eq!(converted.messages[0].role, "user");
+        assert_eq!(converted.messages[1].role, "tool");
+        assert_eq!(converted.messages[2].role, "user");
+    }
+
+    #[test]
+    fn supports_input_text_and_document_blocks() {
+        let request: MessagesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "hello"},
+                    {"type": "document", "source": {"type": "text", "text": "doc body"}}
+                ]
+            }]
+        }))
+        .unwrap();
+
+        let converted = to_openai_request(&request).unwrap();
+        let parts = match converted.messages[0].content.as_ref().unwrap() {
+            ChatContent::Parts(parts) => parts,
+            ChatContent::Text(_) => panic!("expected multimodal parts"),
+        };
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].text.as_deref(), Some("hello"));
+        assert_eq!(parts[1].text.as_deref(), Some("doc body"));
+    }
+
+    #[test]
+    fn maps_raw_reasoning_responses_to_thinking_blocks() {
+        let response = json!({
+            "id": "resp_reasoning",
+            "model": "gpt-5.5",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_1",
+                    "summary": [{"type": "summary_text", "text": "work"}],
+                    "encrypted_content": "sig"
+                },
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "OK"}]
+                }
+            ],
+            "usage": {"input_tokens": 12, "output_tokens": 5, "total_tokens": 17}
+        });
+
+        let mapped = from_openai_response_value(&response, "gpt-5.5");
+        assert_eq!(mapped.content.len(), 2);
+        assert_eq!(
+            serde_json::to_value(&mapped.content[0]).unwrap()["type"],
+            "thinking"
+        );
+        assert_eq!(
+            serde_json::to_value(&mapped.content[0]).unwrap()["thinking"],
+            "work"
+        );
+    }
+
+    #[test]
     fn converts_openai_response_to_anthropic_message() {
         let response = ChatCompletionResponse {
             id: "chatcmpl-1".into(),
@@ -1244,6 +1703,22 @@ mod tests {
         let request: MessagesRequest = serde_json::from_value(json!({
             "model": "gpt-5.5",
             "messages": [{"role": "user", "content": [{"type": "text", "text": "hello world"}]}]
+        }))
+        .unwrap();
+
+        assert!(estimate_input_tokens(&request) > 0);
+    }
+
+    #[test]
+    fn estimates_input_tokens_include_documents_tools_and_thinking() {
+        let request: MessagesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "thinking": {"type": "enabled", "budget_tokens": 2048},
+            "tools": [{"name": "lookup", "description": "fetch docs", "input_schema": {"type": "object", "properties": {"q": {"type": "string"}}}}],
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "document", "source": {"type": "text", "text": "document body"}}]
+            }]
         }))
         .unwrap();
 
