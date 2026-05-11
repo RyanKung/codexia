@@ -144,11 +144,11 @@ impl CodexClient {
                     }
                     finished = true;
                     let reason = if tool_call_count > 0 {
-                        "tool_calls"
+                        "tool_calls".to_owned()
                     } else {
                         finish_reason(&event)
                     };
-                    yield chunk_finished(&id, created, &model, reason);
+                    yield chunk_finished(&id, created, &model, &reason);
                     break;
                 }
             }
@@ -268,12 +268,23 @@ async fn parse_error_response(response: Response) -> Error {
         .and_then(|value| {
             value
                 .pointer("/error/message")
+                .or_else(|| value.pointer("/detail"))
+                .or_else(|| value.pointer("/message"))
                 .and_then(Value::as_str)
                 .map(str::to_owned)
         })
         .unwrap_or(text);
 
-    Error::upstream(format!("Codex backend returned {status}: {message}"))
+    let downstream_status = if status.is_client_error() {
+        status
+    } else {
+        reqwest::StatusCode::BAD_GATEWAY
+    };
+
+    Error::upstream_with_status(
+        downstream_status,
+        format!("Codex backend returned {status}: {message}"),
+    )
 }
 
 fn header_value(value: &str) -> Result<HeaderValue> {

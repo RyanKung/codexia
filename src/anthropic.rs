@@ -547,6 +547,7 @@ pub fn from_openai_response_object(response: ResponseObject) -> MessageResponse 
         });
     }
 
+    let stop_reason = response_stop_reason(&response);
     let usage = response.usage.unwrap_or(Usage {
         prompt_tokens: 0,
         completion_tokens: 0,
@@ -559,7 +560,7 @@ pub fn from_openai_response_object(response: ResponseObject) -> MessageResponse 
         role: "assistant",
         model: response.model,
         content,
-        stop_reason: "end_turn",
+        stop_reason,
         stop_sequence: None,
         usage: ResponseUsage {
             input_tokens: usage.prompt_tokens,
@@ -824,10 +825,13 @@ pub fn error_body(error: &Error) -> Value {
     })
 }
 
-const fn anthropic_error_type(error: &Error) -> &'static str {
-    match error {
-        Error::Unauthorized => "authentication_error",
-        Error::Upstream(_) | Error::Http(_) => "api_error",
+fn anthropic_error_type(error: &Error) -> &'static str {
+    match error.status_code() {
+        axum::http::StatusCode::UNAUTHORIZED | axum::http::StatusCode::FORBIDDEN => {
+            "authentication_error"
+        }
+        axum::http::StatusCode::TOO_MANY_REQUESTS => "rate_limit_error",
+        status if status.is_server_error() || matches!(error, Error::Http(_)) => "api_error",
         _ => "invalid_request_error",
     }
 }
@@ -1042,9 +1046,31 @@ fn parse_arguments(arguments: &str) -> Value {
 fn map_stop_reason(reason: &str) -> &'static str {
     match reason {
         "tool_calls" => "tool_use",
-        "length" => "max_tokens",
+        "length" | "max_output_tokens" | "max_tokens" => "max_tokens",
+        "content_filter" => "refusal",
         _ => "end_turn",
     }
+}
+
+fn response_stop_reason(response: &ResponseObject) -> &'static str {
+    if response
+        .output
+        .iter()
+        .any(|item| item.kind == "function_call")
+    {
+        return "tool_use";
+    }
+
+    if response.status == "incomplete" {
+        return response
+            .incomplete_details
+            .as_ref()
+            .and_then(|details| details.get("reason"))
+            .and_then(Value::as_str)
+            .map_or("max_tokens", map_stop_reason);
+    }
+
+    "end_turn"
 }
 
 fn estimate_tokens_from_text(text: &str) -> u32 {

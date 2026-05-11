@@ -1,0 +1,538 @@
+//! Route handlers and streaming response helpers for the HTTP server.
+
+mod responses;
+mod sse;
+
+use crate::{
+    anthropic::{
+        CountTokensResponse, MessageBatch, MessageBatchCreateRequest, MessageBatchDeleted,
+        MessageBatchListResponse, MessageBatchRequestCounts, MessagesRequest, error_body,
+        estimate_input_tokens, from_openai_response_object, message_batch_list_response,
+    },
+    codex::convert::responses_to_codex_request,
+    openai::{
+        response::{
+            ImageGenerationResponse, ResponseCompaction, ResponseInputTokens,
+            generated_images_from_output, image_generation_response,
+        },
+        types::{ChatCompletionRequest, ImageGenerationRequest, ResponsesRequest},
+    },
+    server::{AppState, auth::authorize, status_response::build_status_response},
+};
+use axum::{
+    Json,
+    extract::{Path, State},
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+};
+use responses::{
+    anthropic_responses_request, batch_results_url, build_batch_id, collect_response_input_items,
+    compact_response_items, estimate_response_input_tokens, image_generation_responses_request,
+    load_previous_response, maybe_store_response, response_object_from_chat,
+    response_object_from_upstream, response_request_requires_raw_mode, responses_to_chat_request,
+    run_message_batch_worker,
+};
+use serde_json::{Value, json};
+use sse::{
+    anthropic_error_response, anthropic_raw_messages_sse_response, openai_raw_responses_sse,
+    openai_responses_sse, sse_response,
+};
+
+/// Lightweight healthcheck for the local service.
+pub async fn health() -> impl IntoResponse {
+    Json(json!({"status": "ok"}))
+}
+
+/// Returns the configured model list after optional local API key validation.
+pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    match authorize(&headers, state.api_key.as_deref()) {
+        Ok(()) => {
+            if headers.contains_key("anthropic-version") {
+                let ids = state
+                    .models
+                    .data
+                    .iter()
+                    .map(|model| model.id.clone())
+                    .collect::<Vec<_>>();
+                Json(crate::anthropic::models_response(&ids)).into_response()
+            } else {
+                Json(state.models).into_response()
+            }
+        }
+        Err(error) => error.into_response(),
+    }
+}
+
+/// Creates an OpenAI-compatible Responses API object.
+///
+/// `previous_response_id` is supported only through local in-memory
+/// continuation state while this Codexia process remains alive.
+pub async fn responses(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ResponsesRequest>,
+) -> Response {
+    if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
+        return error.into_response();
+    }
+
+    let credentials = match state.token_manager.credentials().await {
+        Ok(credentials) => credentials,
+        Err(error) => return error.into_response(),
+    };
+    let previous =
+        match load_previous_response(&state, request.previous_response_id.as_deref()).await {
+            Ok(previous) => previous,
+            Err(error) => return error.into_response(),
+        };
+
+    if response_request_requires_raw_mode(&request, previous.as_ref()) {
+        let input_items = match collect_response_input_items(&request, previous.as_ref()) {
+            Ok(items) => items,
+            Err(error) => return error.into_response(),
+        };
+        let body = responses_to_codex_request(&request, &input_items);
+        if request.wants_stream() {
+            return match state.codex.stream_response(body, &credentials).await {
+                Ok(stream) => {
+                    openai_raw_responses_sse(stream, request, input_items, state.responses)
+                        .into_response()
+                }
+                Err(error) => error.into_response(),
+            };
+        }
+        return match state.codex.complete_response(body, &credentials).await {
+            Ok(value) => {
+                let response_object = response_object_from_upstream(&request, &value);
+                maybe_store_response(&state, &request, response_object.clone(), input_items).await;
+                Json(response_object).into_response()
+            }
+            Err(error) => error.into_response(),
+        };
+    }
+
+    let (chat_request, input_items) = match responses_to_chat_request(&request, previous.as_ref()) {
+        Ok(converted) => converted,
+        Err(error) => return error.into_response(),
+    };
+
+    if request.wants_stream() {
+        match state.codex.stream_chat(chat_request, &credentials).await {
+            Ok(stream) => openai_responses_sse(
+                stream,
+                responses::build_response_id(),
+                request,
+                input_items,
+                state.responses,
+            )
+            .into_response(),
+            Err(error) => error.into_response(),
+        }
+    } else {
+        match state.codex.complete_chat(chat_request, &credentials).await {
+            Ok(response) => {
+                let response_object = response_object_from_chat(&request, response);
+                maybe_store_response(&state, &request, response_object.clone(), input_items).await;
+                Json(response_object).into_response()
+            }
+            Err(error) => error.into_response(),
+        }
+    }
+}
+
+/// Returns an estimated input token count for a Responses API request.
+///
+/// When `previous_response_id` is present, the estimate uses only local
+/// in-memory continuation state and does not consult any upstream retrievable
+/// response resource.
+pub async fn count_response_input_tokens(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ResponsesRequest>,
+) -> Response {
+    if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
+        return error.into_response();
+    }
+
+    let previous =
+        match load_previous_response(&state, request.previous_response_id.as_deref()).await {
+            Ok(previous) => previous,
+            Err(error) => return error.into_response(),
+        };
+    let (_, input_items) = match responses_to_chat_request(&request, previous.as_ref()) {
+        Ok(converted) => converted,
+        Err(error) => return error.into_response(),
+    };
+
+    Json(ResponseInputTokens {
+        input_tokens: estimate_response_input_tokens(&input_items),
+    })
+    .into_response()
+}
+
+/// Runs a local best-effort Responses API compaction pass.
+pub async fn compact_response(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ResponsesRequest>,
+) -> Response {
+    if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
+        return error.into_response();
+    }
+
+    let previous =
+        match load_previous_response(&state, request.previous_response_id.as_deref()).await {
+            Ok(previous) => previous,
+            Err(error) => return error.into_response(),
+        };
+    let input_items = match collect_response_input_items(&request, previous.as_ref()) {
+        Ok(items) => items,
+        Err(error) => return error.into_response(),
+    };
+
+    Json(ResponseCompaction {
+        output: compact_response_items(&input_items),
+    })
+    .into_response()
+}
+
+/// Refreshes the saved OAuth credentials without exposing the raw tokens.
+pub async fn manual_refresh(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
+        return error.into_response();
+    }
+
+    match state.token_manager.refresh().await {
+        Ok(credentials) => Json(json!({
+            "account_id": credentials.account_id,
+            "expires_at": credentials.expires_at,
+        }))
+        .into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+/// Returns account, token, and rate-limit status in a structured JSON format.
+pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
+        return error.into_response();
+    }
+
+    let credentials = match state.token_manager.credentials().await {
+        Ok(credentials) => credentials,
+        Err(error) => return error.into_response(),
+    };
+
+    let snapshot = state.status.fetch_status(&credentials).await;
+    Json(build_status_response(&credentials, &snapshot)).into_response()
+}
+
+/// Proxies OpenAI-compatible chat completion requests to the Codex backend.
+pub async fn chat_completions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ChatCompletionRequest>,
+) -> Response {
+    if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
+        return error.into_response();
+    }
+
+    let credentials = match state.token_manager.credentials().await {
+        Ok(credentials) => credentials,
+        Err(error) => return error.into_response(),
+    };
+
+    if request.wants_stream() {
+        match state.codex.stream_chat(request, &credentials).await {
+            Ok(stream) => sse_response(stream).into_response(),
+            Err(error) => error.into_response(),
+        }
+    } else {
+        match state.codex.complete_chat(request, &credentials).await {
+            Ok(response) => Json(response).into_response(),
+            Err(error) => error.into_response(),
+        }
+    }
+}
+
+/// Anthropic-compatible Messages API handler used by Claude SDKs and Claude Code.
+pub async fn messages(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<MessagesRequest>,
+) -> Response {
+    if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
+        return anthropic_error_response(&error);
+    }
+
+    let credentials = match state.token_manager.credentials().await {
+        Ok(credentials) => credentials,
+        Err(error) => return anthropic_error_response(&error),
+    };
+
+    let response_request = match anthropic_responses_request(&request) {
+        Ok(request) => request,
+        Err(error) => return anthropic_error_response(&error),
+    };
+    let input_items = match collect_response_input_items(&response_request, None) {
+        Ok(items) => items,
+        Err(error) => return anthropic_error_response(&error),
+    };
+    let body = responses_to_codex_request(&response_request, &input_items);
+
+    let input_tokens = estimate_input_tokens(&request);
+    let model = request.model.clone();
+
+    if request.wants_stream() {
+        match state.codex.stream_response(body, &credentials).await {
+            Ok(stream) => {
+                anthropic_raw_messages_sse_response(stream, model, input_tokens).into_response()
+            }
+            Err(error) => anthropic_error_response(&error),
+        }
+    } else {
+        match state.codex.complete_response(body, &credentials).await {
+            Ok(value) => {
+                let response_object = response_object_from_upstream(&response_request, &value);
+                Json(from_openai_response_object(response_object)).into_response()
+            }
+            Err(error) => anthropic_error_response(&error),
+        }
+    }
+}
+
+/// OpenAI-compatible Images API handler backed by the Codex Responses image tool.
+pub async fn image_generations(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ImageGenerationRequest>,
+) -> Response {
+    if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
+        return error.into_response();
+    }
+
+    let credentials = match state.token_manager.credentials().await {
+        Ok(credentials) => credentials,
+        Err(error) => return error.into_response(),
+    };
+
+    let response_request = image_generation_responses_request(&request);
+    let input_items = match collect_response_input_items(&response_request, None) {
+        Ok(items) => items,
+        Err(error) => return error.into_response(),
+    };
+    let body = responses_to_codex_request(&response_request, &input_items);
+
+    match state.codex.complete_response(body, &credentials).await {
+        Ok(value) => {
+            let images = generated_images_from_output(
+                value
+                    .get("output")
+                    .and_then(Value::as_array)
+                    .map_or(&[], Vec::as_slice),
+            );
+            Json::<ImageGenerationResponse>(image_generation_response(
+                crate::config::now_unix(),
+                images,
+            ))
+            .into_response()
+        }
+        Err(error) => error.into_response(),
+    }
+}
+
+/// Anthropic-compatible token counting endpoint.
+pub async fn count_message_tokens(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<MessagesRequest>,
+) -> Response {
+    if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
+        return anthropic_error_response(&error);
+    }
+
+    Json(CountTokensResponse {
+        input_tokens: estimate_input_tokens(&request),
+    })
+    .into_response()
+}
+
+/// Creates an Anthropic-compatible message batch and schedules background execution.
+pub async fn create_message_batch(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<MessageBatchCreateRequest>,
+) -> Response {
+    if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
+        return anthropic_error_response(&error);
+    }
+
+    let batch_id = build_batch_id();
+    let created_at = chrono::Utc::now();
+    let results_url = Some(batch_results_url(&headers, &batch_id));
+    let total_requests = u32::try_from(request.requests.len()).unwrap_or(u32::MAX);
+
+    let batch = MessageBatch {
+        archived_at: None,
+        cancel_initiated_at: None,
+        created_at: created_at.to_rfc3339(),
+        ended_at: None,
+        expires_at: (created_at + chrono::TimeDelta::hours(24)).to_rfc3339(),
+        id: batch_id.clone(),
+        processing_status: "in_progress",
+        request_counts: MessageBatchRequestCounts {
+            canceled: 0,
+            errored: 0,
+            expired: 0,
+            processing: total_requests,
+            succeeded: 0,
+        },
+        results_url,
+        kind: "message_batch",
+    };
+
+    state
+        .batches
+        .insert(crate::server::store::StoredBatch {
+            batch: batch.clone(),
+            results: Vec::new(),
+            cancel_requested: false,
+        })
+        .await;
+
+    let batches = state.batches.clone();
+    let token_manager = state.token_manager.clone();
+    let codex = state.codex.clone();
+    tokio::spawn(async move {
+        run_message_batch_worker(batches, token_manager, codex, batch_id, request.requests).await;
+    });
+
+    Json(batch).into_response()
+}
+
+/// Lists previously created Anthropic message batches in newest-first order.
+pub async fn list_message_batches(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
+        return anthropic_error_response(&error);
+    }
+
+    let batches = state
+        .batches
+        .list()
+        .await
+        .into_iter()
+        .map(|stored| stored.batch)
+        .collect::<Vec<_>>();
+    Json::<MessageBatchListResponse>(message_batch_list_response(batches)).into_response()
+}
+
+/// Retrieves a previously created Anthropic message batch.
+pub async fn get_message_batch(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(batch_id): Path<String>,
+) -> Response {
+    if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
+        return anthropic_error_response(&error);
+    }
+
+    match state.batches.get(&batch_id).await {
+        Some(stored) => Json(stored.batch).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(error_body(&crate::Error::config(format!(
+                "message batch `{batch_id}` was not found"
+            )))),
+        )
+            .into_response(),
+    }
+}
+
+/// Returns JSONL results for a completed Anthropic message batch.
+pub async fn message_batch_results(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(batch_id): Path<String>,
+) -> Response {
+    if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
+        return anthropic_error_response(&error);
+    }
+
+    match state.batches.get(&batch_id).await {
+        Some(stored) => (
+            [(axum::http::header::CONTENT_TYPE, "application/x-ndjson")],
+            stored
+                .results
+                .iter()
+                .map(|result| serde_json::to_string(result).unwrap_or_default())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+            .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(error_body(&crate::Error::config(format!(
+                "message batch `{batch_id}` was not found"
+            )))),
+        )
+            .into_response(),
+    }
+}
+
+/// Initiates cancellation for a previously created Anthropic message batch.
+pub async fn cancel_message_batch(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(batch_id): Path<String>,
+) -> Response {
+    if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
+        return anthropic_error_response(&error);
+    }
+
+    match state
+        .batches
+        .update(&batch_id, |stored| {
+            if stored.batch.cancel_initiated_at.is_none() && stored.batch.ended_at.is_none() {
+                stored.batch.cancel_initiated_at = Some(chrono::Utc::now().to_rfc3339());
+                stored.batch.processing_status = "canceling";
+                stored.cancel_requested = true;
+            }
+        })
+        .await
+    {
+        Some(stored) => Json(stored.batch).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(error_body(&crate::Error::config(format!(
+                "message batch `{batch_id}` was not found"
+            )))),
+        )
+            .into_response(),
+    }
+}
+
+/// Deletes a previously completed Anthropic message batch.
+pub async fn delete_message_batch(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(batch_id): Path<String>,
+) -> Response {
+    if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
+        return anthropic_error_response(&error);
+    }
+
+    match state.batches.remove(&batch_id).await {
+        Some(_) => Json(MessageBatchDeleted {
+            id: batch_id,
+            kind: "message_batch_deleted",
+        })
+        .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(error_body(&crate::Error::config(format!(
+                "message batch `{batch_id}` was not found"
+            )))),
+        )
+            .into_response(),
+    }
+}

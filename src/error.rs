@@ -29,8 +29,13 @@ pub enum Error {
     Config(String),
 
     /// Error returned by an upstream dependency or API.
-    #[error("upstream error: {0}")]
-    Upstream(String),
+    #[error("upstream error: {message}")]
+    Upstream {
+        /// HTTP status surfaced to downstream clients for this upstream error.
+        status: StatusCode,
+        /// Human-readable upstream error text.
+        message: String,
+    },
 
     /// Authentication failure for an incoming API request.
     #[error("unauthorized")]
@@ -54,7 +59,18 @@ impl Error {
 
     /// Creates an upstream error with the provided message.
     pub fn upstream(message: impl Into<String>) -> Self {
-        Self::Upstream(message.into())
+        Self::Upstream {
+            status: StatusCode::BAD_GATEWAY,
+            message: message.into(),
+        }
+    }
+
+    /// Creates an upstream error with an explicit downstream HTTP status code.
+    pub fn upstream_with_status(status: StatusCode, message: impl Into<String>) -> Self {
+        Self::Upstream {
+            status,
+            message: message.into(),
+        }
     }
 
     /// Maps an application error to the HTTP status code exposed by the server.
@@ -63,8 +79,27 @@ impl Error {
         match self {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::Config(_) | Self::OAuth(_) => StatusCode::BAD_REQUEST,
-            Self::Upstream(_) | Self::Http(_) => StatusCode::BAD_GATEWAY,
+            Self::Upstream { status, .. } => *status,
+            Self::Http(_) => StatusCode::BAD_GATEWAY,
             Self::Io(_) | Self::Json(_) | Self::Url(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
+    fn client_message(&self) -> String {
+        match self {
+            Self::Upstream { message, .. } => message.clone(),
+            _ => self.to_string(),
+        }
+    }
+
+    fn error_type(&self) -> &'static str {
+        match self.status_code() {
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => "authentication_error",
+            StatusCode::TOO_MANY_REQUESTS => "rate_limit_error",
+            status if status.is_server_error() || status == StatusCode::BAD_GATEWAY => {
+                "upstream_error"
+            }
+            _ => "invalid_request_error",
         }
     }
 }
@@ -75,12 +110,8 @@ impl IntoResponse for Error {
         // Mirror the OpenAI-style error envelope expected by API clients.
         let body = Json(json!({
             "error": {
-                "message": self.to_string(),
-                "type": match status {
-                    StatusCode::UNAUTHORIZED => "authentication_error",
-                    StatusCode::BAD_GATEWAY => "upstream_error",
-                    _ => "invalid_request_error",
-                }
+                "message": self.client_message(),
+                "type": self.error_type(),
             }
         }));
         (status, body).into_response()

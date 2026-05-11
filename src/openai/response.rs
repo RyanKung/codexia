@@ -87,7 +87,7 @@ pub struct ResponseObject {
     /// Unix timestamp when the response was created.
     pub created_at: i64,
     /// Terminal response status.
-    pub status: &'static str,
+    pub status: String,
     /// Error details when generation failed.
     pub error: Option<Value>,
     /// Incomplete details when generation ended early.
@@ -130,7 +130,7 @@ pub struct ResponseOutputItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<&'static str>,
     /// Item status, always `completed` for fully collected local responses.
-    pub status: &'static str,
+    pub status: String,
     /// Message content blocks, when the output item is a message.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub content: Vec<ResponseOutputContent>,
@@ -290,7 +290,7 @@ pub fn response_message_item(id: String, text: Option<String>) -> ResponseOutput
         id,
         kind: "message",
         role: Some("assistant"),
-        status: "completed",
+        status: "completed".to_owned(),
         content,
         call_id: None,
         name: None,
@@ -307,7 +307,7 @@ pub fn response_function_call_item(id: String, tool_call: ToolCall) -> ResponseO
         id,
         kind: "function_call",
         role: None,
-        status: "completed",
+        status: "completed".to_owned(),
         content: Vec::new(),
         call_id: Some(tool_call.id),
         name: Some(tool_call.function.name),
@@ -319,7 +319,7 @@ pub fn response_function_call_item(id: String, tool_call: ToolCall) -> ResponseO
 
 /// Builds an image generation output item for the Responses API.
 #[must_use]
-pub const fn response_image_generation_item(
+pub fn response_image_generation_item(
     id: String,
     result: String,
     revised_prompt: Option<String>,
@@ -328,7 +328,7 @@ pub const fn response_image_generation_item(
         id,
         kind: "image_generation_call",
         role: None,
-        status: "completed",
+        status: "completed".to_owned(),
         content: Vec::new(),
         call_id: None,
         name: None,

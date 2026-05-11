@@ -147,10 +147,18 @@ pub fn is_done_event(event: &Value) -> bool {
 
 /// Maps a terminal Codex event to the finish reason exposed to chat clients.
 #[must_use]
-pub fn finish_reason(event: &Value) -> &'static str {
+pub fn finish_reason(event: &Value) -> String {
     match event_type(event) {
-        Some("response.incomplete") => "length",
-        _ => "stop",
+        Some("response.incomplete") => incomplete_finish_reason(event),
+        _ => event
+            .get("response")
+            .and_then(|response| {
+                response
+                    .get("stop_reason")
+                    .or_else(|| response.get("finish_reason"))
+                    .and_then(Value::as_str)
+            })
+            .map_or_else(|| "stop".to_owned(), map_upstream_finish_reason),
     }
 }
 
@@ -160,6 +168,7 @@ pub fn event_error(event: &Value) -> Option<String> {
     match event_type(event) {
         Some("error") => event
             .get("message")
+            .or_else(|| event.pointer("/error/message"))
             .or_else(|| event.get("code"))
             .and_then(Value::as_str)
             .map(str::to_owned)
@@ -233,6 +242,24 @@ fn output_text(part: &Value) -> Option<&str> {
         Some("output_text") => part.get("text").and_then(Value::as_str),
         Some("refusal") => part.get("refusal").and_then(Value::as_str),
         _ => None,
+    }
+}
+
+fn incomplete_finish_reason(event: &Value) -> String {
+    event
+        .pointer("/response/incomplete_details/reason")
+        .or_else(|| event.pointer("/incomplete_details/reason"))
+        .and_then(Value::as_str)
+        .map_or_else(|| "length".to_owned(), map_upstream_finish_reason)
+}
+
+fn map_upstream_finish_reason(reason: &str) -> String {
+    match reason {
+        "tool_calls" | "tool_use" => "tool_calls".to_owned(),
+        "max_output_tokens" | "max_tokens" | "length" => "length".to_owned(),
+        "content_filter" => "content_filter".to_owned(),
+        "stop" | "end_turn" => "stop".to_owned(),
+        other => other.to_owned(),
     }
 }
 
