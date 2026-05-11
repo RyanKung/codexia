@@ -214,11 +214,6 @@ pub fn responses_to_codex_request(request: &ResponsesRequest, input: &[Value]) -
     if let Some(reasoning) = request.reasoning.clone() {
         body["reasoning"] = reasoning;
     }
-    insert_optional(
-        &mut body,
-        "max_output_tokens",
-        request.max_output_tokens.map(Value::from),
-    );
 
     body
 }
@@ -410,5 +405,23 @@ mod tests {
         let body = responses_to_codex_request(&request, &input);
 
         assert_eq!(body["instructions"], "");
+    }
+
+    #[test]
+    fn does_not_forward_unsupported_responses_token_limit() {
+        let request: ResponsesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "max_output_tokens": 128,
+            "input": "hello"
+        }))
+        .unwrap();
+        let input = vec![json!({
+            "role": "user",
+            "content": [{"type": "input_text", "text": "hello"}]
+        })];
+
+        let body = responses_to_codex_request(&request, &input);
+
+        assert!(body.get("max_output_tokens").is_none());
     }
 }
