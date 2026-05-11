@@ -218,6 +218,8 @@ codexia daemon uninstall
 On macOS, Codexia installs a LaunchAgent at
 `~/Library/LaunchAgents/com.codexia.daemon.plist`. On Linux, it installs a
 systemd user unit at `~/.config/systemd/user/codexia.service`.
+Windows does not currently implement native daemon/service management; use WSL
+and run the Linux build there if you need `codexia daemon` commands.
 
 On Linux, inspect the per-user service with:
 

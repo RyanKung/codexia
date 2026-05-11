@@ -1,0 +1,153 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "*"
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+jobs:
+  metadata:
+    name: Prepare release metadata
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.meta.outputs.release_tag }}
+      release_name: ${{ steps.meta.outputs.release_name }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+      asset_version: ${{ steps.meta.outputs.asset_version }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Derive release values
+        id: meta
+        shell: bash
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            tag="${GITHUB_REF_NAME}"
+            {
+              echo "release_tag=${tag}"
+              echo "release_name=Release ${tag}"
+              echo "asset_version=${tag}"
+              echo "prerelease=false"
+            } >> "${GITHUB_OUTPUT}"
+          else
+            today="$(date -u +%Y-%m-%d)"
+            {
+              echo "release_tag=nightly"
+              echo "release_name=Nightly ${today}"
+              echo "asset_version=nightly-${today}"
+              echo "prerelease=true"
+            } >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Move nightly tag
+        if: github.event_name != 'push'
+        shell: bash
+        run: |
+          git tag -f nightly "${GITHUB_SHA}"
+          git push origin refs/tags/nightly --force
+
+  build:
+    name: Build (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    needs: metadata
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Debian
+            runner: ubuntu-latest
+            asset_suffix: debian-x64
+            binary_name: codexia
+          - name: macOS
+            runner: macos-latest
+            asset_suffix: macos
+            binary_name: codexia
+          - name: Windows
+            runner: windows-latest
+            asset_suffix: windows-x64
+            binary_name: codexia.exe
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Package Unix archive
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          ASSET_VERSION: ${{ needs.metadata.outputs.asset_version }}
+          ASSET_SUFFIX: ${{ matrix.asset_suffix }}
+          BINARY_NAME: ${{ matrix.binary_name }}
+        run: |
+          asset="codexia-${ASSET_VERSION}-${ASSET_SUFFIX}"
+          mkdir -p dist
+          cp "target/release/${BINARY_NAME}" "./${BINARY_NAME}"
+          tar -czf "dist/${asset}.tar.gz" "${BINARY_NAME}" README.md LICENSE
+
+      - name: Package Windows archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          ASSET_VERSION: ${{ needs.metadata.outputs.asset_version }}
+          ASSET_SUFFIX: ${{ matrix.asset_suffix }}
+          BINARY_NAME: ${{ matrix.binary_name }}
+        run: |
+          $asset = "codexia-$env:ASSET_VERSION-$env:ASSET_SUFFIX"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "target/release/$env:BINARY_NAME" "$env:BINARY_NAME"
+          Compress-Archive -Path $env:BINARY_NAME, README.md, LICENSE -DestinationPath "dist/$asset.zip" -Force
+
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_suffix }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    runs-on: ubuntu-latest
+    needs:
+      - metadata
+      - build
+
+    steps:
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish GitHub release
+        uses: ncipollo/release-action@v1
+        with:
+          allowUpdates: ${{ needs.metadata.outputs.prerelease }}
+          artifactErrorsFailBuild: true
+          artifacts: dist/*
+          generateReleaseNotes: true
+          name: ${{ needs.metadata.outputs.release_name }}
+          prerelease: ${{ needs.metadata.outputs.prerelease }}
+          removeArtifacts: ${{ needs.metadata.outputs.prerelease }}
+          tag: ${{ needs.metadata.outputs.release_tag }}

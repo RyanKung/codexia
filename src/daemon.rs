@@ -350,7 +350,7 @@ fn platform() -> Result<Platform> {
         Ok(Platform::Linux)
     } else {
         Err(Error::config(
-            "daemon management is only supported on macOS and Linux",
+            "daemon management is only supported on macOS and Linux; on Windows, use WSL to run the Linux build and daemon commands",
         ))
     }
 }
