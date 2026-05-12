@@ -6,29 +6,6 @@
 Rust gateway that logs in with OpenAI Codex OAuth and exposes OpenAI- and
 Anthropic-compatible APIs.
 
-## Usage Boundaries
-
-Codexia is intended for local, personal compatibility testing and self-hosted
-automation against credentials you are authorized to use.
-
-Before you deploy or distribute it, keep these boundaries in mind:
-
-- do not treat Codexia as an official OpenAI or Anthropic product or integration
-- do not use OpenAI or Anthropic logos, trade dress, or branding in a way that implies endorsement
-- do not share one person's OAuth-backed access with other users, customers, or a public service
-- do not resell, sublicense, or expose pooled account access through Codexia
-- review the upstream terms, policies, and any workplace data-handling requirements that apply to your account
-
-If you need multi-user, customer-facing, or revenue-generating usage, you
-should get legal review first and prefer a deployment model based on official
-commercial API access rather than consumer-style OAuth credentials.
-
-See [LEGAL.md](LEGAL.md) for a more detailed risk breakdown.
-
-Codexia itself is licensed under LGPLv3, which does not prohibit commercial
-use of the software. That does not mean your upstream account terms allow
-commercial deployment, shared access, resale, or hosted service operation.
-
 ## Usage
 
 ```bash
@@ -77,47 +54,33 @@ Claude Code / Anthropic SDK setup:
 ```bash
 export ANTHROPIC_BASE_URL=http://127.0.0.1:14550
 export ANTHROPIC_AUTH_TOKEN=local-secret
-claude --model gpt-5.5
+export ANTHROPIC_MODEL="gpt-5.5"
+claude
 ```
 
 `ANTHROPIC_BASE_URL` should point at the Codexia server root, not `/v1`,
-because Anthropic clients append `/v1/messages` themselves. Streaming emits
-Anthropic-style `message_delta` `stop_reason` and cumulative
-`usage.output_tokens`.
+because Anthropic clients append `/v1/messages` themselves.
 
-Full Claude Code flow:
+Minimal Claude Code flow:
 
-1. Log in and save Codex OAuth credentials:
+```bash
+codexia login
+codexia serve --bind 127.0.0.1:14550 --api-key local-secret
 
-   ```bash
-   codexia login
-   ```
+export ANTHROPIC_BASE_URL=http://127.0.0.1:14550
+export ANTHROPIC_AUTH_TOKEN=local-secret
+export ANTHROPIC_MODEL="gpt-5.5"
 
-2. Start Codexia with a supported model list and a local API key:
-
-   ```bash
-   codexia serve --bind 127.0.0.1:14550 --api-key local-secret
-   ```
-
-3. Point Claude Code at the local gateway:
-
-   ```bash
-   export ANTHROPIC_BASE_URL=http://127.0.0.1:14550
-   export ANTHROPIC_AUTH_TOKEN=local-secret
-   ```
-
-4. Run Claude Code against a model that Codexia exposes:
-
-   ```bash
-   claude --model gpt-5.5
-   ```
+claude
+```
 
 For non-interactive validation, this works:
 
 ```bash
 ANTHROPIC_BASE_URL=http://127.0.0.1:14550 \
 ANTHROPIC_AUTH_TOKEN=local-secret \
-claude -p --model gpt-5.5 "Reply with the single word OK"
+ANTHROPIC_MODEL="gpt-5.5" \
+claude -p "Reply with the single word OK"
 ```
 
 If Claude Code or its explore/sub-agent path still emits Anthropic-native model
@@ -127,8 +90,8 @@ ids such as `claude-sonnet-*`, enable a local fallback:
 CODEXIA_MODEL_FALLBACK=gpt-5.5 codexia serve --api-key local-secret
 ```
 
-With that flag enabled, Codexia rewrites known unsupported Anthropic model ids
-to the configured fallback before calling Codex.
+Codexia then rewrites known unsupported Anthropic model ids to the configured
+fallback before calling Codex.
 
 Common pitfalls:
 
@@ -164,14 +127,14 @@ codexia config reset
 The config file is stored at `~/.codexia/config.json` by default and is used as
 the fallback source for `codexia serve` and `codexia daemon install`.
 
-Manually refresh the stored Codex OAuth token while the server is running:
+Refresh the stored Codex OAuth token while the server is running:
 
 ```bash
 curl -X POST http://127.0.0.1:14550/v1/auth/refresh \
   -H 'authorization: Bearer local-secret'
 ```
 
-Check token expiry, account metadata, and available rate-limit windows:
+Check token expiry, account metadata, and rate-limit windows:
 
 ```bash
 codexia status
