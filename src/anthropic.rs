@@ -129,7 +129,7 @@ pub struct ContentBlock {
     pub source: Option<ImageSource>,
     /// Optional nested content for document-like blocks.
     #[serde(default)]
-    pub document_content: Option<Vec<ContentBlock>>,
+    pub document_content: Option<Vec<Self>>,
     /// Tool use identifier for `tool_use` blocks.
     #[serde(default)]
     pub id: Option<String>,
