@@ -117,6 +117,16 @@ ANTHROPIC_AUTH_TOKEN=local-secret \
 claude -p --model gpt-5.5 "Reply with the single word OK"
 ```
 
+If Claude Code or its explore/sub-agent path still emits Anthropic-native model
+ids such as `claude-sonnet-*`, enable a local fallback:
+
+```bash
+CODEXIA_MODEL_FALLBACK=gpt-5.5 codexia serve --api-key local-secret
+```
+
+With that flag enabled, Codexia rewrites known unsupported Anthropic model ids
+to the configured fallback before calling Codex.
+
 Common pitfalls:
 
 - Do not set `ANTHROPIC_BASE_URL` to `http://127.0.0.1:14550/v1`; Claude Code appends `/v1/messages` itself.
@@ -129,6 +139,15 @@ Optional local API key protection:
 ```bash
 CODEXIA_API_KEY=local-secret codexia serve
 curl http://127.0.0.1:14550/v1/models -H 'authorization: Bearer local-secret'
+```
+
+You can combine it with the model fallback when running Claude Code against the
+gateway:
+
+```bash
+CODEXIA_API_KEY=local-secret \
+CODEXIA_MODEL_FALLBACK=gpt-5.5 \
+codexia serve
 ```
 
 Interactive runtime configuration:
@@ -253,6 +272,9 @@ gpt-5.5
 
 Credentials are stored at `~/.codexia/auth.json` by default. Override with
 `--auth-file`, `CODEXIA_AUTH_FILE`, or `CODEXIA_HOME`.
+
+Runtime config also supports an optional `model_fallback` value, and the CLI
+accepts `--model-fallback` / `CODEXIA_MODEL_FALLBACK`.
 
 OpenAI compatibility currently covers:
 

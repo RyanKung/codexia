@@ -7,7 +7,7 @@ use tracing_subscriber::FmtSubscriber;
 /// Supported runtime logging modes for the local server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LogLevel {
-    /// Emit only error logs.
+    /// Emit warnings and errors.
     #[default]
     Info,
     /// Emit error logs plus one-line HTTP request summaries.
@@ -21,7 +21,7 @@ impl LogLevel {
     #[must_use]
     pub const fn tracing_level(self) -> Level {
         match self {
-            Self::Info => Level::ERROR,
+            Self::Info => Level::WARN,
             Self::Debug => Level::DEBUG,
             Self::Trace => Level::TRACE,
         }
@@ -104,5 +104,6 @@ mod tests {
         assert_eq!(LogLevel::from_verbosity(2), LogLevel::Trace);
         assert_eq!(LogLevel::from_verbosity(3), LogLevel::Trace);
         assert_eq!(LogLevel::Trace.verbosity(), 2);
+        assert_eq!(LogLevel::Info.tracing_level(), Level::WARN);
     }
 }

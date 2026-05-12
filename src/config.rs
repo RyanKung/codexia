@@ -48,6 +48,9 @@ pub struct AppConfig {
     /// Static API key to expose from the local service, when configured.
     #[serde(default)]
     pub api_key: Option<String>,
+    /// Optional fallback model used for known unsupported Anthropic model ids.
+    #[serde(default)]
+    pub model_fallback: Option<String>,
 }
 
 /// Loads and saves persisted OAuth credentials from a single file.
@@ -276,6 +279,7 @@ mod tests {
             bind_port: Some(14550),
             auth_file: Some(PathBuf::from("/tmp/auth.json")),
             api_key: Some("secret".into()),
+            model_fallback: Some("gpt-5.5".into()),
         }
     }
 

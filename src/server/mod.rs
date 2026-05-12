@@ -1,7 +1,10 @@
 //! HTTP server state, router wiring, and endpoint tests.
 
 use crate::{
-    codex::client::CodexClient, error::Result, openai::response::ModelList, status::StatusClient,
+    codex::{client::CodexClient, convert::normalize_model},
+    error::Result,
+    openai::response::ModelList,
+    status::StatusClient,
     token::TokenManager,
 };
 use axum::{
@@ -30,6 +33,7 @@ pub struct AppState {
     status: StatusClient,
     api_key: Option<Arc<str>>,
     models: ModelList,
+    model_fallback: Option<Arc<str>>,
     responses: store::ResponseStore,
     batches: store::BatchStore,
 }
@@ -43,6 +47,18 @@ impl AppState {
         api_key: Option<String>,
         models: ModelList,
     ) -> Self {
+        Self::new_with_model_fallback(token_manager, codex, api_key, models, None)
+    }
+
+    /// Builds application state and optionally enables Anthropic model fallback.
+    #[must_use]
+    pub fn new_with_model_fallback(
+        token_manager: TokenManager,
+        codex: CodexClient,
+        api_key: Option<String>,
+        models: ModelList,
+        model_fallback: Option<String>,
+    ) -> Self {
         let status = StatusClient::new(Client::new(), codex.base_url().to_owned());
         Self {
             token_manager,
@@ -50,10 +66,56 @@ impl AppState {
             codex,
             api_key: api_key.map(Arc::from),
             models,
+            model_fallback: model_fallback.map(Arc::from),
             responses: store::ResponseStore::default(),
             batches: store::BatchStore::default(),
         }
     }
+
+    /// Rewrites known unsupported Anthropic model ids to the configured fallback.
+    pub(crate) fn rewrite_model(&self, model: &mut String) {
+        let Some(fallback) = self.model_fallback.as_deref() else {
+            return;
+        };
+
+        let normalized = normalize_model(model);
+        if self.supports_model(&normalized) || !looks_like_anthropic_model(&normalized) {
+            return;
+        }
+
+        if !self.supports_model(fallback) {
+            tracing::warn!(
+                requested_model = %model,
+                fallback_model = %fallback,
+                "model fallback ignored"
+            );
+            return;
+        }
+
+        tracing::warn!(
+            requested_model = %model,
+            fallback_model = %fallback,
+            "model fallback applied"
+        );
+        *model = fallback.to_owned();
+    }
+
+    fn supports_model(&self, candidate: &str) -> bool {
+        self.models
+            .data
+            .iter()
+            .any(|model| normalize_model(&model.id) == candidate)
+    }
+}
+
+fn looks_like_anthropic_model(model: &str) -> bool {
+    model.starts_with("claude-")
+        || model.eq_ignore_ascii_case("sonnet")
+        || model.eq_ignore_ascii_case("opus")
+        || model.eq_ignore_ascii_case("haiku")
+        || model.contains("sonnet")
+        || model.contains("opus")
+        || model.contains("haiku")
 }
 
 /// Binds the local listener and serves the Axum router until shutdown.
@@ -1318,6 +1380,53 @@ mod tests {
                 .unwrap()
                 .contains("claude-opus-4-7")
         );
+    }
+
+    #[tokio::test]
+    async fn messages_rewrite_known_anthropic_models_to_configured_fallback() {
+        let dir = TempDir::new().unwrap();
+        let store = AuthStore::new(dir.path().join("auth.json"));
+        store
+            .save(&Credentials {
+                access_token: "access".into(),
+                refresh_token: "refresh".into(),
+                expires_at: now_unix() + 600,
+                account_id: "acc_old".into(),
+            })
+            .unwrap();
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let http = Client::new();
+        let state = AppState::new_with_model_fallback(
+            TokenManager::new(
+                store,
+                CodexOAuthClient::new_with_token_url(http.clone(), spawn_refresh_server().await),
+            ),
+            CodexClient::new(http, spawn_recording_codex_server(captured.clone()).await),
+            Some("secret".into()),
+            ModelList::from_ids(["gpt-5.5"]),
+            Some("gpt-5.5".into()),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("secret"));
+
+        let response = handlers::messages(
+            axum::extract::State(state),
+            headers,
+            Json(
+                serde_json::from_value(json!({
+                    "model": "claude-sonnet-4-5",
+                    "max_tokens": 128,
+                    "messages": [{"role": "user", "content": "hello"}]
+                }))
+                .unwrap(),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let captured = captured.lock().await;
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0]["model"], "gpt-5.5");
     }
 
     #[tokio::test]

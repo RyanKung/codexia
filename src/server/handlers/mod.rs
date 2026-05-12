@@ -122,8 +122,9 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
 pub async fn responses(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<ResponsesRequest>,
+    Json(mut request): Json<ResponsesRequest>,
 ) -> Response {
+    state.rewrite_model(&mut request.model);
     trace_request("responses", &request);
     trace_named_tools("responses_tools_inbound", &responses_tool_names(&request));
     if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
@@ -205,8 +206,9 @@ pub async fn responses(
 pub async fn count_response_input_tokens(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<ResponsesRequest>,
+    Json(mut request): Json<ResponsesRequest>,
 ) -> Response {
+    state.rewrite_model(&mut request.model);
     trace_request("responses.input_tokens", &request);
     if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
         return error.into_response();
@@ -233,8 +235,9 @@ pub async fn count_response_input_tokens(
 pub async fn compact_response(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<ResponsesRequest>,
+    Json(mut request): Json<ResponsesRequest>,
 ) -> Response {
+    state.rewrite_model(&mut request.model);
     trace_request("responses.compact", &request);
     if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
         return error.into_response();
@@ -291,8 +294,9 @@ pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> Respon
 pub async fn chat_completions(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<ChatCompletionRequest>,
+    Json(mut request): Json<ChatCompletionRequest>,
 ) -> Response {
+    state.rewrite_model(&mut request.model);
     trace_request("chat_completions", &request);
     if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
         return error.into_response();
@@ -325,6 +329,7 @@ pub async fn messages(
     headers: HeaderMap,
     Json(mut request): Json<MessagesRequest>,
 ) -> Response {
+    state.rewrite_model(&mut request.model);
     trace_request("messages", &request);
     trace_named_tools("messages_tools_inbound", &anthropic_tool_names(&request));
     if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
@@ -375,8 +380,9 @@ pub async fn messages(
 pub async fn image_generations(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<ImageGenerationRequest>,
+    Json(mut request): Json<ImageGenerationRequest>,
 ) -> Response {
+    state.rewrite_model(&mut request.model);
     trace_request("image_generations", &request);
     if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
         return error.into_response();
@@ -416,6 +422,7 @@ pub async fn count_message_tokens(
     headers: HeaderMap,
     Json(mut request): Json<MessagesRequest>,
 ) -> Response {
+    state.rewrite_model(&mut request.model);
     trace_request("messages.count_tokens", &request);
     if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
         return anthropic_error_response(&error);
@@ -446,6 +453,7 @@ pub async fn create_message_batch(
     }
 
     for item in &mut request.requests {
+        state.rewrite_model(&mut item.params.model);
         apply_anthropic_headers(&headers, &mut item.params);
     }
 

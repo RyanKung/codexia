@@ -62,6 +62,7 @@ Examples:
 
 Environment:
   CODEXIA_API_KEY          Optional local API key for server endpoints
+  CODEXIA_MODEL_FALLBACK   Optional fallback for unsupported Anthropic model ids
   CODEXIA_AUTH_FILE        Override the credential file path
   CODEXIA_HOME             Override the default config home
 Files:
@@ -143,6 +144,13 @@ enum Command {
             help = "Optional local API key accepted as Bearer token or x-api-key"
         )]
         api_key: Option<String>,
+        #[arg(
+            long,
+            env = "CODEXIA_MODEL_FALLBACK",
+            value_name = "MODEL",
+            help = "Fallback model for unsupported Anthropic model ids such as claude-sonnet-*"
+        )]
+        model_fallback: Option<String>,
     },
     #[command(
         about = "Force refresh the saved Codex OAuth token",
@@ -240,6 +248,13 @@ struct DaemonInstallCliOptions {
         help = "Optional local API key accepted as Bearer token or x-api-key"
     )]
     api_key: Option<String>,
+    #[arg(
+        long,
+        env = "CODEXIA_MODEL_FALLBACK",
+        value_name = "MODEL",
+        help = "Fallback model for unsupported Anthropic model ids such as claude-sonnet-*"
+    )]
+    model_fallback: Option<String>,
 }
 
 #[tokio::main]
@@ -262,6 +277,7 @@ async fn run(cli: Cli) -> Result<()> {
             bind,
             auth_file,
             api_key,
+            model_fallback,
         } => {
             logging::init(log_level)?;
             let config = load_app_config()?;
@@ -271,6 +287,8 @@ async fn run(cli: Cli) -> Result<()> {
             let effective_auth_file = auth_file.or_else(|| config_auth_file(config.as_ref()));
             let effective_api_key =
                 api_key.or_else(|| config_string(config.as_ref(), |item| item.api_key.clone()));
+            let effective_model_fallback = model_fallback
+                .or_else(|| config_string(config.as_ref(), |item| item.model_fallback.clone()));
             let http = Client::new();
             let token_manager = TokenManager::new(
                 auth_store(effective_auth_file)?,
@@ -283,7 +301,13 @@ async fn run(cli: Cli) -> Result<()> {
             spawn_token_expiry_display(token_manager.clone());
             serve(
                 effective_bind,
-                AppState::new(token_manager, codex, effective_api_key, model_list),
+                AppState::new_with_model_fallback(
+                    token_manager,
+                    codex,
+                    effective_api_key,
+                    model_list,
+                    effective_model_fallback,
+                ),
             )
             .await
         }
@@ -365,12 +389,16 @@ fn resolve_daemon_install_options(
     let effective_api_key = options
         .api_key
         .or_else(|| config_string(config.as_ref(), |item| item.api_key.clone()));
+    let effective_model_fallback = options
+        .model_fallback
+        .or_else(|| config_string(config.as_ref(), |item| item.model_fallback.clone()));
     Ok(DaemonInstallOptions {
         executable: options.executable.map_or_else(std::env::current_exe, Ok)?,
         bind: effective_bind.to_string(),
         auth_file: effective_auth_file,
         verbosity,
         api_key: effective_api_key,
+        model_fallback: effective_model_fallback,
     })
 }
 
@@ -400,12 +428,17 @@ fn configure(store: &AppConfigStore) -> Result<()> {
         "Credential file path (leave blank for default ~/.codexia/auth.json)",
         existing.auth_file.as_deref(),
     )?;
+    let model_fallback = prompt_optional_string(
+        "Fallback model for unsupported Anthropic ids (leave blank to disable)",
+        existing.model_fallback.as_deref(),
+    )?;
 
     let config = AppConfig {
         bind_host: Some(bind_host),
         bind_port: Some(bind_port),
         auth_file,
         api_key,
+        model_fallback,
     };
     store.save(&config)?;
     println!("saved runtime config to {}", store.path().display());
@@ -696,6 +729,7 @@ mod tests {
         let config = AppConfig {
             bind_host: Some("127.0.0.1".into()),
             bind_port: Some(14550),
+            model_fallback: None,
             ..AppConfig::default()
         };
 

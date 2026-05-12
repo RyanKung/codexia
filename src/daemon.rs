@@ -21,6 +21,8 @@ pub struct DaemonInstallOptions {
     pub verbosity: u8,
     /// Optional API key injected into the daemon process arguments.
     pub api_key: Option<String>,
+    /// Optional fallback model passed through to `codexia serve`.
+    pub model_fallback: Option<String>,
 }
 
 /// Installs the daemon service definition for the current platform.
@@ -196,6 +198,10 @@ fn serve_args(options: &DaemonInstallOptions) -> Vec<String> {
     if let Some(api_key) = &options.api_key {
         args.push("--api-key".to_owned());
         args.push(api_key.clone());
+    }
+    if let Some(model_fallback) = &options.model_fallback {
+        args.push("--model-fallback".to_owned());
+        args.push(model_fallback.clone());
     }
     args
 }
@@ -376,6 +382,7 @@ mod tests {
             auth_file: Some("/tmp/auth file.json".into()),
             verbosity: 2,
             api_key: Some("local secret".into()),
+            model_fallback: Some("gpt-5.5".into()),
         }
     }
 
@@ -394,6 +401,8 @@ mod tests {
                 "-v",
                 "--api-key",
                 "local secret",
+                "--model-fallback",
+                "gpt-5.5",
             ]
         );
     }
