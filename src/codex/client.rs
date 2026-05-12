@@ -202,13 +202,20 @@ impl CodexClient {
     }
 
     async fn send_body(&self, body: &Value, credentials: &Credentials) -> Result<Response> {
+        crate::logging::trace_json("upstream.codex.request", body);
+        let url = resolve_codex_url(&self.base_url);
         let response = self
             .http
-            .post(resolve_codex_url(&self.base_url))
+            .post(&url)
             .headers(codex_headers(credentials)?)
             .json(body)
             .send()
             .await?;
+        tracing::trace!(
+            event = "upstream.codex.response_started",
+            url = %url,
+            status = response.status().as_u16()
+        );
         if response.status().is_success() {
             Ok(response)
         } else {
@@ -262,6 +269,7 @@ pub fn codex_headers(credentials: &Credentials) -> Result<HeaderMap> {
 async fn parse_error_response(response: Response) -> Error {
     let status = response.status();
     let text = response.text().await.unwrap_or_default();
+    crate::logging::trace_text("upstream.codex.error_body", &text);
     // Prefer the structured upstream error message when the backend provides one.
     let message = serde_json::from_str::<Value>(&text)
         .ok()

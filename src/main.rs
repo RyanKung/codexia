@@ -9,12 +9,13 @@
 //! daemon management commands on top of the library modules exposed by
 //! `codexia`.
 
-use clap::{Args, Parser, Subcommand};
+use clap::{ArgAction, Args, Parser, Subcommand};
 use codexia::{
     Error, Result,
     codex::client::CodexClient,
     config::{AppConfig, AppConfigStore, AuthStore, Credentials, now_unix},
     daemon::{self, DaemonInstallOptions},
+    logging::{self, LogLevel},
     models::resolve_model_list,
     oauth::{CodexOAuthClient, create_authorization_flow, parse_authorization_input},
     server::{AppState, serve},
@@ -88,6 +89,14 @@ Copyright:
     after_long_help = CLI_AFTER_LONG_HELP
 )]
 struct Cli {
+    #[arg(
+        short = 'v',
+        long = "verbose",
+        global = true,
+        action = ArgAction::Count,
+        help = "Increase logging verbosity: -v for request summaries, -vv/-vvv for full tracing"
+    )]
+    verbose: u8,
     #[command(subcommand)]
     command: Command,
 }
@@ -242,6 +251,7 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> Result<()> {
+    let log_level = LogLevel::from_verbosity(cli.verbose);
     match cli.command {
         Command::Login {
             auth_file,
@@ -253,6 +263,7 @@ async fn run(cli: Cli) -> Result<()> {
             auth_file,
             api_key,
         } => {
+            logging::init(log_level)?;
             let config = load_app_config()?;
             let effective_bind = bind
                 .or_else(|| bind_from_config(config.as_ref()))
@@ -279,7 +290,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Refresh { auth_file } => refresh(auth_store(auth_file)?).await,
         Command::Status { auth_file } => status(auth_store(auth_file)?).await,
         Command::Update { version } => update(version.as_deref()),
-        Command::Daemon { command } => daemon_command(command),
+        Command::Daemon { command } => daemon_command(command, cli.verbose),
     }
 }
 
@@ -323,13 +334,13 @@ fn config_command(command: Option<&ConfigCommand>) -> Result<()> {
 }
 
 /// Maps daemon-specific CLI requests to the platform-specific service helpers.
-fn daemon_command(command: DaemonCommand) -> Result<()> {
+fn daemon_command(command: DaemonCommand, verbosity: u8) -> Result<()> {
     match command {
         DaemonCommand::Install(options) => {
-            daemon::install(&resolve_daemon_install_options(options)?)
+            daemon::install(&resolve_daemon_install_options(options, verbosity)?)
         }
         DaemonCommand::Reinstall(options) => {
-            daemon::reinstall(&resolve_daemon_install_options(options)?)
+            daemon::reinstall(&resolve_daemon_install_options(options, verbosity)?)
         }
         DaemonCommand::Start => daemon::start(),
         DaemonCommand::Restart => daemon::restart(),
@@ -341,6 +352,7 @@ fn daemon_command(command: DaemonCommand) -> Result<()> {
 
 fn resolve_daemon_install_options(
     options: DaemonInstallCliOptions,
+    verbosity: u8,
 ) -> Result<DaemonInstallOptions> {
     let config = load_app_config()?;
     let effective_bind = options
@@ -357,6 +369,7 @@ fn resolve_daemon_install_options(
         executable: options.executable.map_or_else(std::env::current_exe, Ok)?,
         bind: effective_bind.to_string(),
         auth_file: effective_auth_file,
+        verbosity,
         api_key: effective_api_key,
     })
 }

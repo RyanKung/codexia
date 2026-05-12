@@ -6,6 +6,9 @@ use crate::{
 };
 use axum::{
     Router,
+    extract::Request,
+    middleware::{self, Next},
+    response::Response,
     routing::{get, post},
 };
 use reqwest::Client;
@@ -101,7 +104,21 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/chat/completions", post(handlers::chat_completions))
         .route("/v1/images/generations", post(handlers::image_generations))
+        .layer(middleware::from_fn(log_request_summary))
         .with_state(state)
+}
+
+async fn log_request_summary(request: Request, next: Next) -> Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_owned();
+    let response = next.run(request).await;
+    tracing::debug!(
+        %method,
+        path = %path,
+        status = response.status().as_u16(),
+        "http_request"
+    );
+    response
 }
 
 #[cfg(test)]

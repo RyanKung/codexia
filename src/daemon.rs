@@ -17,6 +17,8 @@ pub struct DaemonInstallOptions {
     pub bind: String,
     /// Optional auth file passed through to the daemon process.
     pub auth_file: Option<PathBuf>,
+    /// Repeated `-v` count passed through to `codexia serve`.
+    pub verbosity: u8,
     /// Optional API key injected into the daemon process arguments.
     pub api_key: Option<String>,
 }
@@ -187,6 +189,9 @@ fn serve_args(options: &DaemonInstallOptions) -> Vec<String> {
     if let Some(path) = &options.auth_file {
         args.push("--auth-file".to_owned());
         args.push(path.display().to_string());
+    }
+    for _ in 0..options.verbosity {
+        args.push("-v".to_owned());
     }
     if let Some(api_key) = &options.api_key {
         args.push("--api-key".to_owned());
@@ -369,6 +374,7 @@ mod tests {
             executable: "/usr/local/bin/codexia".into(),
             bind: "127.0.0.1:14550".into(),
             auth_file: Some("/tmp/auth file.json".into()),
+            verbosity: 2,
             api_key: Some("local secret".into()),
         }
     }
@@ -384,6 +390,8 @@ mod tests {
                 "127.0.0.1:14550",
                 "--auth-file",
                 "/tmp/auth file.json",
+                "-v",
+                "-v",
                 "--api-key",
                 "local secret",
             ]

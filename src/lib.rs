@@ -19,6 +19,8 @@ pub mod config;
 pub mod daemon;
 /// Shared error types and result aliases.
 pub mod error;
+/// Logging configuration and helpers.
+pub mod logging;
 /// Model list resolution from the built-in defaults.
 pub mod models;
 /// OAuth authorization, token exchange, and callback parsing.

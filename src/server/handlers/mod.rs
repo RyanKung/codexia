@@ -32,6 +32,7 @@ use responses::{
     response_object_from_upstream, response_request_requires_raw_mode, responses_to_chat_request,
     run_message_batch_worker,
 };
+use serde::Serialize;
 use serde_json::{Value, json};
 use sse::{
     anthropic_error_response, anthropic_raw_messages_sse_response, openai_raw_responses_sse,
@@ -41,6 +42,57 @@ use sse::{
 /// Lightweight healthcheck for the local service.
 pub async fn health() -> impl IntoResponse {
     Json(json!({"status": "ok"}))
+}
+
+fn trace_request<T: Serialize>(endpoint: &str, request: &T) {
+    crate::logging::trace_json(&format!("request.{endpoint}"), request);
+}
+
+fn trace_response<T: Serialize>(endpoint: &str, response: &T) {
+    crate::logging::trace_json(&format!("response.{endpoint}"), response);
+}
+
+fn trace_named_tools(event: &str, tools: &[String]) {
+    if tracing::enabled!(tracing::Level::TRACE) {
+        tracing::trace!(event = event, tools_count = tools.len(), tool_names = ?tools);
+    }
+}
+
+fn anthropic_tool_names(request: &MessagesRequest) -> Vec<String> {
+    request.tools.as_ref().map_or_else(Vec::new, |tools| {
+        tools.iter().map(|tool| tool.name.clone()).collect()
+    })
+}
+
+fn responses_tool_names(request: &ResponsesRequest) -> Vec<String> {
+    request.tools.as_ref().map_or_else(Vec::new, |tools| {
+        tools
+            .iter()
+            .map(|tool| {
+                tool.function
+                    .as_ref()
+                    .map_or_else(|| tool.kind.clone(), |function| function.name.clone())
+            })
+            .collect()
+    })
+}
+
+fn upstream_tool_names(body: &Value) -> Vec<String> {
+    body.get("tools")
+        .and_then(Value::as_array)
+        .map_or_else(Vec::new, |tools| {
+            tools
+                .iter()
+                .map(|tool| {
+                    tool.pointer("/function/name")
+                        .and_then(Value::as_str)
+                        .or_else(|| tool.get("name").and_then(Value::as_str))
+                        .or_else(|| tool.get("type").and_then(Value::as_str))
+                        .unwrap_or("unknown")
+                        .to_owned()
+                })
+                .collect()
+        })
 }
 
 /// Returns the configured model list after optional local API key validation.
@@ -72,6 +124,8 @@ pub async fn responses(
     headers: HeaderMap,
     Json(request): Json<ResponsesRequest>,
 ) -> Response {
+    trace_request("responses", &request);
+    trace_named_tools("responses_tools_inbound", &responses_tool_names(&request));
     if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
         return error.into_response();
     }
@@ -92,6 +146,7 @@ pub async fn responses(
             Err(error) => return error.into_response(),
         };
         let body = responses_to_codex_request(&request, &input_items);
+        trace_named_tools("responses_tools_upstream", &upstream_tool_names(&body));
         if request.wants_stream() {
             return match state.codex.stream_response(body, &credentials).await {
                 Ok(stream) => {
@@ -105,6 +160,7 @@ pub async fn responses(
             Ok(value) => {
                 let response_object = response_object_from_upstream(&request, &value);
                 maybe_store_response(&state, &request, response_object.clone(), input_items).await;
+                trace_response("responses", &response_object);
                 Json(response_object).into_response()
             }
             Err(error) => error.into_response(),
@@ -133,6 +189,7 @@ pub async fn responses(
             Ok(response) => {
                 let response_object = response_object_from_chat(&request, response);
                 maybe_store_response(&state, &request, response_object.clone(), input_items).await;
+                trace_response("responses", &response_object);
                 Json(response_object).into_response()
             }
             Err(error) => error.into_response(),
@@ -150,6 +207,7 @@ pub async fn count_response_input_tokens(
     headers: HeaderMap,
     Json(request): Json<ResponsesRequest>,
 ) -> Response {
+    trace_request("responses.input_tokens", &request);
     if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
         return error.into_response();
     }
@@ -164,10 +222,11 @@ pub async fn count_response_input_tokens(
         Err(error) => return error.into_response(),
     };
 
-    Json(ResponseInputTokens {
+    let response = ResponseInputTokens {
         input_tokens: estimate_response_input_tokens(&request, &input_items),
-    })
-    .into_response()
+    };
+    trace_response("responses.input_tokens", &response);
+    Json(response).into_response()
 }
 
 /// Runs a local best-effort Responses API compaction pass.
@@ -176,6 +235,7 @@ pub async fn compact_response(
     headers: HeaderMap,
     Json(request): Json<ResponsesRequest>,
 ) -> Response {
+    trace_request("responses.compact", &request);
     if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
         return error.into_response();
     }
@@ -189,11 +249,11 @@ pub async fn compact_response(
         Ok(items) => items,
         Err(error) => return error.into_response(),
     };
-
-    Json(ResponseCompaction {
+    let response = ResponseCompaction {
         output: compact_response_items(&input_items),
-    })
-    .into_response()
+    };
+    trace_response("responses.compact", &response);
+    Json(response).into_response()
 }
 
 /// Refreshes the saved OAuth credentials without exposing the raw tokens.
@@ -233,6 +293,7 @@ pub async fn chat_completions(
     headers: HeaderMap,
     Json(request): Json<ChatCompletionRequest>,
 ) -> Response {
+    trace_request("chat_completions", &request);
     if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
         return error.into_response();
     }
@@ -249,7 +310,10 @@ pub async fn chat_completions(
         }
     } else {
         match state.codex.complete_chat(request, &credentials).await {
-            Ok(response) => Json(response).into_response(),
+            Ok(response) => {
+                trace_response("chat_completions", &response);
+                Json(response).into_response()
+            }
             Err(error) => error.into_response(),
         }
     }
@@ -261,6 +325,8 @@ pub async fn messages(
     headers: HeaderMap,
     Json(mut request): Json<MessagesRequest>,
 ) -> Response {
+    trace_request("messages", &request);
+    trace_named_tools("messages_tools_inbound", &anthropic_tool_names(&request));
     if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
         return anthropic_error_response(&error);
     }
@@ -281,6 +347,7 @@ pub async fn messages(
         Err(error) => return anthropic_error_response(&error),
     };
     let body = responses_to_codex_request(&response_request, &input_items);
+    trace_named_tools("messages_tools_upstream", &upstream_tool_names(&body));
 
     let input_tokens = estimate_response_input_tokens(&response_request, &input_items);
     let model = request.model.clone();
@@ -294,7 +361,11 @@ pub async fn messages(
         }
     } else {
         match state.codex.complete_response(body, &credentials).await {
-            Ok(value) => Json(from_openai_response_value(&value, &request.model)).into_response(),
+            Ok(value) => {
+                let response = from_openai_response_value(&value, &request.model);
+                trace_response("messages", &response);
+                Json(response).into_response()
+            }
             Err(error) => anthropic_error_response(&error),
         }
     }
@@ -306,6 +377,7 @@ pub async fn image_generations(
     headers: HeaderMap,
     Json(request): Json<ImageGenerationRequest>,
 ) -> Response {
+    trace_request("image_generations", &request);
     if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
         return error.into_response();
     }
@@ -330,11 +402,9 @@ pub async fn image_generations(
                     .and_then(Value::as_array)
                     .map_or(&[], Vec::as_slice),
             );
-            Json::<ImageGenerationResponse>(image_generation_response(
-                crate::config::now_unix(),
-                images,
-            ))
-            .into_response()
+            let response = image_generation_response(crate::config::now_unix(), images);
+            trace_response("image_generations", &response);
+            Json::<ImageGenerationResponse>(response).into_response()
         }
         Err(error) => error.into_response(),
     }
@@ -346,6 +416,7 @@ pub async fn count_message_tokens(
     headers: HeaderMap,
     Json(mut request): Json<MessagesRequest>,
 ) -> Response {
+    trace_request("messages.count_tokens", &request);
     if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
         return anthropic_error_response(&error);
     }
@@ -358,7 +429,9 @@ pub async fn count_message_tokens(
         })
         .unwrap_or_else(|_| estimate_input_tokens(&request));
 
-    Json(CountTokensResponse { input_tokens }).into_response()
+    let response = CountTokensResponse { input_tokens };
+    trace_response("messages.count_tokens", &response);
+    Json(response).into_response()
 }
 
 /// Creates an Anthropic-compatible message batch and schedules background execution.
@@ -367,6 +440,7 @@ pub async fn create_message_batch(
     headers: HeaderMap,
     Json(mut request): Json<MessageBatchCreateRequest>,
 ) -> Response {
+    trace_request("messages.batches.create", &request);
     if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
         return anthropic_error_response(&error);
     }
@@ -414,7 +488,7 @@ pub async fn create_message_batch(
     tokio::spawn(async move {
         run_message_batch_worker(batches, token_manager, codex, batch_id, request.requests).await;
     });
-
+    trace_response("messages.batches.create", &batch);
     Json(batch).into_response()
 }
 

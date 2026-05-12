@@ -107,6 +107,7 @@ impl Error {
 impl IntoResponse for Error {
     fn into_response(self) -> axum::response::Response {
         let status = self.status_code();
+        tracing::error!(status = status.as_u16(), error = %self);
         // Mirror the OpenAI-style error envelope expected by API clients.
         let body = Json(json!({
             "error": {

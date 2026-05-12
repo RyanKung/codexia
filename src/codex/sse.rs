@@ -42,6 +42,7 @@ pub fn json_events(stream: ByteStream) -> impl Stream<Item = Result<Value>> + Se
                 if event.data.trim().is_empty() || event.data.trim() == "[DONE]" {
                     continue;
                 }
+                crate::logging::trace_text("upstream.codex.sse_event", &event.data);
                 yield serde_json::from_str::<Value>(&event.data)?;
             }
         }
@@ -49,6 +50,7 @@ pub fn json_events(stream: ByteStream) -> impl Stream<Item = Result<Value>> + Se
         // Flush a final unterminated frame after the stream closes.
         for event in drain_last_event_bytes(&mut buffer)? {
             if !event.data.trim().is_empty() && event.data.trim() != "[DONE]" {
+                crate::logging::trace_text("upstream.codex.sse_event", &event.data);
                 yield serde_json::from_str::<Value>(&event.data)?;
             }
         }
@@ -69,6 +71,7 @@ pub fn json_named_events(stream: ByteStream) -> impl Stream<Item = Result<JsonSs
                 if event.data.trim().is_empty() || event.data.trim() == "[DONE]" {
                     continue;
                 }
+                crate::logging::trace_text("upstream.codex.sse_event", &event.data);
                 yield JsonSseEvent {
                     event: event.event,
                     value: serde_json::from_str::<Value>(&event.data)?,
@@ -78,6 +81,7 @@ pub fn json_named_events(stream: ByteStream) -> impl Stream<Item = Result<JsonSs
 
         for event in drain_last_event_bytes(&mut buffer)? {
             if !event.data.trim().is_empty() && event.data.trim() != "[DONE]" {
+                crate::logging::trace_text("upstream.codex.sse_event", &event.data);
                 yield JsonSseEvent {
                     event: event.event,
                     value: serde_json::from_str::<Value>(&event.data)?,
