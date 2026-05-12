@@ -97,7 +97,7 @@ impl AppState {
             fallback_model = %fallback,
             "model fallback applied"
         );
-        *model = fallback.to_owned();
+        fallback.clone_into(model);
     }
 
     fn supports_model(&self, candidate: &str) -> bool {
@@ -1424,9 +1424,12 @@ mod tests {
         .await;
 
         assert_eq!(response.status(), StatusCode::OK);
-        let captured = captured.lock().await;
-        assert_eq!(captured.len(), 1);
-        assert_eq!(captured[0]["model"], "gpt-5.5");
+        let (captured_len, captured_model) = {
+            let captured = captured.lock().await;
+            (captured.len(), captured[0]["model"].clone())
+        };
+        assert_eq!(captured_len, 1);
+        assert_eq!(captured_model, "gpt-5.5");
     }
 
     #[tokio::test]

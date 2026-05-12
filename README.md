@@ -1,5 +1,8 @@
 # codexia
 
+[![CI](https://github.com/RyanKung/codexia/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/RyanKung/codexia/actions/workflows/ci.yml)
+[![Release](https://github.com/RyanKung/codexia/actions/workflows/release.yml/badge.svg?branch=master)](https://github.com/RyanKung/codexia/actions/workflows/release.yml)
+
 Rust gateway that logs in with OpenAI Codex OAuth and exposes OpenAI- and
 Anthropic-compatible APIs.
 
