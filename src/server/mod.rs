@@ -198,6 +198,7 @@ mod tests {
         body::to_bytes,
         extract::{Form, State},
         http::{HeaderMap, HeaderValue, StatusCode, header::HOST},
+        response::IntoResponse,
         routing::{get, post},
     };
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -572,6 +573,41 @@ mod tests {
 
         let app = Router::new()
             .route("/codex/responses", post(strict_recording_handler))
+            .with_state(captured);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        url
+    }
+
+    async fn spawn_stream_required_codex_server(captured: Arc<Mutex<Vec<Value>>>) -> String {
+        async fn stream_required_handler(
+            State(captured): State<Arc<Mutex<Vec<Value>>>>,
+            Json(body): Json<Value>,
+        ) -> impl axum::response::IntoResponse {
+            captured.lock().await.push(body.clone());
+            if body.get("stream").and_then(Value::as_bool) != Some(true) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "detail": "Stream must be set to true"
+                    })),
+                )
+                    .into_response();
+            }
+
+            (
+                [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_stream_required\",\"model\":\"gpt-5.5\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"OK\"}]}],\"usage\":{\"input_tokens\":12,\"output_tokens\":5,\"total_tokens\":17}}}\n\n",
+            )
+                .into_response()
+        }
+
+        let app = Router::new()
+            .route("/codex/responses", post(stream_required_handler))
             .with_state(captured);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -1126,6 +1162,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn responses_non_streaming_still_streams_upstream() {
+        let dir = TempDir::new().unwrap();
+        let store = AuthStore::new(dir.path().join("auth.json"));
+        store
+            .save(&Credentials {
+                access_token: "access".into(),
+                refresh_token: "refresh".into(),
+                expires_at: now_unix() + 600,
+                account_id: "acc_old".into(),
+            })
+            .unwrap();
+        let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let http = Client::new();
+        let state = AppState::new(
+            TokenManager::new(
+                store,
+                CodexOAuthClient::new_with_token_url(http.clone(), spawn_refresh_server().await),
+            ),
+            CodexClient::new(http, spawn_stream_required_codex_server(captured.clone()).await),
+            Some("secret".into()),
+            ModelList::from_ids(["gpt-5.5"]),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("secret"));
+
+        let response = handlers::responses(
+            axum::extract::State(state),
+            headers,
+            Json(
+                serde_json::from_value(json!({
+                    "model": "gpt-5.5",
+                    "stream": false,
+                    "input": "hello"
+                }))
+                .unwrap(),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value = serde_json::from_slice::<Value>(&body).unwrap();
+        assert_eq!(value["object"], "response");
+        assert_eq!(value["status"], "completed");
+        assert_eq!(value["output"][0]["type"], "message");
+        let captured = captured.lock().await;
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0]["stream"], true);
+    }
+
+    #[tokio::test]
     async fn messages_stream_image_generation_returns_anthropic_image_block_events() {
         let dir = TempDir::new().unwrap();
         let store = AuthStore::new(dir.path().join("auth.json"));
@@ -1430,6 +1517,57 @@ mod tests {
         };
         assert_eq!(captured_len, 1);
         assert_eq!(captured_model, "gpt-5.5");
+    }
+
+    #[tokio::test]
+    async fn messages_non_streaming_still_streams_upstream() {
+        let dir = TempDir::new().unwrap();
+        let store = AuthStore::new(dir.path().join("auth.json"));
+        store
+            .save(&Credentials {
+                access_token: "access".into(),
+                refresh_token: "refresh".into(),
+                expires_at: now_unix() + 600,
+                account_id: "acc_old".into(),
+            })
+            .unwrap();
+        let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let http = Client::new();
+        let state = AppState::new(
+            TokenManager::new(
+                store,
+                CodexOAuthClient::new_with_token_url(http.clone(), spawn_refresh_server().await),
+            ),
+            CodexClient::new(http, spawn_stream_required_codex_server(captured.clone()).await),
+            Some("secret".into()),
+            ModelList::from_ids(["gpt-5.5"]),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("secret"));
+
+        let response = handlers::messages(
+            axum::extract::State(state),
+            headers,
+            Json(
+                serde_json::from_value(json!({
+                    "model": "gpt-5.5",
+                    "stream": false,
+                    "max_tokens": 128,
+                    "messages": [{"role": "user", "content": "hello"}]
+                }))
+                .unwrap(),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value = serde_json::from_slice::<Value>(&body).unwrap();
+        assert_eq!(value["type"], "message");
+        assert_eq!(value["content"][0]["text"], "OK");
+        let captured = captured.lock().await;
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0]["stream"], true);
     }
 
     #[tokio::test]

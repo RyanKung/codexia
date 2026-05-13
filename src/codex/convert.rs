@@ -196,7 +196,9 @@ pub fn responses_to_codex_request(request: &ResponsesRequest, input: &[Value]) -
     let mut body = json!({
         "model": normalize_model(&request.model),
         "store": request.should_store(),
-        "stream": request.wants_stream(),
+        // Codex currently expects SSE upstream even when the downstream API
+        // requested a one-shot JSON response.
+        "stream": true,
         "input": input,
         "instructions": request.instructions.as_deref().unwrap_or(""),
         "text": { "verbosity": request.extra.get("text_verbosity").and_then(Value::as_str).unwrap_or("medium") },
@@ -446,6 +448,24 @@ mod tests {
         let body = responses_to_codex_request(&request, &input);
 
         assert_eq!(body["instructions"], "");
+    }
+
+    #[test]
+    fn responses_requests_force_upstream_streaming() {
+        let request: ResponsesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "stream": false,
+            "input": "hello"
+        }))
+        .unwrap();
+        let input = vec![json!({
+            "role": "user",
+            "content": [{"type": "input_text", "text": "hello"}]
+        })];
+
+        let body = responses_to_codex_request(&request, &input);
+
+        assert_eq!(body["stream"], true);
     }
 
     #[test]
