@@ -1180,7 +1180,10 @@ mod tests {
                 store,
                 CodexOAuthClient::new_with_token_url(http.clone(), spawn_refresh_server().await),
             ),
-            CodexClient::new(http, spawn_stream_required_codex_server(captured.clone()).await),
+            CodexClient::new(
+                http,
+                spawn_stream_required_codex_server(captured.clone()).await,
+            ),
             Some("secret".into()),
             ModelList::from_ids(["gpt-5.5"]),
         );
@@ -1207,9 +1210,12 @@ mod tests {
         assert_eq!(value["object"], "response");
         assert_eq!(value["status"], "completed");
         assert_eq!(value["output"][0]["type"], "message");
-        let captured = captured.lock().await;
-        assert_eq!(captured.len(), 1);
-        assert_eq!(captured[0]["stream"], true);
+        let (captured_len, captured_stream) = {
+            let captured = captured.lock().await;
+            (captured.len(), captured[0]["stream"].clone())
+        };
+        assert_eq!(captured_len, 1);
+        assert_eq!(captured_stream, true);
     }
 
     #[tokio::test]
@@ -1538,7 +1544,10 @@ mod tests {
                 store,
                 CodexOAuthClient::new_with_token_url(http.clone(), spawn_refresh_server().await),
             ),
-            CodexClient::new(http, spawn_stream_required_codex_server(captured.clone()).await),
+            CodexClient::new(
+                http,
+                spawn_stream_required_codex_server(captured.clone()).await,
+            ),
             Some("secret".into()),
             ModelList::from_ids(["gpt-5.5"]),
         );
@@ -1565,9 +1574,12 @@ mod tests {
         let value = serde_json::from_slice::<Value>(&body).unwrap();
         assert_eq!(value["type"], "message");
         assert_eq!(value["content"][0]["text"], "OK");
-        let captured = captured.lock().await;
-        assert_eq!(captured.len(), 1);
-        assert_eq!(captured[0]["stream"], true);
+        let (captured_len, captured_stream) = {
+            let captured = captured.lock().await;
+            (captured.len(), captured[0]["stream"].clone())
+        };
+        assert_eq!(captured_len, 1);
+        assert_eq!(captured_stream, true);
     }
 
     #[tokio::test]

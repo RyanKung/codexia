@@ -288,8 +288,7 @@ async fn run(cli: Cli) -> Result<()> {
             let effective_auth_file = auth_file.or_else(|| config_auth_file(config.as_ref()));
             let effective_api_key =
                 api_key.or_else(|| config_string(config.as_ref(), |item| item.api_key.clone()));
-            let effective_model_fallback =
-                resolve_model_fallback(model_fallback, config.as_ref());
+            let effective_model_fallback = resolve_model_fallback(model_fallback, config.as_ref());
             let http = Client::new();
             let token_manager = TokenManager::new(
                 auth_store(effective_auth_file)?,
@@ -390,8 +389,7 @@ fn resolve_daemon_install_options(
     let effective_api_key = options
         .api_key
         .or_else(|| config_string(config.as_ref(), |item| item.api_key.clone()));
-    let effective_model_fallback =
-        resolve_model_fallback(options.model_fallback, config.as_ref());
+    let effective_model_fallback = resolve_model_fallback(options.model_fallback, config.as_ref());
     Ok(DaemonInstallOptions {
         executable: options.executable.map_or_else(std::env::current_exe, Ok)?,
         bind: effective_bind.to_string(),
