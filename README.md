@@ -83,15 +83,16 @@ ANTHROPIC_MODEL="gpt-5.5" \
 claude -p "Reply with the single word OK"
 ```
 
-If Claude Code or its explore/sub-agent path still emits Anthropic-native model
-ids such as `claude-sonnet-*`, enable a local fallback:
+Codexia defaults unsupported Anthropic-native model ids such as
+`claude-sonnet-*` to `gpt-5.5`. To override that fallback explicitly:
 
 ```bash
 CODEXIA_MODEL_FALLBACK=gpt-5.5 codexia serve --api-key local-secret
 ```
 
-Codexia then rewrites known unsupported Anthropic model ids to the configured
-fallback before calling Codex.
+Codexia rewrites known unsupported Anthropic model ids to the effective
+fallback before calling Codex. When you do not configure one explicitly, the
+default fallback is `gpt-5.5`.
 
 Common pitfalls:
 
@@ -239,8 +240,9 @@ gpt-5.5
 Credentials are stored at `~/.codexia/auth.json` by default. Override with
 `--auth-file`, `CODEXIA_AUTH_FILE`, or `CODEXIA_HOME`.
 
-Runtime config also supports an optional `model_fallback` value, and the CLI
-accepts `--model-fallback` / `CODEXIA_MODEL_FALLBACK`.
+Runtime config supports `model_fallback`, and the CLI accepts
+`--model-fallback` / `CODEXIA_MODEL_FALLBACK`. When unset, Codexia defaults the
+fallback to `gpt-5.5`.
 
 OpenAI compatibility currently covers:
 

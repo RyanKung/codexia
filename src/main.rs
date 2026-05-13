@@ -35,6 +35,7 @@ use tokio::time::{MissedTickBehavior, interval};
 
 const INTERACTIVE_TOKEN_STATUS_INTERVAL: Duration = Duration::from_secs(1);
 const LOG_TOKEN_STATUS_INTERVAL: Duration = Duration::from_secs(60);
+const DEFAULT_MODEL_FALLBACK: &str = "gpt-5.5";
 const CLI_LONG_ABOUT: &str = "\
 Codexia is a local OpenAI- and Anthropic-compatible API gateway backed by Codex
 OAuth.
@@ -62,7 +63,7 @@ Examples:
 
 Environment:
   CODEXIA_API_KEY          Optional local API key for server endpoints
-  CODEXIA_MODEL_FALLBACK   Optional fallback for unsupported Anthropic model ids
+  CODEXIA_MODEL_FALLBACK   Fallback for unsupported Anthropic model ids
   CODEXIA_AUTH_FILE        Override the credential file path
   CODEXIA_HOME             Override the default config home
 Files:
@@ -287,8 +288,8 @@ async fn run(cli: Cli) -> Result<()> {
             let effective_auth_file = auth_file.or_else(|| config_auth_file(config.as_ref()));
             let effective_api_key =
                 api_key.or_else(|| config_string(config.as_ref(), |item| item.api_key.clone()));
-            let effective_model_fallback = model_fallback
-                .or_else(|| config_string(config.as_ref(), |item| item.model_fallback.clone()));
+            let effective_model_fallback =
+                resolve_model_fallback(model_fallback, config.as_ref());
             let http = Client::new();
             let token_manager = TokenManager::new(
                 auth_store(effective_auth_file)?,
@@ -389,9 +390,8 @@ fn resolve_daemon_install_options(
     let effective_api_key = options
         .api_key
         .or_else(|| config_string(config.as_ref(), |item| item.api_key.clone()));
-    let effective_model_fallback = options
-        .model_fallback
-        .or_else(|| config_string(config.as_ref(), |item| item.model_fallback.clone()));
+    let effective_model_fallback =
+        resolve_model_fallback(options.model_fallback, config.as_ref());
     Ok(DaemonInstallOptions {
         executable: options.executable.map_or_else(std::env::current_exe, Ok)?,
         bind: effective_bind.to_string(),
@@ -429,8 +429,11 @@ fn configure(store: &AppConfigStore) -> Result<()> {
         existing.auth_file.as_deref(),
     )?;
     let model_fallback = prompt_optional_string(
-        "Fallback model for unsupported Anthropic ids (leave blank to disable)",
-        existing.model_fallback.as_deref(),
+        "Fallback model for unsupported Anthropic ids (leave blank for default gpt-5.5)",
+        existing
+            .model_fallback
+            .as_deref()
+            .or(Some(DEFAULT_MODEL_FALLBACK)),
     )?;
 
     let config = AppConfig {
@@ -456,6 +459,15 @@ fn show_config(store: &AppConfigStore) -> Result<()> {
             store.path().display()
         ))),
     }
+}
+
+fn resolve_model_fallback(
+    cli_or_option: Option<String>,
+    config: Option<&AppConfig>,
+) -> Option<String> {
+    cli_or_option
+        .or_else(|| config_string(config, |item| item.model_fallback.clone()))
+        .or_else(|| Some(DEFAULT_MODEL_FALLBACK.to_owned()))
 }
 
 fn reset_config(store: &AppConfigStore) -> Result<()> {
@@ -716,7 +728,10 @@ fn token_expiry_message(credentials: &Credentials) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppConfig, bind_from_config, build_update_command};
+    use super::{
+        AppConfig, DEFAULT_MODEL_FALLBACK, bind_from_config, build_update_command,
+        resolve_model_fallback,
+    };
     use codexia::timefmt::format_duration;
 
     #[test]
@@ -768,6 +783,31 @@ mod tests {
                 "--version",
                 "0.3.3"
             ]
+        );
+    }
+
+    #[test]
+    fn uses_default_model_fallback_when_unset() {
+        assert_eq!(
+            resolve_model_fallback(None, None),
+            Some(DEFAULT_MODEL_FALLBACK.to_owned())
+        );
+    }
+
+    #[test]
+    fn prefers_explicit_model_fallback_over_default() {
+        let config = AppConfig {
+            model_fallback: Some("gpt-5.4".into()),
+            ..AppConfig::default()
+        };
+
+        assert_eq!(
+            resolve_model_fallback(Some("gpt-5.3-codex".into()), Some(&config)),
+            Some("gpt-5.3-codex".into())
+        );
+        assert_eq!(
+            resolve_model_fallback(None, Some(&config)),
+            Some("gpt-5.4".into())
         );
     }
 }
