@@ -1,7 +1,8 @@
 use crate::{Error, Result};
 use std::{
+    env,
     fmt::Write as _,
-    env, fs,
+    fs,
     io::IsTerminal,
     path::{Path, PathBuf},
     process::Command,
@@ -423,11 +424,7 @@ fn format_launchd_status_panel(view: &LaunchdStatusView<'_>) -> String {
     let _ = writeln!(
         output,
         "{}",
-        styled(
-            &format!("Codexia daemon ({})", overall.0),
-            overall.1,
-            true
-        )
+        styled(&format!("Codexia daemon ({})", overall.0), overall.1, true)
     );
     let _ = writeln!(output, "{}", "-".repeat(32));
     push_kv(&mut output, "Manager", "launchd");
@@ -438,11 +435,7 @@ fn format_launchd_status_panel(view: &LaunchdStatusView<'_>) -> String {
         bool_label(view.installed, "yes", "no"),
     );
     push_kv(&mut output, "Loaded", bool_label(view.loaded, "yes", "no"));
-    push_kv(
-        &mut output,
-        "State",
-        &styled(overall.0, overall.1, false),
-    );
+    push_kv(&mut output, "State", &styled(overall.0, overall.1, false));
 
     if let Some(pid) = view.pid {
         push_kv(&mut output, "PID", pid);
@@ -455,18 +448,35 @@ fn format_launchd_status_panel(view: &LaunchdStatusView<'_>) -> String {
     let _ = writeln!(output, "Paths");
     let _ = writeln!(output, "{}", "-".repeat(32));
     push_kv(&mut output, "plist", &view.plist.display().to_string());
-    push_kv(&mut output, "stdout log", &view.stdout_log.display().to_string());
-    push_kv(&mut output, "stderr log", &view.stderr_log.display().to_string());
+    push_kv(
+        &mut output,
+        "stdout log",
+        &view.stdout_log.display().to_string(),
+    );
+    push_kv(
+        &mut output,
+        "stderr log",
+        &view.stderr_log.display().to_string(),
+    );
 
     output.push('\n');
     let _ = writeln!(output, "Hints");
     let _ = writeln!(output, "{}", "-".repeat(32));
     if !view.installed {
-        let _ = writeln!(output, "  run `codexia daemon install` to create the LaunchAgent");
+        let _ = writeln!(
+            output,
+            "  run `codexia daemon install` to create the LaunchAgent"
+        );
     } else if !view.loaded {
-        let _ = writeln!(output, "  run `codexia daemon start` to load the LaunchAgent now");
+        let _ = writeln!(
+            output,
+            "  run `codexia daemon start` to load the LaunchAgent now"
+        );
     } else {
-        let _ = writeln!(output, "  run `codexia daemon restart` after changing daemon options");
+        let _ = writeln!(
+            output,
+            "  run `codexia daemon restart` after changing daemon options"
+        );
     }
     let _ = writeln!(
         output,
@@ -498,7 +508,7 @@ fn overall_status_label<'a>(view: &'a LaunchdStatusView<'_>) -> (&'a str, AnsiCo
     }
 }
 
-fn bool_label(enabled: bool, yes: &'static str, no: &'static str) -> &'static str {
+const fn bool_label(enabled: bool, yes: &'static str, no: &'static str) -> &'static str {
     if enabled { yes } else { no }
 }
 
@@ -519,7 +529,7 @@ enum AnsiColor {
 }
 
 impl AnsiColor {
-    fn code(self) -> &'static str {
+    const fn code(self) -> &'static str {
         match self {
             Self::Green => "32",
             Self::Yellow => "33",
