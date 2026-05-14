@@ -1,6 +1,8 @@
 use crate::{Error, Result};
 use std::{
+    fmt::Write as _,
     env, fs,
+    io::IsTerminal,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -110,11 +112,7 @@ pub fn restart() -> Result<()> {
 /// Returns an error when the platform service manager rejects the status request.
 pub fn status() -> Result<()> {
     match platform()? {
-        Platform::MacOs => {
-            let domain = launchd_domain()?;
-            let target = format!("{domain}/{LAUNCHD_LABEL}");
-            run_command("launchctl", ["print", &target])
-        }
+        Platform::MacOs => status_launchd(),
         Platform::Linux => systemctl(["status", SYSTEMD_UNIT, "--no-pager"]),
     }
 }
@@ -176,6 +174,73 @@ fn install_systemd(options: &DaemonInstallOptions) -> Result<()> {
     println!("run `codexia daemon start` to start now");
     println!("inspect it with `codexia daemon status` or `systemctl --user status {SYSTEMD_UNIT}`");
     Ok(())
+}
+
+fn status_launchd() -> Result<()> {
+    let plist = launchd_plist_path()?;
+    let log_dir = codexia_home()?;
+    let stdout_log = log_dir.join("codexia.out.log");
+    let stderr_log = log_dir.join("codexia.err.log");
+
+    if !plist.exists() {
+        print_launchd_status_panel(&LaunchdStatusView {
+            label: LAUNCHD_LABEL,
+            plist: &plist,
+            stdout_log: &stdout_log,
+            stderr_log: &stderr_log,
+            installed: false,
+            loaded: false,
+            state: Some("not installed"),
+            pid: None,
+            last_exit_code: None,
+        });
+        return Ok(());
+    }
+
+    let domain = launchd_domain()?;
+    let target = format!("{domain}/{LAUNCHD_LABEL}");
+    let output = Command::new("launchctl")
+        .args(["print", &target])
+        .output()?;
+
+    if output.status.success() {
+        let text = String::from_utf8_lossy(&output.stdout);
+        let summary = parse_launchctl_print_summary(&text);
+        print_launchd_status_panel(&LaunchdStatusView {
+            label: LAUNCHD_LABEL,
+            plist: &plist,
+            stdout_log: &stdout_log,
+            stderr_log: &stderr_log,
+            installed: true,
+            loaded: true,
+            state: summary.state,
+            pid: summary.pid,
+            last_exit_code: summary.last_exit_code,
+        });
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if is_launchctl_service_missing(&stderr) {
+        print_launchd_status_panel(&LaunchdStatusView {
+            label: LAUNCHD_LABEL,
+            plist: &plist,
+            stdout_log: &stdout_log,
+            stderr_log: &stderr_log,
+            installed: true,
+            loaded: false,
+            state: Some("stopped"),
+            pid: None,
+            last_exit_code: None,
+        });
+        return Ok(());
+    }
+
+    Err(Error::config(format!(
+        "launchctl print failed with status {}: {}",
+        output.status,
+        stderr.trim()
+    )))
 }
 
 fn serve_args(options: &DaemonInstallOptions) -> Vec<String> {
@@ -305,6 +370,164 @@ fn launchd_domain() -> Result<String> {
     Ok(format!("gui/{uid}"))
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct LaunchctlPrintSummary<'a> {
+    state: Option<&'a str>,
+    pid: Option<&'a str>,
+    last_exit_code: Option<&'a str>,
+}
+
+struct LaunchdStatusView<'a> {
+    label: &'a str,
+    plist: &'a Path,
+    stdout_log: &'a Path,
+    stderr_log: &'a Path,
+    installed: bool,
+    loaded: bool,
+    state: Option<&'a str>,
+    pid: Option<&'a str>,
+    last_exit_code: Option<&'a str>,
+}
+
+fn parse_launchctl_print_summary(text: &str) -> LaunchctlPrintSummary<'_> {
+    let mut summary = LaunchctlPrintSummary::default();
+
+    for line in text.lines().map(str::trim) {
+        if let Some(value) = line.strip_prefix("state = ") {
+            summary.state = Some(value.trim());
+        } else if let Some(value) = line.strip_prefix("pid = ") {
+            summary.pid = Some(value.trim());
+        } else if let Some(value) = line.strip_prefix("last exit code = ") {
+            summary.last_exit_code = Some(value.trim());
+        }
+    }
+
+    summary
+}
+
+fn is_launchctl_service_missing(stderr: &str) -> bool {
+    let stderr = stderr.trim();
+    stderr.contains("Could not find service")
+        || stderr.contains("service does not exist")
+        || stderr.contains("No such process")
+}
+
+fn print_launchd_status_panel(view: &LaunchdStatusView<'_>) {
+    print!("{}", format_launchd_status_panel(view));
+}
+
+fn format_launchd_status_panel(view: &LaunchdStatusView<'_>) -> String {
+    let mut output = String::new();
+    let overall = overall_status_label(view);
+
+    let _ = writeln!(
+        output,
+        "{}",
+        styled(
+            &format!("Codexia daemon ({})", overall.0),
+            overall.1,
+            true
+        )
+    );
+    let _ = writeln!(output, "{}", "-".repeat(32));
+    push_kv(&mut output, "Manager", "launchd");
+    push_kv(&mut output, "Label", view.label);
+    push_kv(
+        &mut output,
+        "Installed",
+        bool_label(view.installed, "yes", "no"),
+    );
+    push_kv(&mut output, "Loaded", bool_label(view.loaded, "yes", "no"));
+    push_kv(
+        &mut output,
+        "State",
+        &styled(overall.0, overall.1, false),
+    );
+
+    if let Some(pid) = view.pid {
+        push_kv(&mut output, "PID", pid);
+    }
+    if let Some(code) = view.last_exit_code {
+        push_kv(&mut output, "Last exit", code);
+    }
+
+    output.push('\n');
+    let _ = writeln!(output, "Paths");
+    let _ = writeln!(output, "{}", "-".repeat(32));
+    push_kv(&mut output, "plist", &view.plist.display().to_string());
+    push_kv(&mut output, "stdout log", &view.stdout_log.display().to_string());
+    push_kv(&mut output, "stderr log", &view.stderr_log.display().to_string());
+
+    output.push('\n');
+    let _ = writeln!(output, "Hints");
+    let _ = writeln!(output, "{}", "-".repeat(32));
+    if !view.installed {
+        let _ = writeln!(output, "  run `codexia daemon install` to create the LaunchAgent");
+    } else if !view.loaded {
+        let _ = writeln!(output, "  run `codexia daemon start` to load the LaunchAgent now");
+    } else {
+        let _ = writeln!(output, "  run `codexia daemon restart` after changing daemon options");
+    }
+    let _ = writeln!(
+        output,
+        "  run `tail -n 50 {}` to inspect recent daemon output",
+        view.stderr_log.display()
+    );
+
+    output
+}
+
+fn push_kv(output: &mut String, key: &str, value: &str) {
+    let _ = writeln!(output, "{key:>10}  {value}");
+}
+
+fn overall_status_label<'a>(view: &'a LaunchdStatusView<'_>) -> (&'a str, AnsiColor) {
+    if !view.installed {
+        return ("NOT INSTALLED", AnsiColor::Yellow);
+    }
+    if !view.loaded {
+        return ("STOPPED", AnsiColor::Yellow);
+    }
+
+    match view.state.unwrap_or("unknown") {
+        "running" => ("RUNNING", AnsiColor::Green),
+        "waiting" => ("WAITING", AnsiColor::Green),
+        "exited" => ("EXITED", AnsiColor::Yellow),
+        "failed" => ("FAILED", AnsiColor::Red),
+        _ => ("UNKNOWN", AnsiColor::Yellow),
+    }
+}
+
+fn bool_label(enabled: bool, yes: &'static str, no: &'static str) -> &'static str {
+    if enabled { yes } else { no }
+}
+
+fn styled(value: &str, color: AnsiColor, bold: bool) -> String {
+    if !std::io::stdout().is_terminal() {
+        return value.to_owned();
+    }
+
+    let bold_code = if bold { "1;" } else { "" };
+    format!("\x1b[{bold_code}{}m{value}\x1b[0m", color.code())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnsiColor {
+    Green,
+    Yellow,
+    Red,
+}
+
+impl AnsiColor {
+    fn code(self) -> &'static str {
+        match self {
+            Self::Green => "32",
+            Self::Yellow => "33",
+            Self::Red => "31",
+        }
+    }
+}
+
 fn systemctl<const N: usize>(args: [&str; N]) -> Result<()> {
     let mut command = Command::new("systemctl");
     command.arg("--user").args(args);
@@ -425,5 +648,75 @@ mod tests {
         assert!(unit.contains("'local secret'"));
         assert!(unit.contains("Restart=always"));
         assert!(unit.contains("WantedBy=default.target"));
+    }
+
+    #[test]
+    fn parses_launchctl_print_summary() {
+        let summary = parse_launchctl_print_summary(
+            r"
+                gui/501/com.codexia.daemon = {
+                    state = running
+                    pid = 12345
+                    last exit code = 0
+                }
+            ",
+        );
+
+        assert_eq!(
+            summary,
+            LaunchctlPrintSummary {
+                state: Some("running"),
+                pid: Some("12345"),
+                last_exit_code: Some("0"),
+            }
+        );
+    }
+
+    #[test]
+    fn detects_missing_launchctl_service_errors() {
+        assert!(is_launchctl_service_missing(
+            "Could not find service \"gui/501/com.codexia.daemon\" in domain for user gui: 501"
+        ));
+        assert!(is_launchctl_service_missing("No such process"));
+        assert!(!is_launchctl_service_missing("Operation not permitted"));
+    }
+
+    #[test]
+    fn formats_not_installed_launchd_status_panel() {
+        let panel = format_launchd_status_panel(&LaunchdStatusView {
+            label: LAUNCHD_LABEL,
+            plist: Path::new("/tmp/com.codexia.daemon.plist"),
+            stdout_log: Path::new("/tmp/codexia.out.log"),
+            stderr_log: Path::new("/tmp/codexia.err.log"),
+            installed: false,
+            loaded: false,
+            state: Some("not installed"),
+            pid: None,
+            last_exit_code: None,
+        });
+
+        assert!(panel.contains("Codexia daemon (NOT INSTALLED)"));
+        assert!(panel.contains("Installed  no"));
+        assert!(panel.contains("run `codexia daemon install`"));
+    }
+
+    #[test]
+    fn formats_running_launchd_status_panel() {
+        let panel = format_launchd_status_panel(&LaunchdStatusView {
+            label: LAUNCHD_LABEL,
+            plist: Path::new("/tmp/com.codexia.daemon.plist"),
+            stdout_log: Path::new("/tmp/codexia.out.log"),
+            stderr_log: Path::new("/tmp/codexia.err.log"),
+            installed: true,
+            loaded: true,
+            state: Some("running"),
+            pid: Some("12345"),
+            last_exit_code: Some("0"),
+        });
+
+        assert!(panel.contains("Codexia daemon (RUNNING)"));
+        assert!(panel.contains("State  RUNNING"));
+        assert!(panel.contains("PID  12345"));
+        assert!(panel.contains("tail -n 50 /tmp/codexia.err.log"));
     }
 }
