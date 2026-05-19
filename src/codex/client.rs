@@ -338,6 +338,13 @@ pub fn grok_headers(credentials: &Credentials) -> Result<HeaderMap> {
 fn remove_grok_unsupported_keys(body: &mut Value) {
     if let Some(object) = body.as_object_mut() {
         object.remove("include");
+        let has_tools = object
+            .get("tools")
+            .and_then(Value::as_array)
+            .is_some_and(|tools| !tools.is_empty());
+        if !has_tools {
+            object.remove("tool_choice");
+        }
     }
 }
 
@@ -386,6 +393,7 @@ fn chat_completion_id() -> String {
 mod tests {
     use super::*;
     use crate::config::Credentials;
+    use serde_json::json;
 
     #[test]
     fn resolves_codex_url_variants() {
@@ -417,5 +425,34 @@ mod tests {
         assert_eq!(headers["authorization"], "Bearer token");
         assert_eq!(headers["chatgpt-account-id"], "acc");
         assert_eq!(headers["openai-beta"], "responses=experimental");
+    }
+
+    #[test]
+    fn removes_grok_tool_choice_without_tools() {
+        let mut body = json!({
+            "model": "grok-4",
+            "input": "hello",
+            "include": ["reasoning.encrypted_content"],
+            "tool_choice": "auto"
+        });
+
+        remove_grok_unsupported_keys(&mut body);
+
+        assert!(body.get("include").is_none());
+        assert!(body.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn preserves_grok_tool_choice_with_tools() {
+        let mut body = json!({
+            "model": "grok-4",
+            "input": "hello",
+            "tool_choice": "auto",
+            "tools": [{"type": "function", "name": "lookup"}]
+        });
+
+        remove_grok_unsupported_keys(&mut body);
+
+        assert_eq!(body["tool_choice"], "auto");
     }
 }

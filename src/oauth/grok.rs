@@ -6,6 +6,7 @@ use crate::{
 use rand::{RngCore, SeedableRng, rngs::StdRng};
 use reqwest::Client;
 use serde::Deserialize;
+use std::time::Duration;
 use url::Url;
 
 /// Default xAI API base URL used for Grok Responses requests.
@@ -18,6 +19,8 @@ pub const XAI_OAUTH_CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
 pub const XAI_OAUTH_SCOPE: &str = "openid profile email offline_access grok-cli:access api:access";
 /// Local redirect URI used by xAI OAuth.
 pub const XAI_REDIRECT_URI: &str = "http://127.0.0.1:56121/callback";
+const XAI_OAUTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const XAI_OAUTH_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Deserialize)]
 struct DiscoveryResponse {
@@ -41,7 +44,7 @@ pub struct GrokOAuthClient {
 
 impl Default for GrokOAuthClient {
     fn default() -> Self {
-        Self::new(Client::new())
+        Self::new(default_http_client())
     }
 }
 
@@ -142,7 +145,17 @@ impl GrokOAuthClient {
     }
 
     async fn discovery(&self) -> Result<DiscoveryResponse> {
-        let response = self.http.get(&self.discovery_url).send().await?;
+        let response = self
+            .http
+            .get(&self.discovery_url)
+            .send()
+            .await
+            .map_err(|error| {
+                Error::oauth(format!(
+                    "Grok OAuth discovery request to {} failed: {error}. Check DNS/proxy/VPN access to auth.x.ai.",
+                    self.discovery_url
+                ))
+            })?;
         let status = response.status();
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
@@ -155,6 +168,14 @@ impl GrokOAuthClient {
         validate_xai_endpoint(&discovery.token_endpoint)?;
         Ok(discovery)
     }
+}
+
+fn default_http_client() -> Client {
+    Client::builder()
+        .connect_timeout(XAI_OAUTH_CONNECT_TIMEOUT)
+        .timeout(XAI_OAUTH_REQUEST_TIMEOUT)
+        .build()
+        .expect("Grok OAuth HTTP client configuration is valid")
 }
 
 fn create_state(rng: &mut impl RngCore) -> String {

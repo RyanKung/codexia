@@ -570,7 +570,7 @@ async fn login(store: AuthStore, provider: Provider, originator: &str) -> Result
     let flow = match provider {
         Provider::Codex => create_authorization_flow(originator)?,
         Provider::Grok => {
-            GrokOAuthClient::new(http.clone())
+            GrokOAuthClient::default()
                 .create_authorization_flow()
                 .await?
         }
@@ -592,7 +592,7 @@ async fn login(store: AuthStore, provider: Provider, originator: &str) -> Result
                 .await?
         }
         Provider::Grok => {
-            GrokOAuthClient::new(http)
+            GrokOAuthClient::default()
                 .exchange_authorization_code(&code, &flow.verifier)
                 .await?
         }
