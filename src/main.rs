@@ -13,11 +13,13 @@ use clap::{ArgAction, Args, Parser, Subcommand};
 use codexia::{
     Error, Result,
     codex::client::CodexClient,
-    config::{AppConfig, AppConfigStore, AuthStore, Credentials, now_unix},
+    config::{AppConfig, AppConfigStore, AuthStore, Credentials, Provider, now_unix},
     daemon::{self, DaemonInstallOptions},
     logging::{self, LogLevel},
-    models::resolve_model_list,
-    oauth::{CodexOAuthClient, create_authorization_flow, parse_authorization_input},
+    models::resolve_model_list_for_provider,
+    oauth::{
+        CodexOAuthClient, GrokOAuthClient, create_authorization_flow, parse_authorization_input,
+    },
     server::{AppState, serve},
     status::StatusClient,
     timefmt::{format_duration, format_status_time_human},
@@ -38,15 +40,16 @@ const LOG_TOKEN_STATUS_INTERVAL: Duration = Duration::from_secs(60);
 const DEFAULT_MODEL_FALLBACK: &str = "gpt-5.5";
 const CLI_LONG_ABOUT: &str = "\
 Codexia is a local OpenAI- and Anthropic-compatible API gateway backed by Codex
-OAuth.
+or Grok OAuth.
 
 It helps clients that speak either the OpenAI Chat Completions API or the
-Anthropic Messages API call the Codex backend after you complete the OAuth
+Anthropic Messages API call the selected upstream after you complete the OAuth
 login flow. Credentials are stored locally and can be refreshed automatically
 during requests or manually with the refresh command/API.";
 const CLI_AFTER_LONG_HELP: &str = "\
 Examples:
   codexia login
+  codexia login --provider grok
   codexia config
   codexia config show
   codexia serve
@@ -63,6 +66,7 @@ Examples:
 
 Environment:
   CODEXIA_API_KEY          Optional local API key for server endpoints
+  CODEXIA_PROVIDER         Upstream provider: codex or grok
   CODEXIA_MODEL_FALLBACK   Fallback for unsupported Anthropic model ids
   CODEXIA_AUTH_FILE        Override the credential file path
   CODEXIA_HOME             Override the default config home
@@ -72,7 +76,7 @@ Files:
 
 Disclaimer:
   Codexia is an unofficial tool and is not affiliated with, endorsed by, or
-  supported by OpenAI or Anthropic. Use it at your own risk, make sure your
+  supported by OpenAI, Anthropic, or xAI. Use it at your own risk, make sure your
   usage complies with the terms that apply to your account and the upstream
   services, and do not assume the LGPLv3 license overrides upstream account
   restrictions on sharing or reselling personal OAuth-backed access.
@@ -86,7 +90,7 @@ Copyright:
 #[command(
     name = "codexia",
     version,
-    about = "OpenAI- and Anthropic-compatible API gateway backed by Codex OAuth",
+    about = "OpenAI- and Anthropic-compatible API gateway backed by OAuth providers",
     long_about = CLI_LONG_ABOUT,
     after_long_help = CLI_AFTER_LONG_HELP
 )]
@@ -107,12 +111,20 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     #[command(
-        about = "Log in with Codex OAuth and save local credentials",
-        long_about = "Start the Codex OAuth login flow, exchange the authorization code for tokens, and save credentials to the configured auth file."
+        about = "Log in with an OAuth provider and save local credentials",
+        long_about = "Start the selected OAuth login flow, exchange the authorization code for tokens, and save credentials to the configured auth file."
     )]
     Login {
         #[arg(long, value_name = "PATH", help = "Credential file to read/write")]
         auth_file: Option<PathBuf>,
+        #[arg(
+            long,
+            env = "CODEXIA_PROVIDER",
+            default_value = "codex",
+            value_name = "PROVIDER",
+            help = "OAuth provider to authenticate: codex or grok"
+        )]
+        provider: String,
         #[arg(
             long,
             default_value = "pi",
@@ -131,7 +143,7 @@ enum Command {
     },
     #[command(
         about = "Serve the OpenAI- and Anthropic-compatible HTTP API",
-        long_about = "Serve OpenAI- and Anthropic-compatible endpoints backed by Codex, including /v1/models, /v1/chat/completions, /v1/responses, /v1/responses/compact, /v1/messages, /v1/messages/count_tokens, /v1/messages/batches, and /v1/auth/refresh."
+        long_about = "Serve OpenAI- and Anthropic-compatible endpoints backed by the selected provider, including /v1/models, /v1/chat/completions, /v1/responses, /v1/responses/compact, /v1/messages, /v1/messages/count_tokens, /v1/messages/batches, and /v1/auth/refresh."
     )]
     Serve {
         #[arg(long, value_name = "ADDR", help = "Socket address to listen on")]
@@ -147,6 +159,13 @@ enum Command {
         api_key: Option<String>,
         #[arg(
             long,
+            env = "CODEXIA_PROVIDER",
+            value_name = "PROVIDER",
+            help = "Upstream provider to serve: codex or grok"
+        )]
+        provider: Option<String>,
+        #[arg(
+            long,
             env = "CODEXIA_MODEL_FALLBACK",
             value_name = "MODEL",
             help = "Fallback model for unsupported Anthropic model ids such as claude-sonnet-*"
@@ -154,7 +173,7 @@ enum Command {
         model_fallback: Option<String>,
     },
     #[command(
-        about = "Force refresh the saved Codex OAuth token",
+        about = "Force refresh the saved OAuth token",
         long_about = "Use the saved refresh token to fetch fresh credentials immediately and write them back to the configured auth file."
     )]
     Refresh {
@@ -251,6 +270,13 @@ struct DaemonInstallCliOptions {
     api_key: Option<String>,
     #[arg(
         long,
+        env = "CODEXIA_PROVIDER",
+        value_name = "PROVIDER",
+        help = "Upstream provider to serve: codex or grok"
+    )]
+    provider: Option<String>,
+    #[arg(
+        long,
         env = "CODEXIA_MODEL_FALLBACK",
         value_name = "MODEL",
         help = "Fallback model for unsupported Anthropic model ids such as claude-sonnet-*"
@@ -271,13 +297,22 @@ async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Login {
             auth_file,
+            provider,
             originator,
-        } => login(auth_store(auth_file)?, &originator).await,
+        } => {
+            login(
+                auth_store(auth_file)?,
+                resolve_provider(Some(provider), None)?,
+                &originator,
+            )
+            .await
+        }
         Command::Config { command } => config_command(command.as_ref()),
         Command::Serve {
             bind,
             auth_file,
             api_key,
+            provider,
             model_fallback,
         } => {
             logging::init(log_level)?;
@@ -286,17 +321,19 @@ async fn run(cli: Cli) -> Result<()> {
                 .or_else(|| bind_from_config(config.as_ref()))
                 .unwrap_or_else(default_bind);
             let effective_auth_file = auth_file.or_else(|| config_auth_file(config.as_ref()));
+            let effective_provider = resolve_provider(provider, config.as_ref())?;
             let effective_api_key =
                 api_key.or_else(|| config_string(config.as_ref(), |item| item.api_key.clone()));
             let effective_model_fallback = resolve_model_fallback(model_fallback, config.as_ref());
             let http = Client::new();
-            let token_manager = TokenManager::new(
+            let token_manager = TokenManager::new_for_provider(
                 auth_store(effective_auth_file)?,
-                CodexOAuthClient::new(http.clone()),
+                effective_provider,
+                http.clone(),
             );
             token_manager.credentials().await?;
-            let codex = CodexClient::new(http, CodexClient::default_base_url());
-            let model_list = resolve_model_list()?;
+            let codex = CodexClient::new_for_provider(http, effective_provider);
+            let model_list = resolve_model_list_for_provider(effective_provider)?;
             println!("listening on http://{effective_bind}");
             spawn_token_expiry_display(token_manager.clone());
             serve(
@@ -389,6 +426,7 @@ fn resolve_daemon_install_options(
     let effective_api_key = options
         .api_key
         .or_else(|| config_string(config.as_ref(), |item| item.api_key.clone()));
+    let effective_provider = resolve_provider(options.provider, config.as_ref())?;
     let effective_model_fallback = resolve_model_fallback(options.model_fallback, config.as_ref());
     Ok(DaemonInstallOptions {
         executable: options.executable.map_or_else(std::env::current_exe, Ok)?,
@@ -396,6 +434,7 @@ fn resolve_daemon_install_options(
         auth_file: effective_auth_file,
         verbosity,
         api_key: effective_api_key,
+        provider: effective_provider,
         model_fallback: effective_model_fallback,
     })
 }
@@ -426,6 +465,8 @@ fn configure(store: &AppConfigStore) -> Result<()> {
         "Credential file path (leave blank for default ~/.codexia/auth.json)",
         existing.auth_file.as_deref(),
     )?;
+    let provider = prompt_string("Provider", existing.provider.unwrap_or_default().as_str())?
+        .parse::<Provider>()?;
     let model_fallback = prompt_optional_string(
         "Fallback model for unsupported Anthropic ids (leave blank for default gpt-5.5)",
         existing
@@ -440,6 +481,7 @@ fn configure(store: &AppConfigStore) -> Result<()> {
         auth_file,
         api_key,
         model_fallback,
+        provider: Some(provider),
     };
     store.save(&config)?;
     println!("saved runtime config to {}", store.path().display());
@@ -468,6 +510,13 @@ fn resolve_model_fallback(
         .or_else(|| Some(DEFAULT_MODEL_FALLBACK.to_owned()))
 }
 
+fn resolve_provider(cli_or_option: Option<String>, config: Option<&AppConfig>) -> Result<Provider> {
+    cli_or_option.map_or_else(
+        || Ok(config.and_then(|item| item.provider).unwrap_or_default()),
+        |value| value.parse(),
+    )
+}
+
 fn reset_config(store: &AppConfigStore) -> Result<()> {
     store.delete()?;
     println!("removed runtime config at {}", store.path().display());
@@ -475,21 +524,42 @@ fn reset_config(store: &AppConfigStore) -> Result<()> {
 }
 
 /// Runs the interactive OAuth login flow and persists the resulting credentials.
-async fn login(store: AuthStore, originator: &str) -> Result<()> {
-    let flow = create_authorization_flow(originator)?;
-    println!("Open this URL to authenticate:\n{}\n", flow.authorize_url);
+async fn login(store: AuthStore, provider: Provider, originator: &str) -> Result<()> {
+    let http = Client::new();
+    let flow = match provider {
+        Provider::Codex => create_authorization_flow(originator)?,
+        Provider::Grok => {
+            GrokOAuthClient::new(http.clone())
+                .create_authorization_flow()
+                .await?
+        }
+    };
+    println!(
+        "Open this URL to authenticate with {}:\n{}\n",
+        provider.display_name(),
+        flow.authorize_url
+    );
     println!(
         "After login, your browser may fail to load the localhost callback. Copy the full address from the browser address bar and paste it here."
     );
 
     let code = prompt_authorization_code(&flow.state)?;
-    let credentials = CodexOAuthClient::default()
-        .exchange_authorization_code(&code, &flow.verifier)
-        .await?;
+    let credentials = match provider {
+        Provider::Codex => {
+            CodexOAuthClient::new(http)
+                .exchange_authorization_code(&code, &flow.verifier)
+                .await?
+        }
+        Provider::Grok => {
+            GrokOAuthClient::new(http)
+                .exchange_authorization_code(&code, &flow.verifier)
+                .await?
+        }
+    };
     store.save(&credentials)?;
+    let subject = credential_subject(&credentials);
     println!(
-        "logged in account {} and saved credentials to {}",
-        credentials.account_id,
+        "logged in {subject} and saved credentials to {}",
         store.path().display()
     );
     Ok(())
@@ -500,25 +570,43 @@ async fn refresh(store: AuthStore) -> Result<()> {
     let credentials = store
         .load()?
         .ok_or_else(|| Error::config("not logged in; run `codexia login` first"))?;
-    let refreshed = CodexOAuthClient::default()
-        .refresh_token(&credentials.refresh_token)
-        .await?;
+    let refreshed = match credentials.provider {
+        Provider::Codex => {
+            CodexOAuthClient::default()
+                .refresh_token(&credentials.refresh_token)
+                .await?
+        }
+        Provider::Grok => {
+            GrokOAuthClient::default()
+                .refresh_token(&credentials.refresh_token)
+                .await?
+        }
+    };
     store.save(&refreshed)?;
-    println!("refreshed account {}", refreshed.account_id);
+    println!("refreshed {}", credential_subject(&refreshed));
     Ok(())
 }
 
 /// Fetches token, plan, and rate-limit status and renders a human-readable report.
 async fn status(store: AuthStore) -> Result<()> {
     let http = Client::new();
-    let token_manager = TokenManager::new(store, CodexOAuthClient::new(http.clone()));
+    let stored = store
+        .load()?
+        .ok_or_else(|| Error::config("not logged in; run `codexia login` first"))?;
+    let provider = stored.provider;
+    let token_manager = TokenManager::new_for_provider(store, provider, http.clone());
     let credentials = token_manager.credentials().await?;
+    println!("provider: {}", credentials.provider);
+    println!("token: {}", token_expiry_message(&credentials));
+    if provider == Provider::Grok {
+        println!("status: Grok account and rate-limit status are not available yet");
+        return Ok(());
+    }
     let snapshot = StatusClient::new(http, CodexClient::default_base_url())
         .fetch_status(&credentials)
         .await;
 
     println!("account_id: {}", credentials.account_id);
-    println!("token: {}", token_expiry_message(&credentials));
 
     if let Some(account) = snapshot.account {
         if let Some(email) = account.email {
@@ -713,12 +801,24 @@ async fn token_expiry_status(token_manager: &TokenManager) -> String {
 /// Renders a human-readable expiry message for one credential set.
 fn token_expiry_message(credentials: &Credentials) -> String {
     let remaining_secs = credentials.expires_at.saturating_sub(now_unix());
+    let subject = credential_subject(credentials);
     if remaining_secs == 0 {
-        format!("token expired (account {})", credentials.account_id)
+        format!("token expired ({subject})")
     } else {
         format!(
-            "token expires in {} (account {})",
+            "token expires in {} ({subject})",
             format_duration(remaining_secs),
+        )
+    }
+}
+
+fn credential_subject(credentials: &Credentials) -> String {
+    if credentials.account_id.is_empty() {
+        format!("{} credentials", credentials.provider.display_name())
+    } else {
+        format!(
+            "{} account {}",
+            credentials.provider.display_name(),
             credentials.account_id
         )
     }

@@ -8,7 +8,8 @@ use crate::{
         },
         sse,
     },
-    config::{Credentials, now_unix},
+    config::{Credentials, Provider, now_unix},
+    oauth::XAI_API_BASE_URL,
     openai::response::{
         AssistantMessage, ChatChoice, ChatCompletionChunk, ChatCompletionResponse, chunk_finished,
         chunk_with_content, chunk_with_role, chunk_with_tool_call,
@@ -30,6 +31,7 @@ pub const DEFAULT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api";
 pub struct CodexClient {
     http: Client,
     base_url: String,
+    provider: Provider,
 }
 
 impl CodexClient {
@@ -39,6 +41,21 @@ impl CodexClient {
         Self {
             http,
             base_url: base_url.into(),
+            provider: Provider::Codex,
+        }
+    }
+
+    /// Creates an upstream client for the selected provider.
+    #[must_use]
+    pub fn new_for_provider(http: Client, provider: Provider) -> Self {
+        let base_url = match provider {
+            Provider::Codex => DEFAULT_CODEX_BASE_URL,
+            Provider::Grok => XAI_API_BASE_URL,
+        };
+        Self {
+            http,
+            base_url: base_url.to_owned(),
+            provider,
         }
     }
 
@@ -52,6 +69,12 @@ impl CodexClient {
     #[must_use]
     pub fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    /// Returns the upstream provider used by this client.
+    #[must_use]
+    pub const fn provider(&self) -> Provider {
+        self.provider
     }
 
     /// Sends a non-streaming chat completion request and collects the full response body.
@@ -202,24 +225,42 @@ impl CodexClient {
     }
 
     async fn send_body(&self, body: &Value, credentials: &Credentials) -> Result<Response> {
-        crate::logging::trace_json("upstream.codex.request", body);
-        let url = resolve_codex_url(&self.base_url);
+        let mut upstream_body = body.clone();
+        if self.provider == Provider::Grok {
+            remove_grok_unsupported_keys(&mut upstream_body);
+        }
+        crate::logging::trace_json("upstream.request", &upstream_body);
+        let url = self.responses_url();
         let response = self
             .http
             .post(&url)
-            .headers(codex_headers(credentials)?)
-            .json(body)
+            .headers(self.headers(credentials)?)
+            .json(&upstream_body)
             .send()
             .await?;
         tracing::trace!(
-            event = "upstream.codex.response_started",
+            event = "upstream.response_started",
             url = %url,
             status = response.status().as_u16()
         );
         if response.status().is_success() {
             Ok(response)
         } else {
-            Err(parse_error_response(response).await)
+            Err(parse_error_response(response, self.provider).await)
+        }
+    }
+
+    fn responses_url(&self) -> String {
+        match self.provider {
+            Provider::Codex => resolve_codex_url(&self.base_url),
+            Provider::Grok => resolve_grok_responses_url(&self.base_url),
+        }
+    }
+
+    fn headers(&self, credentials: &Credentials) -> Result<HeaderMap> {
+        match self.provider {
+            Provider::Codex => codex_headers(credentials),
+            Provider::Grok => grok_headers(credentials),
         }
     }
 }
@@ -234,6 +275,17 @@ pub fn resolve_codex_url(base_url: &str) -> String {
         format!("{normalized}/responses")
     } else {
         format!("{normalized}/codex/responses")
+    }
+}
+
+/// Resolves a configured xAI base URL into the concrete Responses endpoint.
+#[must_use]
+pub fn resolve_grok_responses_url(base_url: &str) -> String {
+    let normalized = base_url.trim_end_matches('/');
+    if normalized.ends_with("/responses") {
+        normalized.to_owned()
+    } else {
+        format!("{normalized}/responses")
     }
 }
 
@@ -266,7 +318,30 @@ pub fn codex_headers(credentials: &Credentials) -> Result<HeaderMap> {
     Ok(headers)
 }
 
-async fn parse_error_response(response: Response) -> Error {
+/// Builds HTTP headers for authenticated xAI Grok API requests.
+///
+/// # Errors
+///
+/// Returns an error when any derived header value is invalid.
+pub fn grok_headers(credentials: &Credentials) -> Result<HeaderMap> {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        AUTHORIZATION,
+        header_value(&format!("Bearer {}", credentials.access_token))?,
+    );
+    headers.insert(USER_AGENT, HeaderValue::from_static("codexia"));
+    headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    Ok(headers)
+}
+
+fn remove_grok_unsupported_keys(body: &mut Value) {
+    if let Some(object) = body.as_object_mut() {
+        object.remove("include");
+    }
+}
+
+async fn parse_error_response(response: Response, provider: Provider) -> Error {
     let status = response.status();
     let text = response.text().await.unwrap_or_default();
     crate::logging::trace_text("upstream.codex.error_body", &text);
@@ -291,7 +366,10 @@ async fn parse_error_response(response: Response) -> Error {
 
     Error::upstream_with_status(
         downstream_status,
-        format!("Codex backend returned {status}: {message}"),
+        format!(
+            "{} backend returned {status}: {message}",
+            provider.display_name()
+        ),
     )
 }
 
@@ -328,6 +406,7 @@ mod tests {
     #[test]
     fn builds_required_codex_headers() {
         let credentials = Credentials {
+            provider: crate::config::Provider::Codex,
             access_token: "token".into(),
             refresh_token: "refresh".into(),
             expires_at: 1,

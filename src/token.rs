@@ -1,7 +1,7 @@
 use crate::{
     Error, Result,
-    config::{AuthStore, Credentials},
-    oauth::CodexOAuthClient,
+    config::{AuthStore, Credentials, Provider},
+    oauth::{CodexOAuthClient, GrokOAuthClient},
 };
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -12,7 +12,7 @@ const REFRESH_SKEW_SECS: i64 = 60;
 #[derive(Clone)]
 pub struct TokenManager {
     store: AuthStore,
-    oauth: CodexOAuthClient,
+    oauth: OAuthClient,
     cached: Arc<RwLock<Option<Credentials>>>,
 }
 
@@ -20,6 +20,26 @@ impl TokenManager {
     /// Creates a token manager backed by the given credential store and OAuth client.
     #[must_use]
     pub fn new(store: AuthStore, oauth: CodexOAuthClient) -> Self {
+        Self::new_with_oauth(store, OAuthClient::Codex(oauth))
+    }
+
+    /// Creates a token manager for the selected provider using default HTTP clients.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the stored credentials belong to a different provider.
+    #[must_use]
+    pub fn new_for_provider(store: AuthStore, provider: Provider, http: reqwest::Client) -> Self {
+        let oauth = match provider {
+            Provider::Codex => OAuthClient::Codex(CodexOAuthClient::new(http)),
+            Provider::Grok => OAuthClient::Grok(GrokOAuthClient::new(http)),
+        };
+        Self::new_with_oauth(store, oauth)
+    }
+
+    /// Creates a token manager backed by a provider-specific OAuth client.
+    #[must_use]
+    pub fn new_with_oauth(store: AuthStore, oauth: OAuthClient) -> Self {
         let cached = store.load().unwrap_or(None);
         Self {
             store,
@@ -93,6 +113,24 @@ impl TokenManager {
     }
 }
 
+/// Provider-specific OAuth refresh client used by [`TokenManager`].
+#[derive(Clone)]
+pub enum OAuthClient {
+    /// `OpenAI` Codex OAuth refresh client.
+    Codex(CodexOAuthClient),
+    /// xAI Grok OAuth refresh client.
+    Grok(GrokOAuthClient),
+}
+
+impl OAuthClient {
+    async fn refresh_token(&self, refresh_token: &str) -> Result<Credentials> {
+        match self {
+            Self::Codex(client) => client.refresh_token(refresh_token).await,
+            Self::Grok(client) => client.refresh_token(refresh_token).await,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,6 +188,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let store = AuthStore::new(dir.path().join("auth.json"));
         let credentials = Credentials {
+            provider: crate::config::Provider::Codex,
             access_token: "access".into(),
             refresh_token: "refresh".into(),
             expires_at: now_unix() + 600,
@@ -167,6 +206,7 @@ mod tests {
         let store = AuthStore::new(dir.path().join("auth.json"));
         store
             .save(&Credentials {
+                provider: crate::config::Provider::Codex,
                 access_token: "old_access".into(),
                 refresh_token: "old_refresh".into(),
                 expires_at: now_unix() - 1,
@@ -190,6 +230,7 @@ mod tests {
         let store = AuthStore::new(dir.path().join("auth.json"));
         store
             .save(&Credentials {
+                provider: crate::config::Provider::Codex,
                 access_token: "old_access".into(),
                 refresh_token: "old_refresh".into(),
                 expires_at: now_unix() + 600,

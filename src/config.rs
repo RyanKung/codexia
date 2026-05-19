@@ -1,14 +1,69 @@
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::{
-    env, fs,
+    env,
+    fmt::{self, Display},
+    fs,
     path::{Path, PathBuf},
+    str::FromStr,
     time::{SystemTime, UNIX_EPOCH},
 };
+
+/// Upstream OAuth provider used by stored credentials and runtime requests.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum Provider {
+    /// `OpenAI` Codex OAuth backed by the `ChatGPT` Codex backend.
+    #[default]
+    Codex,
+    /// xAI Grok OAuth backed by the xAI API.
+    Grok,
+}
+
+impl Provider {
+    /// Returns the stable CLI/config identifier for this provider.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Grok => "grok",
+        }
+    }
+
+    /// Returns a human-readable provider label.
+    #[must_use]
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex",
+            Self::Grok => "Grok",
+        }
+    }
+}
+
+impl Display for Provider {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for Provider {
+    type Err = Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "codex" | "openai-codex" | "openai" => Ok(Self::Codex),
+            "grok" | "xai" | "xai-oauth" | "grok-oauth" => Ok(Self::Grok),
+            other => Err(Error::config(format!("unknown provider: {other}"))),
+        }
+    }
+}
 
 /// Persisted OAuth credentials used to authenticate API requests.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Credentials {
+    /// OAuth provider that issued this token pair.
+    #[serde(default)]
+    pub provider: Provider,
     /// Bearer token used for authenticated API calls.
     pub access_token: String,
     /// Long-lived token used to mint a new access token.
@@ -16,6 +71,7 @@ pub struct Credentials {
     /// Access-token expiration timestamp, expressed as Unix seconds.
     pub expires_at: i64,
     /// Upstream account identifier associated with the token pair.
+    #[serde(default)]
     pub account_id: String,
 }
 
@@ -51,6 +107,9 @@ pub struct AppConfig {
     /// Optional fallback model used for known unsupported Anthropic model ids.
     #[serde(default)]
     pub model_fallback: Option<String>,
+    /// Default upstream OAuth provider used by `serve` and `daemon install`.
+    #[serde(default)]
+    pub provider: Option<Provider>,
 }
 
 /// Loads and saves persisted OAuth credentials from a single file.
@@ -266,6 +325,7 @@ mod tests {
 
     fn sample_credentials() -> Credentials {
         Credentials {
+            provider: crate::config::Provider::Codex,
             access_token: "access".into(),
             refresh_token: "refresh".into(),
             expires_at: 123,
@@ -280,12 +340,14 @@ mod tests {
             auth_file: Some(PathBuf::from("/tmp/auth.json")),
             api_key: Some("secret".into()),
             model_fallback: Some("gpt-5.5".into()),
+            provider: Some(Provider::Codex),
         }
     }
 
     #[test]
     fn detects_expiry_with_skew() {
         let credentials = Credentials {
+            provider: crate::config::Provider::Codex,
             expires_at: 100,
             ..sample_credentials()
         };

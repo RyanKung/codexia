@@ -1,4 +1,4 @@
-use crate::{Error, Result};
+use crate::{Error, Result, config::Provider};
 use std::{
     env,
     fmt::Write as _,
@@ -24,6 +24,8 @@ pub struct DaemonInstallOptions {
     pub verbosity: u8,
     /// Optional API key injected into the daemon process arguments.
     pub api_key: Option<String>,
+    /// Upstream provider passed through to `codexia serve`.
+    pub provider: Provider,
     /// Optional fallback model passed through to `codexia serve`.
     pub model_fallback: Option<String>,
 }
@@ -265,6 +267,8 @@ fn serve_args(options: &DaemonInstallOptions) -> Vec<String> {
         args.push("--api-key".to_owned());
         args.push(api_key.clone());
     }
+    args.push("--provider".to_owned());
+    args.push(options.provider.to_string());
     if let Some(model_fallback) = &options.model_fallback {
         args.push("--model-fallback".to_owned());
         args.push(model_fallback.clone());
@@ -615,6 +619,7 @@ mod tests {
             auth_file: Some("/tmp/auth file.json".into()),
             verbosity: 2,
             api_key: Some("local secret".into()),
+            provider: Provider::Codex,
             model_fallback: Some("gpt-5.5".into()),
         }
     }
@@ -634,6 +639,8 @@ mod tests {
                 "-v",
                 "--api-key",
                 "local secret",
+                "--provider",
+                "codex",
                 "--model-fallback",
                 "gpt-5.5",
             ]

@@ -3,7 +3,7 @@
 [![CI](https://github.com/RyanKung/codexia/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/RyanKung/codexia/actions/workflows/ci.yml)
 [![Release](https://github.com/RyanKung/codexia/actions/workflows/release.yml/badge.svg?branch=master)](https://github.com/RyanKung/codexia/actions/workflows/release.yml)
 
-Rust gateway that logs in with OpenAI Codex OAuth and exposes OpenAI- and
+Rust gateway that logs in with Codex or Grok OAuth and exposes OpenAI- and
 Anthropic-compatible APIs.
 
 ## Usage
@@ -23,6 +23,17 @@ the full redirected URL from the browser address bar, for example
 `http://localhost:1455/auth/callback?code=...&state=...`. This matches
 OpenClaw's remote/headless fallback and does not require the gateway host to be
 reachable from the public internet.
+
+Grok OAuth uses the same local credential flow with xAI's OAuth endpoints:
+
+```bash
+codexia login --provider grok
+codexia serve --provider grok --bind 127.0.0.1:14550 --api-key local-secret
+```
+
+Grok exposes `grok-4.3`, `grok-4.3-fast`, and `grok-4` through the same local
+OpenAI-compatible and Anthropic-compatible routes. xAI may still restrict OAuth
+API access by account tier even when browser login succeeds.
 
 OpenAI-compatible chat request:
 
@@ -306,15 +317,17 @@ possible: Anthropic headers are accepted, locally configured auth is enforced,
 and unsupported advanced Anthropic-only features are ignored rather than
 rejected when possible.
 
-The OAuth flow follows OpenClaw/pi-ai's Codex flow: PKCE, manual paste of the
-`http://localhost:1455/auth/callback?...` redirect URL, token exchange at
-`https://auth.openai.com/oauth/token`, and Codex requests to
-`https://chatgpt.com/backend-api/codex/responses`.
+The default Codex OAuth flow follows OpenClaw/pi-ai's Codex flow: PKCE, manual
+paste of the `http://localhost:1455/auth/callback?...` redirect URL, token
+exchange at `https://auth.openai.com/oauth/token`, and Codex requests to
+`https://chatgpt.com/backend-api/codex/responses`. Grok OAuth uses xAI OIDC
+discovery, PKCE, manual callback paste, and xAI Responses requests under
+`https://api.x.ai/v1`.
 
 ## Disclaimer
 
 Codexia is an unofficial compatibility tool. It is not affiliated with,
-endorsed by, or supported by OpenAI or Anthropic.
+endorsed by, or supported by OpenAI, Anthropic, or xAI.
 
 You are responsible for making sure your usage complies with the terms,
 policies, account restrictions, and data-handling obligations that apply to

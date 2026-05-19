@@ -717,6 +717,7 @@ mod tests {
         let store = AuthStore::new(dir.path().join("auth.json"));
         store
             .save(&Credentials {
+                provider: crate::config::Provider::Codex,
                 access_token: "old_access".into(),
                 refresh_token: "old_refresh".into(),
                 expires_at: now_unix() + 600,
@@ -764,6 +765,7 @@ mod tests {
         let store = AuthStore::new(dir.path().join("auth.json"));
         store
             .save(&Credentials {
+                provider: crate::config::Provider::Codex,
                 access_token: "access".into(),
                 refresh_token: "refresh".into(),
                 expires_at: now_unix() + 600,
@@ -808,6 +810,7 @@ mod tests {
         let store = AuthStore::new(dir.path().join("auth.json"));
         store
             .save(&Credentials {
+                provider: crate::config::Provider::Codex,
                 access_token: "access".into(),
                 refresh_token: "refresh".into(),
                 expires_at: now_unix() + 600,
@@ -858,6 +861,7 @@ mod tests {
         let store = AuthStore::new(dir.path().join("auth.json"));
         store
             .save(&Credentials {
+                provider: crate::config::Provider::Codex,
                 access_token: "access".into(),
                 refresh_token: "refresh".into(),
                 expires_at: now_unix() + 600,
@@ -906,6 +910,7 @@ mod tests {
         let store = AuthStore::new(dir.path().join("auth.json"));
         store
             .save(&Credentials {
+                provider: crate::config::Provider::Codex,
                 access_token: "access".into(),
                 refresh_token: "refresh".into(),
                 expires_at: now_unix() + 600,
@@ -959,6 +964,7 @@ mod tests {
         let store = AuthStore::new(dir.path().join("auth.json"));
         store
             .save(&Credentials {
+                provider: crate::config::Provider::Codex,
                 access_token: "access".into(),
                 refresh_token: "refresh".into(),
                 expires_at: now_unix() + 600,
@@ -1069,6 +1075,7 @@ mod tests {
         let store = AuthStore::new(dir.path().join("auth.json"));
         store
             .save(&Credentials {
+                provider: crate::config::Provider::Codex,
                 access_token: "access".into(),
                 refresh_token: "refresh".into(),
                 expires_at: now_unix() + 600,
@@ -1117,6 +1124,7 @@ mod tests {
         let store = AuthStore::new(dir.path().join("auth.json"));
         store
             .save(&Credentials {
+                provider: crate::config::Provider::Codex,
                 access_token: "access".into(),
                 refresh_token: "refresh".into(),
                 expires_at: now_unix() + 600,
@@ -1167,6 +1175,7 @@ mod tests {
         let store = AuthStore::new(dir.path().join("auth.json"));
         store
             .save(&Credentials {
+                provider: crate::config::Provider::Codex,
                 access_token: "access".into(),
                 refresh_token: "refresh".into(),
                 expires_at: now_unix() + 600,
@@ -1224,6 +1233,7 @@ mod tests {
         let store = AuthStore::new(dir.path().join("auth.json"));
         store
             .save(&Credentials {
+                provider: crate::config::Provider::Codex,
                 access_token: "access".into(),
                 refresh_token: "refresh".into(),
                 expires_at: now_unix() + 600,
@@ -1276,6 +1286,7 @@ mod tests {
         let store = AuthStore::new(dir.path().join("auth.json"));
         store
             .save(&Credentials {
+                provider: crate::config::Provider::Codex,
                 access_token: "access".into(),
                 refresh_token: "refresh".into(),
                 expires_at: now_unix() + 600,
@@ -1327,6 +1338,7 @@ mod tests {
         let store = AuthStore::new(dir.path().join("auth.json"));
         store
             .save(&Credentials {
+                provider: crate::config::Provider::Codex,
                 access_token: "access".into(),
                 refresh_token: "refresh".into(),
                 expires_at: now_unix() + 600,
@@ -1382,6 +1394,7 @@ mod tests {
         let store = AuthStore::new(dir.path().join("auth.json"));
         store
             .save(&Credentials {
+                provider: crate::config::Provider::Codex,
                 access_token: "access".into(),
                 refresh_token: "refresh".into(),
                 expires_at: now_unix() + 600,
@@ -1430,6 +1443,7 @@ mod tests {
         let store = AuthStore::new(dir.path().join("auth.json"));
         store
             .save(&Credentials {
+                provider: crate::config::Provider::Codex,
                 access_token: "access".into(),
                 refresh_token: "refresh".into(),
                 expires_at: now_unix() + 600,
@@ -1481,6 +1495,7 @@ mod tests {
         let store = AuthStore::new(dir.path().join("auth.json"));
         store
             .save(&Credentials {
+                provider: crate::config::Provider::Codex,
                 access_token: "access".into(),
                 refresh_token: "refresh".into(),
                 expires_at: now_unix() + 600,
@@ -1531,6 +1546,7 @@ mod tests {
         let store = AuthStore::new(dir.path().join("auth.json"));
         store
             .save(&Credentials {
+                provider: crate::config::Provider::Codex,
                 access_token: "access".into(),
                 refresh_token: "refresh".into(),
                 expires_at: now_unix() + 600,
@@ -1588,6 +1604,7 @@ mod tests {
         let store = AuthStore::new(dir.path().join("auth.json"));
         store
             .save(&Credentials {
+                provider: crate::config::Provider::Codex,
                 access_token: "access".into(),
                 refresh_token: "refresh".into(),
                 expires_at: now_unix() + 600,
@@ -1653,6 +1670,7 @@ mod tests {
         let store = AuthStore::new(dir.path().join("auth.json"));
         store
             .save(&Credentials {
+                provider: crate::config::Provider::Codex,
                 access_token: "access".into(),
                 refresh_token: "refresh".into(),
                 expires_at: now_unix() + 600,
@@ -1780,6 +1798,7 @@ mod tests {
         let store = AuthStore::new(dir.path().join("auth.json"));
         store
             .save(&Credentials {
+                provider: crate::config::Provider::Codex,
                 access_token: "access".into(),
                 refresh_token: "refresh".into(),
                 expires_at: now_unix() + 600,
@@ -1880,6 +1899,7 @@ mod tests {
         let store = AuthStore::new(dir.path().join("auth.json"));
         store
             .save(&Credentials {
+                provider: crate::config::Provider::Codex,
                 access_token: "access".into(),
                 refresh_token: "refresh".into(),
                 expires_at: now_unix() + 600,
@@ -1958,6 +1978,7 @@ mod tests {
         let store = AuthStore::new(dir.path().join("auth.json"));
         store
             .save(&Credentials {
+                provider: crate::config::Provider::Codex,
                 access_token: "access".into(),
                 refresh_token: "refresh".into(),
                 expires_at: now_unix() + 600,
@@ -2006,6 +2027,7 @@ mod tests {
         let store = AuthStore::new(dir.path().join("auth.json"));
         store
             .save(&Credentials {
+                provider: crate::config::Provider::Codex,
                 access_token: "access".into(),
                 refresh_token: "refresh".into(),
                 expires_at: now_unix() + 600,
@@ -2058,6 +2080,7 @@ mod tests {
         let store = AuthStore::new(dir.path().join("auth.json"));
         store
             .save(&Credentials {
+                provider: crate::config::Provider::Codex,
                 access_token: "access".into(),
                 refresh_token: "refresh".into(),
                 expires_at: now_unix() + 600,
@@ -2114,6 +2137,7 @@ mod tests {
         let store = AuthStore::new(dir.path().join("auth.json"));
         store
             .save(&Credentials {
+                provider: crate::config::Provider::Codex,
                 access_token: "access".into(),
                 refresh_token: "refresh".into(),
                 expires_at: now_unix() + 600,
@@ -2167,6 +2191,7 @@ mod tests {
         let store = AuthStore::new(dir.path().join("auth.json"));
         store
             .save(&Credentials {
+                provider: crate::config::Provider::Codex,
                 access_token: "access".into(),
                 refresh_token: "refresh".into(),
                 expires_at: now_unix() + 600,
@@ -2232,6 +2257,7 @@ mod tests {
         let store = AuthStore::new(dir.path().join("auth.json"));
         store
             .save(&Credentials {
+                provider: crate::config::Provider::Codex,
                 access_token: "access".into(),
                 refresh_token: "refresh".into(),
                 expires_at: now_unix() + 600,

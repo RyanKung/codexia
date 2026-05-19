@@ -23,6 +23,7 @@ mod tests {
 
     fn sample_credentials() -> Credentials {
         Credentials {
+            provider: crate::config::Provider::Codex,
             access_token: "access".into(),
             refresh_token: "refresh".into(),
             expires_at: 1,

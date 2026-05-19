@@ -1266,7 +1266,7 @@ pub(crate) fn system_prompt_text(system: Option<&SystemPrompt>) -> Option<String
                 .iter()
                 .filter(|block| block.kind == "text")
                 .filter_map(|block| block.text.as_deref())
-                .filter_map(|text| sanitize_system_text(text))
+                .filter_map(sanitize_system_text)
                 .collect::<Vec<_>>()
                 .join("\n");
             (!text.is_empty()).then_some(text)
@@ -1287,10 +1287,9 @@ fn strip_claude_code_billing_header_line(text: &str) -> &str {
         return text;
     };
 
-    match rest.find('\n') {
-        Some(index) => rest[index + 1..].trim_start_matches(['\r', '\n']),
-        None => "",
-    }
+    rest.find('\n').map_or("", |index| {
+        rest[index + 1..].trim_start_matches(['\r', '\n'])
+    })
 }
 
 fn image_data_url(source: Option<&ImageSource>) -> Option<String> {

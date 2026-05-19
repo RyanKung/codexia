@@ -1,9 +1,10 @@
 mod callback;
+mod grok;
 mod pkce;
 
 use crate::{
     Error, Result,
-    config::{Credentials, now_unix},
+    config::{Credentials, Provider, now_unix},
     oauth::pkce::Pkce,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -14,6 +15,7 @@ use serde_json::Value;
 use url::Url;
 
 pub use callback::{CallbackOutcome, CallbackServer};
+pub use grok::{GrokOAuthClient, XAI_API_BASE_URL};
 pub use pkce::{code_challenge, generate_pkce};
 
 /// OAuth client identifier used by the Codex desktop-style authorization flow.
@@ -289,6 +291,7 @@ async fn parse_token_response(response: reqwest::Response, operation: &str) -> R
     // The Codex API expects the account id in a header, so normalize it once here.
     let account_id = account_id_from_access_token(&token.access_token)?;
     Ok(Credentials {
+        provider: Provider::Codex,
         access_token: token.access_token,
         refresh_token: token.refresh_token,
         expires_at: now_unix().saturating_add(token.expires_in),

@@ -1,4 +1,4 @@
-use crate::{Result, openai::response::ModelList};
+use crate::{Result, config::Provider, openai::response::ModelList};
 use std::collections::HashSet;
 
 /// Default OpenAI-compatible model identifiers exposed by the project.
@@ -15,9 +15,23 @@ pub const OPENCLAW_CODEX_MODELS: &[&str] = &[
     "gpt-5.5",
 ];
 
+/// Default Grok model identifiers exposed by the project.
+pub const GROK_MODELS: &[&str] = &["grok-4.3", "grok-4.3-fast", "grok-4"];
+
 /// Resolves the default model identifiers into a trimmed, de-duplicated list.
+#[must_use]
 pub fn resolve_model_ids() -> Vec<String> {
-    normalize_model_ids(OPENCLAW_CODEX_MODELS.iter().map(ToString::to_string))
+    resolve_model_ids_for_provider(Provider::Codex)
+}
+
+/// Resolves model identifiers for the selected provider.
+#[must_use]
+pub fn resolve_model_ids_for_provider(provider: Provider) -> Vec<String> {
+    let ids = match provider {
+        Provider::Codex => OPENCLAW_CODEX_MODELS,
+        Provider::Grok => GROK_MODELS,
+    };
+    normalize_model_ids(ids.iter().map(ToString::to_string))
 }
 
 /// Builds a [`ModelList`] from the default model identifiers.
@@ -27,7 +41,19 @@ pub fn resolve_model_ids() -> Vec<String> {
 /// This currently forwards construction through [`ModelList::from_ids`] and is
 /// fallible only to preserve the crate-wide result-based call sites.
 pub fn resolve_model_list() -> Result<ModelList> {
-    Ok(ModelList::from_ids(resolve_model_ids()))
+    resolve_model_list_for_provider(Provider::Codex)
+}
+
+/// Builds a [`ModelList`] for the selected provider.
+///
+/// # Errors
+///
+/// This currently forwards construction through [`ModelList::from_ids`] and is
+/// fallible only to preserve the crate-wide result-based call sites.
+pub fn resolve_model_list_for_provider(provider: Provider) -> Result<ModelList> {
+    Ok(ModelList::from_ids(resolve_model_ids_for_provider(
+        provider,
+    )))
 }
 
 fn normalize_model_ids(ids: impl IntoIterator<Item = String>) -> Vec<String> {
@@ -60,5 +86,13 @@ mod tests {
 
         assert!(ids.iter().any(|id| id == "gpt-5.5"));
         assert!(!ids.iter().any(|id| id == "gpt-5.5-mini"));
+    }
+
+    #[test]
+    fn grok_defaults_include_grok_models() {
+        let ids = resolve_model_ids_for_provider(Provider::Grok);
+
+        assert!(ids.iter().any(|id| id == "grok-4.3"));
+        assert!(!ids.iter().any(|id| id == "gpt-5.5"));
     }
 }
