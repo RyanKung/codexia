@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo.png" alt="rotom logo" width="144">
+</p>
+
 # rotom
 
 [![CI](https://github.com/RyanKung/rotom/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/RyanKung/rotom/actions/workflows/ci.yml)
