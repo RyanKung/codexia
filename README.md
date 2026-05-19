@@ -6,6 +6,9 @@
 Rust gateway that logs in with Codex or Grok OAuth and exposes OpenAI- and
 Anthropic-compatible APIs.
 
+> Migration note: `codexia` is kept as a transition release. Future releases
+> will move to the new crate and command name `rotom`.
+
 ## Usage
 
 ```bash

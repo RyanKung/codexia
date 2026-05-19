@@ -45,7 +45,10 @@ or Grok OAuth.
 It helps clients that speak either the OpenAI Chat Completions API or the
 Anthropic Messages API call the selected upstream after you complete the OAuth
 login flow. Credentials are stored locally and can be refreshed automatically
-during requests or manually with the refresh command/API.";
+during requests or manually with the refresh command/API.
+
+Migration note: Codexia is kept as a transition release. Future releases will
+move to the new crate and command name rotom.";
 const CLI_AFTER_LONG_HELP: &str = "\
 Examples:
   codexia login
