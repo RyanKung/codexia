@@ -69,6 +69,8 @@ impl MessagesRequest {
     }
 }
 
+const CLAUDE_CODE_BILLING_HEADER_PREFIX: &str = "x-anthropic-billing-header:";
+
 /// Anthropic-compatible input message.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Message {
@@ -1258,16 +1260,36 @@ fn parallel_tool_calls_enabled(tool_choice: Option<&Value>) -> bool {
 
 pub(crate) fn system_prompt_text(system: Option<&SystemPrompt>) -> Option<String> {
     match system? {
-        SystemPrompt::Text(text) => Some(text.clone()),
+        SystemPrompt::Text(text) => sanitize_system_text(text),
         SystemPrompt::Blocks(blocks) => {
             let text = blocks
                 .iter()
                 .filter(|block| block.kind == "text")
                 .filter_map(|block| block.text.as_deref())
+                .filter_map(|text| sanitize_system_text(text))
                 .collect::<Vec<_>>()
                 .join("\n");
             (!text.is_empty()).then_some(text)
         }
+    }
+}
+
+pub(crate) fn sanitize_system_text(text: &str) -> Option<String> {
+    let stripped = strip_claude_code_billing_header_line(text)
+        .trim()
+        .to_owned();
+    (!stripped.is_empty()).then_some(stripped)
+}
+
+fn strip_claude_code_billing_header_line(text: &str) -> &str {
+    let trimmed = text.trim_start();
+    let Some(rest) = trimmed.strip_prefix(CLAUDE_CODE_BILLING_HEADER_PREFIX) else {
+        return text;
+    };
+
+    match rest.find('\n') {
+        Some(index) => rest[index + 1..].trim_start_matches(['\r', '\n']),
+        None => "",
     }
 }
 
@@ -1723,5 +1745,42 @@ mod tests {
         .unwrap();
 
         assert!(estimate_input_tokens(&request) > 0);
+    }
+
+    #[test]
+    fn strips_claude_code_billing_header_from_system_text() {
+        let system = SystemPrompt::Text(
+            "x-anthropic-billing-header: cc_version=2.1.38; cc_entrypoint=cli; cch=4873d;\n\nbe terse"
+                .into(),
+        );
+
+        assert_eq!(
+            system_prompt_text(Some(&system)).as_deref(),
+            Some("be terse")
+        );
+    }
+
+    #[test]
+    fn strips_claude_code_billing_header_blocks_from_system_prompt() {
+        let system = SystemPrompt::Blocks(vec![
+            SystemBlock {
+                kind: "text".into(),
+                text: Some(
+                    "x-anthropic-billing-header: cc_version=2.1.38; cc_entrypoint=cli; cch=4873d;"
+                        .into(),
+                ),
+                cache_control: None,
+            },
+            SystemBlock {
+                kind: "text".into(),
+                text: Some("be terse".into()),
+                cache_control: None,
+            },
+        ]);
+
+        assert_eq!(
+            system_prompt_text(Some(&system)).as_deref(),
+            Some("be terse")
+        );
     }
 }

@@ -2053,6 +2053,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn messages_ignore_unknown_claude_billing_header() {
+        let dir = TempDir::new().unwrap();
+        let store = AuthStore::new(dir.path().join("auth.json"));
+        store
+            .save(&Credentials {
+                access_token: "access".into(),
+                refresh_token: "refresh".into(),
+                expires_at: now_unix() + 600,
+                account_id: "acc_old".into(),
+            })
+            .unwrap();
+        let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let http = Client::new();
+        let state = AppState::new(
+            TokenManager::new(
+                store,
+                CodexOAuthClient::new_with_token_url(http.clone(), spawn_refresh_server().await),
+            ),
+            CodexClient::new(http, spawn_recording_codex_server(captured.clone()).await),
+            Some("secret".into()),
+            ModelList::from_ids(["gpt-5.5"]),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("secret"));
+        headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+        headers.insert(
+            "x-anthropic-billing-header",
+            HeaderValue::from_static("{\"cch\":\"bypass-third-party-cache\"}"),
+        );
+
+        let response = handlers::messages(
+            axum::extract::State(state),
+            headers,
+            Json(
+                serde_json::from_value(json!({
+                    "model": "gpt-5.5",
+                    "max_tokens": 128,
+                    "messages": [{"role": "user", "content": "hello"}]
+                }))
+                .unwrap(),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = {
+            let captured = captured.lock().await;
+            captured.last().cloned().unwrap()
+        };
+        assert!(body.get("x-anthropic-billing-header").is_none());
+        assert!(body.get("cch").is_none());
+        assert!(find_forbidden_key_path(&body, "x-anthropic-billing-header").is_none());
+        assert!(find_forbidden_key_path(&body, "cch").is_none());
+    }
+
+    #[tokio::test]
+    async fn messages_strip_claude_code_billing_block_from_system_prompt() {
+        let dir = TempDir::new().unwrap();
+        let store = AuthStore::new(dir.path().join("auth.json"));
+        store
+            .save(&Credentials {
+                access_token: "access".into(),
+                refresh_token: "refresh".into(),
+                expires_at: now_unix() + 600,
+                account_id: "acc_old".into(),
+            })
+            .unwrap();
+        let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let http = Client::new();
+        let state = AppState::new(
+            TokenManager::new(
+                store,
+                CodexOAuthClient::new_with_token_url(http.clone(), spawn_refresh_server().await),
+            ),
+            CodexClient::new(http, spawn_recording_codex_server(captured.clone()).await),
+            Some("secret".into()),
+            ModelList::from_ids(["gpt-5.5"]),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("secret"));
+
+        let response = handlers::messages(
+            axum::extract::State(state),
+            headers,
+            Json(
+                serde_json::from_value(json!({
+                    "model": "gpt-5.5",
+                    "max_tokens": 128,
+                    "system": "x-anthropic-billing-header: cc_version=2.1.38; cc_entrypoint=cli; cch=4873d;\n\nbe terse",
+                    "messages": [{"role": "user", "content": "hello"}]
+                }))
+                .unwrap(),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = {
+            let captured = captured.lock().await;
+            captured.last().cloned().unwrap()
+        };
+        assert_eq!(body["instructions"], "");
+        assert_eq!(body["input"][0]["role"], "developer");
+        assert_eq!(body["input"][0]["content"][0]["text"], "be terse");
+        assert!(find_forbidden_key_path(&body, "x-anthropic-billing-header").is_none());
+        assert!(find_forbidden_key_path(&body, "cch").is_none());
+    }
+
+    #[tokio::test]
     async fn messages_strip_cache_control_from_upstream_request() {
         let dir = TempDir::new().unwrap();
         let store = AuthStore::new(dir.path().join("auth.json"));

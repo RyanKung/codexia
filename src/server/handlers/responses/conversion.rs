@@ -385,17 +385,23 @@ fn anthropic_raw_input_items(request: &MessagesRequest) -> Vec<Value> {
 
 fn anthropic_system_items(system: &SystemPrompt) -> Vec<Value> {
     let parts = match system {
-        SystemPrompt::Text(text) => vec![json!({"type": "input_text", "text": text})],
+        SystemPrompt::Text(text) => crate::anthropic::sanitize_system_text(text)
+            .map(|text| vec![json!({"type": "input_text", "text": text})])
+            .unwrap_or_default(),
         SystemPrompt::Blocks(blocks) => blocks
             .iter()
             .filter_map(|block| {
-                block.text.as_ref().map(|text| {
-                    let mut value = json!({"type": "input_text", "text": text});
-                    if let Some(cache_control) = &block.cache_control {
-                        value["cache_control"] = cache_control.clone();
-                    }
-                    value
-                })
+                block
+                    .text
+                    .as_deref()
+                    .and_then(crate::anthropic::sanitize_system_text)
+                    .map(|text| {
+                        let mut value = json!({"type": "input_text", "text": text});
+                        if let Some(cache_control) = &block.cache_control {
+                            value["cache_control"] = cache_control.clone();
+                        }
+                        value
+                    })
             })
             .collect(),
     };
