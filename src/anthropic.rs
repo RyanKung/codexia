@@ -249,7 +249,7 @@ pub enum ResponseContentBlock {
         /// Parsed JSON tool input.
         input: Value,
     },
-    /// Non-standard Codexia extension for generated image output.
+    /// Non-standard rotom extension for generated image output.
     #[serde(rename = "image")]
     Image {
         /// Base64 image payload.

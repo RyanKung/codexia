@@ -84,7 +84,7 @@ impl GrokOAuthClient {
             .append_pair("state", &state)
             .append_pair("nonce", &create_state(&mut rng))
             .append_pair("plan", "generic")
-            .append_pair("referrer", "codexia");
+            .append_pair("referrer", "rotom");
 
         Ok(super::AuthorizationFlow {
             verifier,

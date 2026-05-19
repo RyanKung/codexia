@@ -1,12 +1,12 @@
 # Legal Notes
 
-Codexia is an unofficial compatibility gateway. It is not affiliated with,
+rotom is an unofficial compatibility gateway. It is not affiliated with,
 endorsed by, or supported by OpenAI, Anthropic, or xAI.
 
 This file is not legal advice. It is a practical summary of the main risk areas
-users should think about before deploying or distributing Codexia.
+users should think about before deploying or distributing rotom.
 
-Codexia is licensed under LGPLv3. That license permits commercial use of the
+rotom is licensed under LGPLv3. That license permits commercial use of the
 software itself. The main legal risk discussed here is different: whether your
 upstream OpenAI/Codex or xAI/Grok account, deployment model, branding, and data
 handling comply with the separate terms and policies that govern the services
@@ -14,7 +14,7 @@ you are connecting to.
 
 ## Intended Scope
 
-Codexia is best treated as a local, personal-use tool for compatibility
+rotom is best treated as a local, personal-use tool for compatibility
 testing, self-hosted automation, and development workflows against credentials
 you are authorized to use.
 
@@ -31,7 +31,7 @@ If your use case falls into one of those categories, legal review is prudent.
 
 ### 1. Upstream terms and account restrictions
 
-Codexia relies on upstream credentials and protocol compatibility layers. Even
+rotom relies on upstream credentials and protocol compatibility layers. Even
 if the software itself is open source, your use of it can still violate the
 terms or policies attached to the upstream account.
 
@@ -47,7 +47,7 @@ Questions to ask:
 
 ### 2. Branding and implied affiliation
 
-Codexia refers to OpenAI, Anthropic, xAI, Claude Code, ChatGPT, Codex, and Grok
+rotom refers to OpenAI, Anthropic, xAI, Claude Code, ChatGPT, Codex, and Grok
 for compatibility and integration purposes. That does not create permission to
 use their logos, brand assets, or product identity in a way that implies
 approval or partnership.
@@ -56,11 +56,11 @@ Practical rules:
 
 - keep "unofficial" and "not affiliated" language visible
 - do not ship official logos in your product, site, or marketing without permission
-- avoid naming, UI copy, or screenshots that suggest Codexia is an official gateway
+- avoid naming, UI copy, or screenshots that suggest rotom is an official gateway
 
 ### 3. Multi-user and hosted-service deployment
 
-The more Codexia looks like a shared service, the more risk shifts from hobby
+The more rotom looks like a shared service, the more risk shifts from hobby
 tooling toward account misuse, reseller restrictions, privacy obligations, and
 commercial contracting issues.
 
@@ -73,7 +73,7 @@ Risk increases when you:
 
 ### 4. Data handling and confidentiality
 
-If Codexia processes prompts, source code, images, files, or tool outputs for
+If rotom processes prompts, source code, images, files, or tool outputs for
 anyone other than yourself, you may also take on privacy, confidentiality, or
 security responsibilities.
 
@@ -96,7 +96,7 @@ You should evaluate:
 
 ## Repository Maintainer Notes
 
-If you maintain or distribute Codexia, it is prudent to:
+If you maintain or distribute rotom, it is prudent to:
 
 - keep the disclaimer visible in user-facing docs and CLI help
 - describe compatibility claims precisely rather than broadly

@@ -2127,7 +2127,7 @@ mod tests {
             let captured = captured.lock().await;
             captured.last().cloned().unwrap()
         };
-        assert!(body.get("codexia_anthropic_beta").is_none());
+        assert!(body.get("rotom_anthropic_beta").is_none());
     }
 
     #[tokio::test]

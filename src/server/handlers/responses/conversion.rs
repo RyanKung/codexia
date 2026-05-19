@@ -96,10 +96,10 @@ pub(in crate::server::handlers) fn anthropic_responses_request(
     let openai = to_openai_request(request)?;
     let raw_input_items = anthropic_raw_input_items(request);
     let mut extra = request.extra.clone();
-    extra.remove("codexia_anthropic_beta");
-    extra.remove("codexia_anthropic_version");
+    extra.remove("rotom_anthropic_beta");
+    extra.remove("rotom_anthropic_version");
     extra.insert(
-        "codexia_raw_input_items".to_owned(),
+        "rotom_raw_input_items".to_owned(),
         Value::Array(raw_input_items),
     );
 
@@ -198,7 +198,7 @@ pub(in crate::server::handlers) fn collect_response_input_items(
 
     if let Some(raw_items) = request
         .extra
-        .get("codexia_raw_input_items")
+        .get("rotom_raw_input_items")
         .and_then(Value::as_array)
     {
         input_items.extend(raw_items.iter().cloned());
@@ -644,7 +644,7 @@ fn local_compaction_payload(items: &[Value]) -> String {
         .join("\n");
     let summary = truncate_summary(&summary, 1_024);
     let payload = json!({
-        "provider": "codexia",
+        "provider": "rotom",
         "version": 1,
         "summary": summary,
     });
@@ -711,7 +711,7 @@ mod tests {
         );
         let items = converted
             .extra
-            .get("codexia_raw_input_items")
+            .get("rotom_raw_input_items")
             .and_then(Value::as_array)
             .unwrap();
         assert_eq!(items.len(), 2);
@@ -736,7 +736,7 @@ mod tests {
         let converted = anthropic_responses_request(&request).unwrap();
         let items = converted
             .extra
-            .get("codexia_raw_input_items")
+            .get("rotom_raw_input_items")
             .and_then(Value::as_array)
             .unwrap();
         assert_eq!(items.len(), 3);

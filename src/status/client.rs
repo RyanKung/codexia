@@ -104,7 +104,7 @@ fn status_headers(credentials: &Credentials) -> Result<HeaderMap> {
         HeaderName::from_static("chatgpt-account-id"),
         header_value(&credentials.account_id)?,
     );
-    headers.insert(USER_AGENT, HeaderValue::from_static("pi (rust; codexia)"));
+    headers.insert(USER_AGENT, HeaderValue::from_static("pi (rust; rotom)"));
     headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     Ok(headers)

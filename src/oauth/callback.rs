@@ -172,7 +172,7 @@ fn oauth_error_page(message: &str) -> String {
 
 fn html_page(message: &str) -> String {
     format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Codexia OAuth</title></head><body><p>{}</p></body></html>",
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>rotom OAuth</title></head><body><p>{}</p></body></html>",
         html_escape(message)
     )
 }

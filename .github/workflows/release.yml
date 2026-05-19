@@ -70,15 +70,15 @@ jobs:
           - name: Debian
             runner: ubuntu-latest
             asset_suffix: debian-x64
-            binary_name: codexia
+            binary_name: rotom
           - name: macOS
             runner: macos-latest
             asset_suffix: macos
-            binary_name: codexia
+            binary_name: rotom
           - name: Windows
             runner: windows-latest
             asset_suffix: windows-x64
-            binary_name: codexia.exe
+            binary_name: rotom.exe
 
     steps:
       - name: Check out repository
@@ -103,7 +103,7 @@ jobs:
           ASSET_SUFFIX: ${{ matrix.asset_suffix }}
           BINARY_NAME: ${{ matrix.binary_name }}
         run: |
-          asset="codexia-${ASSET_VERSION}-${ASSET_SUFFIX}"
+          asset="rotom-${ASSET_VERSION}-${ASSET_SUFFIX}"
           mkdir -p dist
           cp "target/release/${BINARY_NAME}" "./${BINARY_NAME}"
           tar -czf "dist/${asset}.tar.gz" "${BINARY_NAME}" README.md LICENSE
@@ -116,7 +116,7 @@ jobs:
           ASSET_SUFFIX: ${{ matrix.asset_suffix }}
           BINARY_NAME: ${{ matrix.binary_name }}
         run: |
-          $asset = "codexia-$env:ASSET_VERSION-$env:ASSET_SUFFIX"
+          $asset = "rotom-$env:ASSET_VERSION-$env:ASSET_SUFFIX"
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item "target/release/$env:BINARY_NAME" "$env:BINARY_NAME"
           Compress-Archive -Path $env:BINARY_NAME, README.md, LICENSE -DestinationPath "dist/$asset.zip" -Force

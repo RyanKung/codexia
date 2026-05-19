@@ -1,24 +1,21 @@
-# codexia
+# rotom
 
-[![CI](https://github.com/RyanKung/codexia/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/RyanKung/codexia/actions/workflows/ci.yml)
-[![Release](https://github.com/RyanKung/codexia/actions/workflows/release.yml/badge.svg?branch=master)](https://github.com/RyanKung/codexia/actions/workflows/release.yml)
+[![CI](https://github.com/RyanKung/rotom/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/RyanKung/rotom/actions/workflows/ci.yml)
+[![Release](https://github.com/RyanKung/rotom/actions/workflows/release.yml/badge.svg?branch=master)](https://github.com/RyanKung/rotom/actions/workflows/release.yml)
 
 Rust gateway that logs in with Codex or Grok OAuth and exposes OpenAI- and
 Anthropic-compatible APIs.
 
-> Migration note: `codexia` is kept as a transition release. Future releases
-> will move to the new crate and command name `rotom`.
-
 ## Usage
 
 ```bash
-cargo install codexia
-codexia login
-codexia config
-codexia serve
+cargo install rotom
+rotom login
+rotom config
+rotom serve
 
 # later, update to the latest published release
-codexia update
+rotom update
 ```
 
 `login` prints the Codex OAuth URL. Complete the login in a browser, then paste
@@ -30,8 +27,8 @@ reachable from the public internet.
 Grok OAuth uses the same local credential flow with xAI's OAuth endpoints:
 
 ```bash
-codexia login --provider grok
-codexia serve --bind 127.0.0.1:14550 --api-key local-secret
+rotom login --provider grok
+rotom serve --bind 127.0.0.1:14550 --api-key local-secret
 ```
 
 Credentials are stored per provider, so logging in to Grok does not replace
@@ -75,14 +72,14 @@ export ANTHROPIC_MODEL="gpt-5.5"
 claude
 ```
 
-`ANTHROPIC_BASE_URL` should point at the Codexia server root, not `/v1`,
+`ANTHROPIC_BASE_URL` should point at the rotom server root, not `/v1`,
 because Anthropic clients append `/v1/messages` themselves.
 
 Minimal Claude Code flow:
 
 ```bash
-codexia login
-codexia serve --bind 127.0.0.1:14550 --api-key local-secret
+rotom login
+rotom serve --bind 127.0.0.1:14550 --api-key local-secret
 
 export ANTHROPIC_BASE_URL=http://127.0.0.1:14550
 export ANTHROPIC_AUTH_TOKEN=local-secret
@@ -100,28 +97,28 @@ ANTHROPIC_MODEL="gpt-5.5" \
 claude -p "Reply with the single word OK"
 ```
 
-Codexia defaults unsupported Anthropic-native model ids such as
+rotom defaults unsupported Anthropic-native model ids such as
 `claude-sonnet-*` to `gpt-5.5`. To override that fallback explicitly:
 
 ```bash
-CODEXIA_MODEL_FALLBACK=gpt-5.5 codexia serve --api-key local-secret
+ROTOM_MODEL_FALLBACK=gpt-5.5 rotom serve --api-key local-secret
 ```
 
-Codexia rewrites known unsupported Anthropic model ids to the effective
+rotom rewrites known unsupported Anthropic model ids to the effective
 fallback before calling Codex. When you do not configure one explicitly, the
 default fallback is `gpt-5.5`.
 
 Common pitfalls:
 
 - Do not set `ANTHROPIC_BASE_URL` to `http://127.0.0.1:14550/v1`; Claude Code appends `/v1/messages` itself.
-- Use a model that `/v1/models` actually returns, such as `gpt-5.5`. If Claude Code defaults to `claude-sonnet-*`, the request will fail because Codexia proxies Codex models, not Anthropic-hosted model IDs.
+- Use a model that `/v1/models` actually returns, such as `gpt-5.5`. If Claude Code defaults to `claude-sonnet-*`, the request will fail because rotom proxies Codex models, not Anthropic-hosted model IDs.
 - `ANTHROPIC_AUTH_TOKEN` is only the local gateway key configured with `--api-key`; it is not your upstream OpenAI/Codex OAuth token.
-- If you prefer a background service, install the daemon first and then point `ANTHROPIC_BASE_URL` at the daemon address instead of running `codexia serve` manually.
+- If you prefer a background service, install the daemon first and then point `ANTHROPIC_BASE_URL` at the daemon address instead of running `rotom serve` manually.
 
 Optional local API key protection:
 
 ```bash
-CODEXIA_API_KEY=local-secret codexia serve
+ROTOM_API_KEY=local-secret rotom serve
 curl http://127.0.0.1:14550/v1/models -H 'authorization: Bearer local-secret'
 ```
 
@@ -129,21 +126,21 @@ You can combine it with the model fallback when running Claude Code against the
 gateway:
 
 ```bash
-CODEXIA_API_KEY=local-secret \
-CODEXIA_MODEL_FALLBACK=gpt-5.5 \
-codexia serve
+ROTOM_API_KEY=local-secret \
+ROTOM_MODEL_FALLBACK=gpt-5.5 \
+rotom serve
 ```
 
 Interactive runtime configuration:
 
 ```bash
-codexia config
-codexia config show
-codexia config reset
+rotom config
+rotom config show
+rotom config reset
 ```
 
-The config file is stored at `~/.codexia/config.json` by default and is used as
-the fallback source for `codexia serve` and `codexia daemon install`.
+The config file is stored at `~/.rotom/config.json` by default and is used as
+the fallback source for `rotom serve` and `rotom daemon install`.
 
 Refresh stored OAuth tokens while the server is running:
 
@@ -152,13 +149,13 @@ curl -X POST http://127.0.0.1:14550/v1/auth/refresh \
   -H 'authorization: Bearer local-secret'
 ```
 
-From the CLI, `codexia refresh` refreshes all saved providers. Use
-`codexia refresh --provider grok` to refresh only one provider.
+From the CLI, `rotom refresh` refreshes all saved providers. Use
+`rotom refresh --provider grok` to refresh only one provider.
 
 Check token expiry, account metadata, and rate-limit windows:
 
 ```bash
-codexia status
+rotom status
 ```
 
 Fetch the same status data over HTTP:
@@ -209,35 +206,35 @@ Example response:
 }
 ```
 
-Install Codexia as a per-user background daemon:
+Install rotom as a per-user background daemon:
 
 ```bash
-codexia daemon install
-codexia daemon reinstall
-codexia daemon start
-codexia daemon status
-codexia daemon restart
-codexia daemon stop
-codexia daemon uninstall
+rotom daemon install
+rotom daemon reinstall
+rotom daemon start
+rotom daemon status
+rotom daemon restart
+rotom daemon stop
+rotom daemon uninstall
 ```
 
-On macOS, Codexia installs a LaunchAgent at
-`~/Library/LaunchAgents/com.codexia.daemon.plist`. On Linux, it installs a
-systemd user unit at `~/.config/systemd/user/codexia.service`.
+On macOS, rotom installs a LaunchAgent at
+`~/Library/LaunchAgents/com.rotom.daemon.plist`. On Linux, it installs a
+systemd user unit at `~/.config/systemd/user/rotom.service`.
 Windows does not currently implement native daemon/service management; use WSL
-and run the Linux build there if you need `codexia daemon` commands.
+and run the Linux build there if you need `rotom daemon` commands.
 
 On Linux, inspect the per-user service with:
 
 ```bash
-codexia daemon status
-systemctl --user status codexia.service
+rotom daemon status
+systemctl --user status rotom.service
 ```
 
-The daemon runs `codexia serve` with the options passed at install time:
+The daemon runs `rotom serve` with the options passed at install time:
 
 ```bash
-codexia daemon install \
+rotom daemon install \
   --bind 127.0.0.1:14550 \
   --api-key local-secret
 ```
@@ -245,9 +242,9 @@ codexia daemon install \
 List the local model registry grouped by provider:
 
 ```bash
-codexia models
-codexia models --provider openai
-codexia models --provider grok
+rotom models
+rotom models --provider openai
+rotom models --provider grok
 ```
 
 Models returned by `/v1/models` include the OpenAI/Codex registry:
@@ -273,11 +270,11 @@ grok-4.3-fast
 grok-4
 ```
 
-Credentials are stored at `~/.codexia/auth.json` by default. Override with
-`--auth-file`, `CODEXIA_AUTH_FILE`, or `CODEXIA_HOME`.
+Credentials are stored at `~/.rotom/auth.json` by default. Override with
+`--auth-file`, `ROTOM_AUTH_FILE`, or `ROTOM_HOME`.
 
 Runtime config supports `model_fallback`, and the CLI accepts
-`--model-fallback` / `CODEXIA_MODEL_FALLBACK`. When unset, Codexia defaults the
+`--model-fallback` / `ROTOM_MODEL_FALLBACK`. When unset, rotom defaults the
 fallback to `gpt-5.5`.
 
 OpenAI compatibility currently covers:
@@ -289,15 +286,15 @@ OpenAI compatibility currently covers:
 - `POST /v1/responses/compact`
 - `POST /v1/responses/input_tokens`
 
-On `POST /v1/chat/completions`, Codexia accepts common OpenAI compatibility
+On `POST /v1/chat/completions`, rotom accepts common OpenAI compatibility
 fields such as `temperature`, `max_tokens`, `max_completion_tokens`, and
 `max_output_tokens`, but the current Codex upstream rejects those parameters.
-Codexia therefore accepts them without error and omits them from the upstream
+rotom therefore accepts them without error and omits them from the upstream
 Codex request, so they should be treated as compatibility no-ops rather than
 effective sampling or output-length controls.
 
 `/v1/responses` currently supports `previous_response_id` only as an
-in-memory continuation mechanism within the same running Codexia process. It is
+in-memory continuation mechanism within the same running rotom process. It is
 not exposed as a public retrievable/deletable response resource, and it should
 not be treated as durable storage across daemon restarts or process exits.
 
@@ -311,10 +308,10 @@ Current image-generation caveats:
 - OpenAI `POST /v1/responses` supports streaming image-generation events
 - `POST /v1/images/generations` remains non-streaming
 - Anthropic `POST /v1/messages` image generation streaming is exposed as a
-  Codexia extension that emits `image` content blocks only once the upstream
+  rotom extension that emits `image` content blocks only once the upstream
   response completes
 - generated images are returned as base64 payloads
-- Anthropic compatibility uses a Codexia extension that returns
+- Anthropic compatibility uses a rotom extension that returns
   `content: [{"type":"image","source":{"type":"base64",...}}]` on
   `POST /v1/messages` when the request includes a tool named `image_generation`
 
@@ -351,7 +348,7 @@ discovery, PKCE, manual callback paste, and xAI Responses requests under
 
 ## Disclaimer
 
-Codexia is an unofficial compatibility tool. It is not affiliated with,
+rotom is an unofficial compatibility tool. It is not affiliated with,
 endorsed by, or supported by OpenAI, Anthropic, or xAI.
 
 You are responsible for making sure your usage complies with the terms,
@@ -363,6 +360,6 @@ change those upstream restrictions.
 
 ## License
 
-Copyright (c) 2026 Codexia contributors.
+Copyright (c) 2026 rotom contributors.
 
 Licensed under the GNU Lesser General Public License v3.0 only. See [LICENSE](LICENSE).

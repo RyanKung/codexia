@@ -119,7 +119,7 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
 /// Creates an OpenAI-compatible Responses API object.
 ///
 /// `previous_response_id` is supported only through local in-memory
-/// continuation state while this Codexia process remains alive.
+/// continuation state while this rotom process remains alive.
 pub async fn responses(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -545,7 +545,7 @@ fn apply_anthropic_headers(headers: &HeaderMap, request: &mut MessagesRequest) {
         .and_then(|value| value.to_str().ok())
     {
         request.extra.insert(
-            "codexia_anthropic_version".to_owned(),
+            "rotom_anthropic_version".to_owned(),
             Value::String(version.to_owned()),
         );
     }
@@ -562,7 +562,7 @@ fn apply_anthropic_headers(headers: &HeaderMap, request: &mut MessagesRequest) {
     if !betas.is_empty() {
         request
             .extra
-            .insert("codexia_anthropic_beta".to_owned(), Value::Array(betas));
+            .insert("rotom_anthropic_beta".to_owned(), Value::Array(betas));
     }
 }
 

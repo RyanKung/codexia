@@ -98,7 +98,7 @@ pub struct ResponsesRequest {
     pub store: Option<bool>,
     /// Identifier of a previous response to continue from.
     ///
-    /// In Codexia this is implemented as best-effort in-memory continuation
+    /// In rotom this is implemented as best-effort in-memory continuation
     /// within the same running process rather than as a durable response
     /// resource lifecycle.
     #[serde(default)]

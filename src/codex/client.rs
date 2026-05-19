@@ -308,7 +308,7 @@ pub fn codex_headers(credentials: &Credentials) -> Result<HeaderMap> {
         HeaderName::from_static("originator"),
         HeaderValue::from_static("pi"),
     );
-    headers.insert(USER_AGENT, HeaderValue::from_static("pi (rust; codexia)"));
+    headers.insert(USER_AGENT, HeaderValue::from_static("pi (rust; rotom)"));
     headers.insert(
         HeaderName::from_static("openai-beta"),
         HeaderValue::from_static("responses=experimental"),
@@ -329,7 +329,7 @@ pub fn grok_headers(credentials: &Credentials) -> Result<HeaderMap> {
         AUTHORIZATION,
         header_value(&format!("Bearer {}", credentials.access_token))?,
     );
-    headers.insert(USER_AGENT, HeaderValue::from_static("codexia"));
+    headers.insert(USER_AGENT, HeaderValue::from_static("rotom"));
     headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     Ok(headers)

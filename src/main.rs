@@ -3,14 +3,15 @@
 #![deny(clippy::pedantic)]
 #![deny(clippy::nursery)]
 
-//! `codexia` command-line entrypoint.
+//! `rotom` command-line entrypoint.
 //!
 //! The binary provides login, serving, token refresh, status inspection, and
 //! daemon management commands on top of the library modules exposed by
-//! `codexia`.
+//! `rotom`.
 
 use clap::{ArgAction, Args, Parser, Subcommand};
-use codexia::{
+use reqwest::Client;
+use rotom::{
     Error, Result,
     codex::client::CodexClient,
     config::{AppConfig, AppConfigStore, AuthStore, Credentials, Provider, now_unix},
@@ -25,7 +26,6 @@ use codexia::{
     timefmt::{format_duration, format_status_time_human},
     token::TokenManager,
 };
-use reqwest::Client;
 use std::{
     io::{self, IsTerminal, Write},
     net::SocketAddr,
@@ -39,61 +39,58 @@ const INTERACTIVE_TOKEN_STATUS_INTERVAL: Duration = Duration::from_secs(1);
 const LOG_TOKEN_STATUS_INTERVAL: Duration = Duration::from_secs(60);
 const DEFAULT_MODEL_FALLBACK: &str = "gpt-5.5";
 const CLI_LONG_ABOUT: &str = "\
-Codexia is a local OpenAI- and Anthropic-compatible API gateway backed by Codex
+rotom is a local OpenAI- and Anthropic-compatible API gateway backed by Codex
 or Grok OAuth.
 
 It helps clients that speak either the OpenAI Chat Completions API or the
 Anthropic Messages API call the selected upstream after you complete the OAuth
 login flow. Credentials are stored locally and can be refreshed automatically
-during requests or manually with the refresh command/API.
-
-Migration note: Codexia is kept as a transition release. Future releases will
-move to the new crate and command name rotom.";
+during requests or manually with the refresh command/API.";
 const CLI_AFTER_LONG_HELP: &str = "\
 Examples:
-  codexia login
-  codexia login --provider grok
-  codexia config
-  codexia config show
-  codexia serve
-  codexia serve --bind 127.0.0.1:14550 --api-key local-secret
-  codexia daemon install
-  codexia daemon reinstall
-  codexia daemon start
-  codexia daemon status
-  codexia models
-  codexia models --provider grok
-  codexia refresh
-  codexia status
-  codexia update
+  rotom login
+  rotom login --provider grok
+  rotom config
+  rotom config show
+  rotom serve
+  rotom serve --bind 127.0.0.1:14550 --api-key local-secret
+  rotom daemon install
+  rotom daemon reinstall
+  rotom daemon start
+  rotom daemon status
+  rotom models
+  rotom models --provider grok
+  rotom refresh
+  rotom status
+  rotom update
   curl -X POST http://127.0.0.1:14550/v1/auth/refresh \\
     -H 'authorization: Bearer local-secret'
 
 Environment:
-  CODEXIA_API_KEY          Optional local API key for server endpoints
-  CODEXIA_PROVIDER         Upstream provider: codex or grok
-  CODEXIA_MODEL_FALLBACK   Fallback for unsupported Anthropic model ids
-  CODEXIA_AUTH_FILE        Override the credential file path
-  CODEXIA_HOME             Override the default config home
+  ROTOM_API_KEY          Optional local API key for server endpoints
+  ROTOM_PROVIDER         Upstream provider: codex or grok
+  ROTOM_MODEL_FALLBACK   Fallback for unsupported Anthropic model ids
+  ROTOM_AUTH_FILE        Override the credential file path
+  ROTOM_HOME             Override the default config home
 Files:
-  Credentials default to ~/.codexia/auth.json.
-  Runtime config defaults to ~/.codexia/config.json.
+  Credentials default to ~/.rotom/auth.json.
+  Runtime config defaults to ~/.rotom/config.json.
 
 Disclaimer:
-  Codexia is an unofficial tool and is not affiliated with, endorsed by, or
+  rotom is an unofficial tool and is not affiliated with, endorsed by, or
   supported by OpenAI, Anthropic, or xAI. Use it at your own risk, make sure your
   usage complies with the terms that apply to your account and the upstream
   services, and do not assume the LGPLv3 license overrides upstream account
   restrictions on sharing or reselling personal OAuth-backed access.
 
 Copyright:
-  Copyright (c) 2026 Codexia contributors. Licensed under the GNU Lesser
+  Copyright (c) 2026 rotom contributors. Licensed under the GNU Lesser
   General Public License v3.0 only.";
 
 /// Top-level CLI parser.
 #[derive(Debug, Parser)]
 #[command(
-    name = "codexia",
+    name = "rotom",
     version,
     about = "OpenAI- and Anthropic-compatible API gateway backed by OAuth providers",
     long_about = CLI_LONG_ABOUT,
@@ -124,7 +121,7 @@ enum Command {
         auth_file: Option<PathBuf>,
         #[arg(
             long,
-            env = "CODEXIA_PROVIDER",
+            env = "ROTOM_PROVIDER",
             default_value = "codex",
             value_name = "PROVIDER",
             help = "OAuth provider to authenticate: codex or grok"
@@ -140,7 +137,7 @@ enum Command {
     },
     #[command(
         about = "Manage persisted runtime configuration",
-        long_about = "Interactively save or inspect default host, port, and API key stored in the Codexia config file."
+        long_about = "Interactively save or inspect default host, port, and API key stored in the rotom config file."
     )]
     Config {
         #[command(subcommand)]
@@ -157,21 +154,21 @@ enum Command {
         auth_file: Option<PathBuf>,
         #[arg(
             long,
-            env = "CODEXIA_API_KEY",
+            env = "ROTOM_API_KEY",
             value_name = "KEY",
             help = "Optional local API key accepted as Bearer token or x-api-key"
         )]
         api_key: Option<String>,
         #[arg(
             long,
-            env = "CODEXIA_PROVIDER",
+            env = "ROTOM_PROVIDER",
             value_name = "PROVIDER",
             help = "Upstream provider to serve: codex or grok"
         )]
         provider: Option<String>,
         #[arg(
             long,
-            env = "CODEXIA_MODEL_FALLBACK",
+            env = "ROTOM_MODEL_FALLBACK",
             value_name = "MODEL",
             help = "Fallback model for unsupported Anthropic model ids such as claude-sonnet-*"
         )]
@@ -186,7 +183,7 @@ enum Command {
         auth_file: Option<PathBuf>,
         #[arg(
             long,
-            env = "CODEXIA_PROVIDER",
+            env = "ROTOM_PROVIDER",
             value_name = "PROVIDER",
             help = "OAuth provider to refresh: codex or grok. When omitted, refreshes all saved providers."
         )]
@@ -202,7 +199,7 @@ enum Command {
     },
     #[command(
         about = "List available models grouped by provider",
-        long_about = "Print the model identifiers Codexia exposes through /v1/models, grouped by upstream provider. Use --provider to list only one provider."
+        long_about = "Print the model identifiers rotom exposes through /v1/models, grouped by upstream provider. Use --provider to list only one provider."
     )]
     Models {
         #[arg(
@@ -213,8 +210,8 @@ enum Command {
         provider: Option<String>,
     },
     #[command(
-        about = "Install the latest Codexia release with cargo",
-        long_about = "Run `cargo install --locked --force codexia` so the currently installed Codexia binary is updated to the latest published release. Requires `cargo` to be available on PATH."
+        about = "Install the latest rotom release with cargo",
+        long_about = "Run `cargo install --locked --force rotom` so the currently installed rotom binary is updated to the latest published release. Requires `cargo` to be available on PATH."
     )]
     Update {
         #[arg(
@@ -225,8 +222,8 @@ enum Command {
         version: Option<String>,
     },
     #[command(
-        about = "Install and control the background Codexia service",
-        long_about = "Install and control Codexia as a per-user background service. macOS uses launchd LaunchAgents; Linux uses systemd user services."
+        about = "Install and control the background rotom service",
+        long_about = "Install and control rotom as a per-user background service. macOS uses launchd LaunchAgents; Linux uses systemd user services."
     )]
     Daemon {
         #[command(subcommand)]
@@ -238,24 +235,24 @@ enum Command {
 #[derive(Debug, Subcommand)]
 enum DaemonCommand {
     #[command(
-        about = "Install Codexia as a per-user autostart service",
-        long_about = "Write the service definition for the current user and enable autostart. Use `codexia daemon start` to start it immediately."
+        about = "Install rotom as a per-user autostart service",
+        long_about = "Write the service definition for the current user and enable autostart. Use `rotom daemon start` to start it immediately."
     )]
     Install(#[command(flatten)] DaemonInstallCliOptions),
     #[command(
-        about = "Reinstall Codexia with updated service configuration",
+        about = "Reinstall rotom with updated service configuration",
         long_about = "Remove the existing per-user daemon definition if present, then install a fresh one using the provided options and saved runtime config defaults."
     )]
     Reinstall(#[command(flatten)] DaemonInstallCliOptions),
-    #[command(about = "Start the installed Codexia daemon")]
+    #[command(about = "Start the installed rotom daemon")]
     Start,
-    #[command(about = "Restart the installed Codexia daemon")]
+    #[command(about = "Restart the installed rotom daemon")]
     Restart,
-    #[command(about = "Show the installed Codexia daemon status")]
+    #[command(about = "Show the installed rotom daemon status")]
     Status,
-    #[command(about = "Stop the installed Codexia daemon")]
+    #[command(about = "Stop the installed rotom daemon")]
     Stop,
-    #[command(about = "Disable and remove the installed Codexia daemon")]
+    #[command(about = "Disable and remove the installed rotom daemon")]
     Uninstall,
 }
 
@@ -274,7 +271,7 @@ struct DaemonInstallCliOptions {
     #[arg(
         long,
         value_name = "PATH",
-        help = "Codexia executable to run; defaults to the current executable"
+        help = "rotom executable to run; defaults to the current executable"
     )]
     executable: Option<PathBuf>,
     #[arg(
@@ -287,21 +284,21 @@ struct DaemonInstallCliOptions {
     auth_file: Option<PathBuf>,
     #[arg(
         long,
-        env = "CODEXIA_API_KEY",
+        env = "ROTOM_API_KEY",
         value_name = "KEY",
         help = "Optional local API key accepted as Bearer token or x-api-key"
     )]
     api_key: Option<String>,
     #[arg(
         long,
-        env = "CODEXIA_PROVIDER",
+        env = "ROTOM_PROVIDER",
         value_name = "PROVIDER",
         help = "Upstream provider to serve: codex or grok"
     )]
     provider: Option<String>,
     #[arg(
         long,
-        env = "CODEXIA_MODEL_FALLBACK",
+        env = "ROTOM_MODEL_FALLBACK",
         value_name = "MODEL",
         help = "Fallback model for unsupported Anthropic model ids such as claude-sonnet-*"
     )]
@@ -423,15 +420,15 @@ const fn model_provider_label(provider: Provider) -> &'static str {
     }
 }
 
-/// Reinstalls Codexia from crates.io through Cargo.
+/// Reinstalls rotom from crates.io through Cargo.
 fn update(version: Option<&str>) -> Result<()> {
     let mut command = build_update_command(version);
     println!("running {command:?}");
     let status = command.status()?;
     if status.success() {
         match version {
-            Some(version) => println!("updated codexia to version {version}"),
-            None => println!("updated codexia to the latest published release"),
+            Some(version) => println!("updated rotom to version {version}"),
+            None => println!("updated rotom to the latest published release"),
         }
         Ok(())
     } else {
@@ -441,11 +438,11 @@ fn update(version: Option<&str>) -> Result<()> {
     }
 }
 
-/// Builds the Cargo command used by `codexia update`.
+/// Builds the Cargo command used by `rotom update`.
 #[must_use]
 fn build_update_command(version: Option<&str>) -> ProcessCommand {
     let mut command = ProcessCommand::new("cargo");
-    command.args(["install", "--locked", "--force", "codexia"]);
+    command.args(["install", "--locked", "--force", "rotom"]);
     if let Some(version) = version {
         command.args(["--version", version]);
     }
@@ -533,7 +530,7 @@ fn configure(store: &AppConfigStore) -> Result<()> {
         existing.api_key.as_deref(),
     )?;
     let auth_file = prompt_optional_path(
-        "Credential file path (leave blank for default ~/.codexia/auth.json)",
+        "Credential file path (leave blank for default ~/.rotom/auth.json)",
         existing.auth_file.as_deref(),
     )?;
     let provider = prompt_string("Provider", existing.provider.unwrap_or_default().as_str())?
@@ -566,7 +563,7 @@ fn show_config(store: &AppConfigStore) -> Result<()> {
             Ok(())
         }
         None => Err(Error::config(format!(
-            "no runtime config found at {}; run `codexia config` first",
+            "no runtime config found at {}; run `rotom config` first",
             store.path().display()
         ))),
     }
@@ -664,13 +661,13 @@ async fn refresh(store: AuthStore, provider: Option<String>) -> Result<()> {
         let provider = provider.parse::<Provider>()?;
         store.load_provider(provider)?.ok_or_else(|| {
             Error::config(format!(
-                "not logged in for {provider}; run `codexia login --provider {provider}` first"
+                "not logged in for {provider}; run `rotom login --provider {provider}` first"
             ))
         })?
     } else {
         let all = store.load_all()?;
         if all.is_empty() {
-            return Err(Error::config("not logged in; run `codexia login` first"));
+            return Err(Error::config("not logged in; run `rotom login` first"));
         }
         for credentials in all {
             let refreshed = refresh_credentials(&credentials).await?;
@@ -706,7 +703,7 @@ async fn status(store: AuthStore) -> Result<()> {
     let http = Client::new();
     let stored = store
         .load()?
-        .ok_or_else(|| Error::config("not logged in; run `codexia login` first"))?;
+        .ok_or_else(|| Error::config("not logged in; run `rotom login` first"))?;
     let provider = stored.provider;
     let token_manager = TokenManager::new_for_provider(store, provider, http.clone());
     let credentials = token_manager.credentials().await?;
@@ -908,7 +905,7 @@ async fn token_expiry_status(token_manager: &TokenManager) -> String {
             |error| format!("token refresh failed: {error}"),
             |credentials| token_expiry_message(&credentials),
         ),
-        None => "token status unavailable: not logged in; run `codexia login` first".to_owned(),
+        None => "token status unavailable: not logged in; run `rotom login` first".to_owned(),
     }
 }
 
@@ -944,8 +941,8 @@ mod tests {
         AppConfig, DEFAULT_MODEL_FALLBACK, bind_from_config, build_update_command, format_models,
         resolve_model_fallback,
     };
-    use codexia::config::Provider;
-    use codexia::timefmt::format_duration;
+    use rotom::config::Provider;
+    use rotom::timefmt::format_duration;
 
     #[test]
     fn reuses_shared_duration_formatting() {
@@ -975,7 +972,7 @@ mod tests {
             .map(|item| item.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
 
-        assert_eq!(args, ["install", "--locked", "--force", "codexia"]);
+        assert_eq!(args, ["install", "--locked", "--force", "rotom"]);
     }
 
     #[test]
@@ -992,7 +989,7 @@ mod tests {
                 "install",
                 "--locked",
                 "--force",
-                "codexia",
+                "rotom",
                 "--version",
                 "0.3.3"
             ]

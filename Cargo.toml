@@ -1,21 +1,21 @@
 [package]
-name = "codexia"
-version = "1.0.5"
+name = "rotom"
+version = "1.1.0"
 edition = "2024"
 rust-version = "1.86"
 description = "OpenAI- and Anthropic-compatible local API gateway backed by OAuth providers."
 license = "LGPL-3.0-only"
 readme = "README.md"
-repository = "https://github.com/RyanKung/codexia"
-homepage = "https://github.com/RyanKung/codexia"
-documentation = "https://docs.rs/codexia"
+repository = "https://github.com/RyanKung/rotom"
+homepage = "https://github.com/RyanKung/rotom"
+documentation = "https://docs.rs/rotom"
 keywords = ["openai", "anthropic", "codex", "claude-code", "gateway"]
 categories = ["command-line-utilities", "api-bindings", "web-programming::http-server"]
-default-run = "codexia"
+default-run = "rotom"
 include = ["build.rs", "src/**/*", "README.md", "LICENSE", "Cargo.toml", "Cargo.lock"]
 
 [[bin]]
-name = "codexia"
+name = "rotom"
 path = "src/main.rs"
 
 [package.metadata.docs.rs]

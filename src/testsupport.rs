@@ -24,7 +24,7 @@ impl TempDir {
     pub fn new() -> io::Result<Self> {
         let mut path = env::temp_dir();
         path.push(format!(
-            "codexia-test-{}-{}-{}",
+            "rotom-test-{}-{}-{}",
             std::process::id(),
             unix_timestamp_nanos(),
             NEXT_TEMP_DIR_ID.fetch_add(1, Ordering::Relaxed),

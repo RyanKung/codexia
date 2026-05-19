@@ -9,7 +9,7 @@ fn main() {
         Ok(output) => output,
         Err(error) => {
             println!(
-                "cargo:warning=codexia could not determine the active rustc version from `{rustc}`: {error}"
+                "cargo:warning=rotom could not determine the active rustc version from `{rustc}`: {error}"
             );
             return;
         }
@@ -19,7 +19,7 @@ fn main() {
         Ok(text) => text,
         Err(error) => {
             println!(
-                "cargo:warning=codexia could not decode the active rustc version output as UTF-8: {error}"
+                "cargo:warning=rotom could not decode the active rustc version output as UTF-8: {error}"
             );
             return;
         }
@@ -29,7 +29,7 @@ fn main() {
         Some(version) => version,
         None => {
             println!(
-                "cargo:warning=codexia could not parse the active rustc version from `{}`",
+                "cargo:warning=rotom could not parse the active rustc version from `{}`",
                 version_text.trim()
             );
             return;
@@ -38,7 +38,7 @@ fn main() {
 
     if (major, minor) < (MIN_RUSTC_MAJOR, MIN_RUSTC_MINOR) {
         panic!(
-            "codexia requires rustc {}.{} or newer, but `{}` is active. \
+            "rotom requires rustc {}.{} or newer, but `{}` is active. \
 Update Rust with `rustup update stable` or install a newer toolchain, then retry.",
             MIN_RUSTC_MAJOR,
             MIN_RUSTC_MINOR,

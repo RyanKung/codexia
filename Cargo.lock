@@ -211,31 +211,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
-name = "codexia"
-version = "1.0.5"
-dependencies = [
- "async-stream",
- "axum",
- "base64",
- "bytes",
- "chrono",
- "clap",
- "futures-util",
- "hex",
- "rand",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
- "tokio",
- "tower",
- "tracing",
- "tracing-subscriber",
- "url",
-]
-
-[[package]]
 name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -945,6 +920,31 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rotom"
+version = "1.1.0"
+dependencies = [
+ "async-stream",
+ "axum",
+ "base64",
+ "bytes",
+ "chrono",
+ "clap",
+ "futures-util",
+ "hex",
+ "rand",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "url",
 ]
 
 [[package]]

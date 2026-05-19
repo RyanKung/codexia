@@ -152,18 +152,18 @@ impl AuthStore {
     ///
     /// # Errors
     ///
-    /// Returns an error when neither `CODEXIA_AUTH_FILE` nor a usable home
+    /// Returns an error when neither `ROTOM_AUTH_FILE` nor a usable home
     /// directory environment variable is available.
     pub fn default_path() -> Result<PathBuf> {
-        if let Ok(path) = env::var("CODEXIA_AUTH_FILE") {
+        if let Ok(path) = env::var("ROTOM_AUTH_FILE") {
             return Ok(PathBuf::from(path));
         }
 
-        let home = env::var("CODEXIA_HOME")
+        let home = env::var("ROTOM_HOME")
             .or_else(|_| env::var("HOME"))
             .map_err(|_| Error::config("HOME is not set; pass --auth-file explicitly"))?;
 
-        Ok(PathBuf::from(home).join(".codexia").join("auth.json"))
+        Ok(PathBuf::from(home).join(".rotom").join("auth.json"))
     }
 
     /// Creates a credential store that uses the default path resolution rules.
@@ -283,9 +283,9 @@ impl AppConfigStore {
     ///
     /// # Errors
     ///
-    /// Returns an error when the `codexia` home directory cannot be resolved.
+    /// Returns an error when the `rotom` home directory cannot be resolved.
     pub fn default_path() -> Result<PathBuf> {
-        Ok(codexia_home()?.join("config.json"))
+        Ok(rotom_home()?.join("config.json"))
     }
 
     /// Creates a configuration store that uses the default path resolution rules.
@@ -381,14 +381,14 @@ fn write_secret_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     fs::write(path, bytes)
 }
 
-fn codexia_home() -> Result<PathBuf> {
-    if let Ok(path) = env::var("CODEXIA_HOME") {
+fn rotom_home() -> Result<PathBuf> {
+    if let Ok(path) = env::var("ROTOM_HOME") {
         return Ok(PathBuf::from(path));
     }
 
     let home = env::var("HOME")
         .map_err(|_| Error::config("HOME is not set; pass --auth-file explicitly"))?;
-    Ok(PathBuf::from(home).join(".codexia"))
+    Ok(PathBuf::from(home).join(".rotom"))
 }
 
 #[cfg(test)]

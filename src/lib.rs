@@ -3,7 +3,7 @@
 #![deny(clippy::pedantic)]
 #![deny(clippy::nursery)]
 
-//! Core library for `codexia`.
+//! Core library for `rotom`.
 //!
 //! The library owns the OAuth flow, token lifecycle, upstream Codex client,
 //! HTTP server, and status inspection helpers used by both the CLI binary and

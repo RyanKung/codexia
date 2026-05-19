@@ -8,25 +8,25 @@ use std::{
     process::Command,
 };
 
-const LAUNCHD_LABEL: &str = "com.codexia.daemon";
-const SYSTEMD_UNIT: &str = "codexia.service";
+const LAUNCHD_LABEL: &str = "com.rotom.daemon";
+const SYSTEMD_UNIT: &str = "rotom.service";
 
 /// Options used to install the user-scoped background daemon service.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonInstallOptions {
-    /// Absolute or resolvable path to the `codexia` executable to launch.
+    /// Absolute or resolvable path to the `rotom` executable to launch.
     pub executable: PathBuf,
-    /// Bind address passed to `codexia serve`.
+    /// Bind address passed to `rotom serve`.
     pub bind: String,
     /// Optional auth file passed through to the daemon process.
     pub auth_file: Option<PathBuf>,
-    /// Repeated `-v` count passed through to `codexia serve`.
+    /// Repeated `-v` count passed through to `rotom serve`.
     pub verbosity: u8,
     /// Optional API key injected into the daemon process arguments.
     pub api_key: Option<String>,
-    /// Upstream provider passed through to `codexia serve`.
+    /// Upstream provider passed through to `rotom serve`.
     pub provider: Option<Provider>,
-    /// Optional fallback model passed through to `codexia serve`.
+    /// Optional fallback model passed through to `rotom serve`.
     pub model_fallback: Option<String>,
 }
 
@@ -67,7 +67,7 @@ pub fn start() -> Result<()> {
             let domain = launchd_domain()?;
             if !plist.exists() {
                 return Err(Error::config(
-                    "daemon is not installed; run `codexia daemon install` first",
+                    "daemon is not installed; run `rotom daemon install` first",
                 ));
             }
             run_command("launchctl", ["bootstrap", &domain, path_str(&plist)?])?;
@@ -154,12 +154,12 @@ fn install_launchd(options: &DaemonInstallOptions) -> Result<()> {
         .ok_or_else(|| Error::config("launchd plist path has no parent directory"))?;
     fs::create_dir_all(parent)?;
 
-    let log_dir = codexia_home()?;
+    let log_dir = rotom_home()?;
     fs::create_dir_all(&log_dir)?;
     fs::write(&plist, launchd_plist(options, &log_dir))?;
     println!("installed {}", plist.display());
-    println!("run `codexia daemon start` to start now; launchd will load it on login");
-    println!("run `codexia daemon status` to inspect the user service");
+    println!("run `rotom daemon start` to start now; launchd will load it on login");
+    println!("run `rotom daemon status` to inspect the user service");
     Ok(())
 }
 
@@ -174,16 +174,16 @@ fn install_systemd(options: &DaemonInstallOptions) -> Result<()> {
     systemctl(["daemon-reload"])?;
     systemctl(["enable", SYSTEMD_UNIT])?;
     println!("installed {}", unit.display());
-    println!("run `codexia daemon start` to start now");
-    println!("inspect it with `codexia daemon status` or `systemctl --user status {SYSTEMD_UNIT}`");
+    println!("run `rotom daemon start` to start now");
+    println!("inspect it with `rotom daemon status` or `systemctl --user status {SYSTEMD_UNIT}`");
     Ok(())
 }
 
 fn status_launchd() -> Result<()> {
     let plist = launchd_plist_path()?;
-    let log_dir = codexia_home()?;
-    let stdout_log = log_dir.join("codexia.out.log");
-    let stderr_log = log_dir.join("codexia.err.log");
+    let log_dir = rotom_home()?;
+    let stdout_log = log_dir.join("rotom.out.log");
+    let stderr_log = log_dir.join("rotom.err.log");
 
     if !plist.exists() {
         print_launchd_status_panel(&LaunchdStatusView {
@@ -247,7 +247,7 @@ fn status_launchd() -> Result<()> {
 }
 
 fn serve_args(options: &DaemonInstallOptions) -> Vec<String> {
-    // Build the exact argv list so both launchd and systemd invoke `codexia serve`
+    // Build the exact argv list so both launchd and systemd invoke `rotom serve`
     // without relying on shell parsing.
     let mut args = vec![
         options.executable.display().to_string(),
@@ -286,8 +286,8 @@ fn launchd_plist(options: &DaemonInstallOptions, log_dir: &Path) -> String {
         .map(|arg| format!("        <string>{}</string>", xml_escape(&arg)))
         .collect::<Vec<_>>()
         .join("\n");
-    let stdout = log_dir.join("codexia.out.log");
-    let stderr = log_dir.join("codexia.err.log");
+    let stdout = log_dir.join("rotom.out.log");
+    let stderr = log_dir.join("rotom.err.log");
 
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -329,7 +329,7 @@ fn systemd_unit(options: &DaemonInstallOptions) -> String {
 
     format!(
         r"[Unit]
-Description=Codexia OpenAI-compatible Codex OAuth gateway
+Description=rotom OpenAI-compatible Codex OAuth gateway
 After=network-online.target
 Wants=network-online.target
 
@@ -355,11 +355,11 @@ fn systemd_unit_path() -> Result<PathBuf> {
     Ok(home_dir()?.join(".config/systemd/user").join(SYSTEMD_UNIT))
 }
 
-fn codexia_home() -> Result<PathBuf> {
-    if let Ok(path) = env::var("CODEXIA_HOME") {
+fn rotom_home() -> Result<PathBuf> {
+    if let Ok(path) = env::var("ROTOM_HOME") {
         return Ok(PathBuf::from(path));
     }
-    Ok(home_dir()?.join(".codexia"))
+    Ok(home_dir()?.join(".rotom"))
 }
 
 fn home_dir() -> Result<PathBuf> {
@@ -430,7 +430,7 @@ fn format_launchd_status_panel(view: &LaunchdStatusView<'_>) -> String {
     let _ = writeln!(
         output,
         "{}",
-        styled(&format!("Codexia daemon ({})", overall.0), overall.1, true)
+        styled(&format!("rotom daemon ({})", overall.0), overall.1, true)
     );
     let _ = writeln!(output, "{}", "-".repeat(32));
     push_kv(&mut output, "Manager", "launchd");
@@ -471,17 +471,17 @@ fn format_launchd_status_panel(view: &LaunchdStatusView<'_>) -> String {
     if !view.installed {
         let _ = writeln!(
             output,
-            "  run `codexia daemon install` to create the LaunchAgent"
+            "  run `rotom daemon install` to create the LaunchAgent"
         );
     } else if !view.loaded {
         let _ = writeln!(
             output,
-            "  run `codexia daemon start` to load the LaunchAgent now"
+            "  run `rotom daemon start` to load the LaunchAgent now"
         );
     } else {
         let _ = writeln!(
             output,
-            "  run `codexia daemon restart` after changing daemon options"
+            "  run `rotom daemon restart` after changing daemon options"
         );
     }
     let _ = writeln!(
@@ -616,7 +616,7 @@ mod tests {
 
     fn options() -> DaemonInstallOptions {
         DaemonInstallOptions {
-            executable: "/usr/local/bin/codexia".into(),
+            executable: "/usr/local/bin/rotom".into(),
             bind: "127.0.0.1:14550".into(),
             auth_file: Some("/tmp/auth file.json".into()),
             verbosity: 2,
@@ -631,7 +631,7 @@ mod tests {
         assert_eq!(
             serve_args(&options()),
             vec![
-                "/usr/local/bin/codexia",
+                "/usr/local/bin/rotom",
                 "serve",
                 "--bind",
                 "127.0.0.1:14550",
@@ -649,10 +649,10 @@ mod tests {
 
     #[test]
     fn launchd_plist_uses_program_arguments_array() {
-        let plist = launchd_plist(&options(), Path::new("/tmp/codexia"));
+        let plist = launchd_plist(&options(), Path::new("/tmp/rotom"));
 
         assert!(plist.contains("<key>ProgramArguments</key>"));
-        assert!(plist.contains("<string>/usr/local/bin/codexia</string>"));
+        assert!(plist.contains("<string>/usr/local/bin/rotom</string>"));
         assert!(plist.contains("<string>local secret</string>"));
         assert!(plist.contains("<key>KeepAlive</key>"));
     }
@@ -661,7 +661,7 @@ mod tests {
     fn systemd_unit_quotes_exec_start_arguments() {
         let unit = systemd_unit(&options());
 
-        assert!(unit.contains("ExecStart='/usr/local/bin/codexia' 'serve'"));
+        assert!(unit.contains("ExecStart='/usr/local/bin/rotom' 'serve'"));
         assert!(unit.contains("'local secret'"));
         assert!(unit.contains("Restart=always"));
         assert!(unit.contains("WantedBy=default.target"));
@@ -671,7 +671,7 @@ mod tests {
     fn parses_launchctl_print_summary() {
         let summary = parse_launchctl_print_summary(
             r"
-                gui/501/com.codexia.daemon = {
+                gui/501/com.rotom.daemon = {
                     state = running
                     pid = 12345
                     last exit code = 0
@@ -692,7 +692,7 @@ mod tests {
     #[test]
     fn detects_missing_launchctl_service_errors() {
         assert!(is_launchctl_service_missing(
-            "Could not find service \"gui/501/com.codexia.daemon\" in domain for user gui: 501"
+            "Could not find service \"gui/501/com.rotom.daemon\" in domain for user gui: 501"
         ));
         assert!(is_launchctl_service_missing("No such process"));
         assert!(!is_launchctl_service_missing("Operation not permitted"));
@@ -702,9 +702,9 @@ mod tests {
     fn formats_not_installed_launchd_status_panel() {
         let panel = format_launchd_status_panel(&LaunchdStatusView {
             label: LAUNCHD_LABEL,
-            plist: Path::new("/tmp/com.codexia.daemon.plist"),
-            stdout_log: Path::new("/tmp/codexia.out.log"),
-            stderr_log: Path::new("/tmp/codexia.err.log"),
+            plist: Path::new("/tmp/com.rotom.daemon.plist"),
+            stdout_log: Path::new("/tmp/rotom.out.log"),
+            stderr_log: Path::new("/tmp/rotom.err.log"),
             installed: false,
             loaded: false,
             state: Some("not installed"),
@@ -712,18 +712,18 @@ mod tests {
             last_exit_code: None,
         });
 
-        assert!(panel.contains("Codexia daemon (NOT INSTALLED)"));
+        assert!(panel.contains("rotom daemon (NOT INSTALLED)"));
         assert!(panel.contains("Installed  no"));
-        assert!(panel.contains("run `codexia daemon install`"));
+        assert!(panel.contains("run `rotom daemon install`"));
     }
 
     #[test]
     fn formats_running_launchd_status_panel() {
         let panel = format_launchd_status_panel(&LaunchdStatusView {
             label: LAUNCHD_LABEL,
-            plist: Path::new("/tmp/com.codexia.daemon.plist"),
-            stdout_log: Path::new("/tmp/codexia.out.log"),
-            stderr_log: Path::new("/tmp/codexia.err.log"),
+            plist: Path::new("/tmp/com.rotom.daemon.plist"),
+            stdout_log: Path::new("/tmp/rotom.out.log"),
+            stderr_log: Path::new("/tmp/rotom.err.log"),
             installed: true,
             loaded: true,
             state: Some("running"),
@@ -731,9 +731,9 @@ mod tests {
             last_exit_code: Some("0"),
         });
 
-        assert!(panel.contains("Codexia daemon (RUNNING)"));
+        assert!(panel.contains("rotom daemon (RUNNING)"));
         assert!(panel.contains("State  RUNNING"));
         assert!(panel.contains("PID  12345"));
-        assert!(panel.contains("tail -n 50 /tmp/codexia.err.log"));
+        assert!(panel.contains("tail -n 50 /tmp/rotom.err.log"));
     }
 }

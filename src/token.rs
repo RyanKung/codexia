@@ -66,7 +66,7 @@ impl TokenManager {
             .clone()
             .or(self.store.load_provider(self.oauth.provider())?)
             .ok_or_else(|| {
-                Error::config("not logged in; run `codexia login` before refreshing tokens")
+                Error::config("not logged in; run `rotom login` before refreshing tokens")
             })?;
 
         let refreshed = self.refresh_credentials(&credentials).await?;
@@ -97,7 +97,7 @@ impl TokenManager {
             .or(self.store.load_provider(self.oauth.provider())?)
         else {
             return Err(Error::config(
-                "not logged in; run `codexia login` before serving requests",
+                "not logged in; run `rotom login` before serving requests",
             ));
         };
 
