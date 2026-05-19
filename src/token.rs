@@ -40,7 +40,7 @@ impl TokenManager {
     /// Creates a token manager backed by a provider-specific OAuth client.
     #[must_use]
     pub fn new_with_oauth(store: AuthStore, oauth: OAuthClient) -> Self {
-        let cached = store.load().unwrap_or(None);
+        let cached = store.load_provider(oauth.provider()).unwrap_or(None);
         Self {
             store,
             oauth,
@@ -62,9 +62,12 @@ impl TokenManager {
     /// request fails, or the refreshed credentials cannot be saved.
     pub async fn refresh(&self) -> Result<Credentials> {
         let mut guard = self.cached.write().await;
-        let credentials = guard.clone().or(self.store.load()?).ok_or_else(|| {
-            Error::config("not logged in; run `codexia login` before refreshing tokens")
-        })?;
+        let credentials = guard
+            .clone()
+            .or(self.store.load_provider(self.oauth.provider())?)
+            .ok_or_else(|| {
+                Error::config("not logged in; run `codexia login` before refreshing tokens")
+            })?;
 
         let refreshed = self.refresh_credentials(&credentials).await?;
         self.store.save(&refreshed)?;
@@ -89,7 +92,10 @@ impl TokenManager {
         }
 
         let mut guard = self.cached.write().await;
-        let Some(credentials) = guard.clone().or(self.store.load()?) else {
+        let Some(credentials) = guard
+            .clone()
+            .or(self.store.load_provider(self.oauth.provider())?)
+        else {
             return Err(Error::config(
                 "not logged in; run `codexia login` before serving requests",
             ));
@@ -123,6 +129,13 @@ pub enum OAuthClient {
 }
 
 impl OAuthClient {
+    const fn provider(&self) -> Provider {
+        match self {
+            Self::Codex(_) => Provider::Codex,
+            Self::Grok(_) => Provider::Grok,
+        }
+    }
+
     async fn refresh_token(&self, refresh_token: &str) -> Result<Credentials> {
         match self {
             Self::Codex(client) => client.refresh_token(refresh_token).await,

@@ -56,6 +56,35 @@ pub fn resolve_model_list_for_provider(provider: Provider) -> Result<ModelList> 
     )))
 }
 
+/// Returns the provider implied by a model identifier.
+#[must_use]
+pub fn provider_for_model(model: &str) -> Provider {
+    let normalized = model
+        .strip_prefix("xai/")
+        .or_else(|| model.strip_prefix("grok/"))
+        .unwrap_or(model);
+    if normalized.starts_with("grok-") {
+        Provider::Grok
+    } else {
+        Provider::Codex
+    }
+}
+
+/// Builds a [`ModelList`] containing all models for the supplied providers.
+///
+/// # Errors
+///
+/// This currently forwards construction through [`ModelList::from_ids`] and is
+/// fallible only to preserve the crate-wide result-based call sites.
+pub fn resolve_model_list_for_providers(providers: &[Provider]) -> Result<ModelList> {
+    let ids = providers
+        .iter()
+        .copied()
+        .flat_map(resolve_model_ids_for_provider)
+        .collect::<Vec<_>>();
+    Ok(ModelList::from_ids(normalize_model_ids(ids)))
+}
+
 fn normalize_model_ids(ids: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut seen = HashSet::new();
     ids.into_iter()

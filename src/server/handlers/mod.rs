@@ -4,6 +4,7 @@ mod responses;
 mod sse;
 
 use crate::{
+    Error,
     anthropic::{
         CountTokensResponse, MessageBatch, MessageBatchCreateRequest, MessageBatchDeleted,
         MessageBatchListResponse, MessageBatchRequestCounts, MessagesRequest, error_body,
@@ -131,7 +132,10 @@ pub async fn responses(
         return error.into_response();
     }
 
-    let credentials = match state.token_manager.credentials().await {
+    let Some(upstream) = state.upstream_for_model(&request.model) else {
+        return Error::config(format!("not logged in for model {}", request.model)).into_response();
+    };
+    let credentials = match upstream.token_manager.credentials().await {
         Ok(credentials) => credentials,
         Err(error) => return error.into_response(),
     };
@@ -149,7 +153,7 @@ pub async fn responses(
         let body = responses_to_codex_request(&request, &input_items);
         trace_named_tools("responses_tools_upstream", &upstream_tool_names(&body));
         if request.wants_stream() {
-            return match state.codex.stream_response(body, &credentials).await {
+            return match upstream.client.stream_response(body, &credentials).await {
                 Ok(stream) => {
                     openai_raw_responses_sse(stream, request, input_items, state.responses)
                         .into_response()
@@ -157,7 +161,7 @@ pub async fn responses(
                 Err(error) => error.into_response(),
             };
         }
-        return match state.codex.complete_response(body, &credentials).await {
+        return match upstream.client.complete_response(body, &credentials).await {
             Ok(value) => {
                 let response_object = response_object_from_upstream(&request, &value);
                 maybe_store_response(&state, &request, response_object.clone(), input_items).await;
@@ -174,7 +178,11 @@ pub async fn responses(
     };
 
     if request.wants_stream() {
-        match state.codex.stream_chat(chat_request, &credentials).await {
+        match upstream
+            .client
+            .stream_chat(chat_request, &credentials)
+            .await
+        {
             Ok(stream) => openai_responses_sse(
                 stream,
                 responses::build_response_id(),
@@ -186,7 +194,11 @@ pub async fn responses(
             Err(error) => error.into_response(),
         }
     } else {
-        match state.codex.complete_chat(chat_request, &credentials).await {
+        match upstream
+            .client
+            .complete_chat(chat_request, &credentials)
+            .await
+        {
             Ok(response) => {
                 let response_object = response_object_from_chat(&request, response);
                 maybe_store_response(&state, &request, response_object.clone(), input_items).await;
@@ -265,14 +277,18 @@ pub async fn manual_refresh(State(state): State<AppState>, headers: HeaderMap) -
         return error.into_response();
     }
 
-    match state.token_manager.refresh().await {
-        Ok(credentials) => Json(json!({
-            "account_id": credentials.account_id,
-            "expires_at": credentials.expires_at,
-        }))
-        .into_response(),
-        Err(error) => error.into_response(),
+    let mut refreshed = Vec::new();
+    for upstream in state.upstreams.iter() {
+        match upstream.token_manager.refresh().await {
+            Ok(credentials) => refreshed.push(json!({
+                "provider": credentials.provider,
+                "account_id": credentials.account_id,
+                "expires_at": credentials.expires_at,
+            })),
+            Err(error) => return error.into_response(),
+        }
     }
+    Json(json!({ "providers": refreshed })).into_response()
 }
 
 /// Returns account, token, and rate-limit status in a structured JSON format.
@@ -281,10 +297,22 @@ pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> Respon
         return error.into_response();
     }
 
-    let credentials = match state.token_manager.credentials().await {
+    let Some(upstream) = state.default_upstream() else {
+        return Error::config("no upstream providers configured").into_response();
+    };
+    let credentials = match upstream.token_manager.credentials().await {
         Ok(credentials) => credentials,
         Err(error) => return error.into_response(),
     };
+
+    if upstream.provider != crate::config::Provider::Codex {
+        return Json(json!({
+            "provider": credentials.provider,
+            "expires_at": credentials.expires_at,
+            "warnings": ["provider status is only available for codex"]
+        }))
+        .into_response();
+    }
 
     let snapshot = state.status.fetch_status(&credentials).await;
     Json(build_status_response(&credentials, &snapshot)).into_response()
@@ -302,18 +330,21 @@ pub async fn chat_completions(
         return error.into_response();
     }
 
-    let credentials = match state.token_manager.credentials().await {
+    let Some(upstream) = state.upstream_for_model(&request.model) else {
+        return Error::config(format!("not logged in for model {}", request.model)).into_response();
+    };
+    let credentials = match upstream.token_manager.credentials().await {
         Ok(credentials) => credentials,
         Err(error) => return error.into_response(),
     };
 
     if request.wants_stream() {
-        match state.codex.stream_chat(request, &credentials).await {
+        match upstream.client.stream_chat(request, &credentials).await {
             Ok(stream) => sse_response(stream).into_response(),
             Err(error) => error.into_response(),
         }
     } else {
-        match state.codex.complete_chat(request, &credentials).await {
+        match upstream.client.complete_chat(request, &credentials).await {
             Ok(response) => {
                 trace_response("chat_completions", &response);
                 Json(response).into_response()
@@ -338,7 +369,13 @@ pub async fn messages(
 
     apply_anthropic_headers(&headers, &mut request);
 
-    let credentials = match state.token_manager.credentials().await {
+    let Some(upstream) = state.upstream_for_model(&request.model) else {
+        return anthropic_error_response(&Error::config(format!(
+            "not logged in for model {}",
+            request.model
+        )));
+    };
+    let credentials = match upstream.token_manager.credentials().await {
         Ok(credentials) => credentials,
         Err(error) => return anthropic_error_response(&error),
     };
@@ -358,14 +395,14 @@ pub async fn messages(
     let model = request.model.clone();
 
     if request.wants_stream() {
-        match state.codex.stream_response(body, &credentials).await {
+        match upstream.client.stream_response(body, &credentials).await {
             Ok(stream) => {
                 anthropic_raw_messages_sse_response(stream, model, input_tokens).into_response()
             }
             Err(error) => anthropic_error_response(&error),
         }
     } else {
-        match state.codex.complete_response(body, &credentials).await {
+        match upstream.client.complete_response(body, &credentials).await {
             Ok(value) => {
                 let response = from_openai_response_value(&value, &request.model);
                 trace_response("messages", &response);
@@ -388,7 +425,10 @@ pub async fn image_generations(
         return error.into_response();
     }
 
-    let credentials = match state.token_manager.credentials().await {
+    let Some(upstream) = state.upstream_for_model(&request.model) else {
+        return Error::config(format!("not logged in for model {}", request.model)).into_response();
+    };
+    let credentials = match upstream.token_manager.credentials().await {
         Ok(credentials) => credentials,
         Err(error) => return error.into_response(),
     };
@@ -400,7 +440,7 @@ pub async fn image_generations(
     };
     let body = responses_to_codex_request(&response_request, &input_items);
 
-    match state.codex.complete_response(body, &credentials).await {
+    match upstream.client.complete_response(body, &credentials).await {
         Ok(value) => {
             let images = generated_images_from_output(
                 value
@@ -491,10 +531,9 @@ pub async fn create_message_batch(
         .await;
 
     let batches = state.batches.clone();
-    let token_manager = state.token_manager.clone();
-    let codex = state.codex.clone();
+    let upstreams = state.upstreams.clone();
     tokio::spawn(async move {
-        run_message_batch_worker(batches, token_manager, codex, batch_id, request.requests).await;
+        run_message_batch_worker(batches, upstreams, batch_id, request.requests).await;
     });
     trace_response("messages.batches.create", &batch);
     Json(batch).into_response()

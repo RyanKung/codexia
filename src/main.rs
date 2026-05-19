@@ -16,11 +16,11 @@ use codexia::{
     config::{AppConfig, AppConfigStore, AuthStore, Credentials, Provider, now_unix},
     daemon::{self, DaemonInstallOptions},
     logging::{self, LogLevel},
-    models::resolve_model_list_for_provider,
+    models::resolve_model_list_for_providers,
     oauth::{
         CodexOAuthClient, GrokOAuthClient, create_authorization_flow, parse_authorization_input,
     },
-    server::{AppState, serve},
+    server::{AppState, UpstreamState, serve},
     status::StatusClient,
     timefmt::{format_duration, format_status_time_human},
     token::TokenManager,
@@ -179,6 +179,13 @@ enum Command {
     Refresh {
         #[arg(long, value_name = "PATH", help = "Credential file to read/write")]
         auth_file: Option<PathBuf>,
+        #[arg(
+            long,
+            env = "CODEXIA_PROVIDER",
+            value_name = "PROVIDER",
+            help = "OAuth provider to refresh: codex or grok. When omitted, refreshes all saved providers."
+        )]
+        provider: Option<String>,
     },
     #[command(
         about = "Fetch token, account, and rate-limit status",
@@ -321,26 +328,32 @@ async fn run(cli: Cli) -> Result<()> {
                 .or_else(|| bind_from_config(config.as_ref()))
                 .unwrap_or_else(default_bind);
             let effective_auth_file = auth_file.or_else(|| config_auth_file(config.as_ref()));
-            let effective_provider = resolve_provider(provider, config.as_ref())?;
             let effective_api_key =
                 api_key.or_else(|| config_string(config.as_ref(), |item| item.api_key.clone()));
             let effective_model_fallback = resolve_model_fallback(model_fallback, config.as_ref());
             let http = Client::new();
-            let token_manager = TokenManager::new_for_provider(
-                auth_store(effective_auth_file)?,
-                effective_provider,
-                http.clone(),
-            );
-            token_manager.credentials().await?;
-            let codex = CodexClient::new_for_provider(http, effective_provider);
-            let model_list = resolve_model_list_for_provider(effective_provider)?;
+            let store = auth_store(effective_auth_file)?;
+            let providers = resolve_served_providers(&store, provider, config.as_ref())?;
+            let mut upstreams = Vec::new();
+            for provider in &providers {
+                let token_manager =
+                    TokenManager::new_for_provider(store.clone(), *provider, http.clone());
+                token_manager.credentials().await?;
+                upstreams.push(UpstreamState {
+                    provider: *provider,
+                    token_manager,
+                    client: CodexClient::new_for_provider(http.clone(), *provider),
+                });
+            }
+            let model_list = resolve_model_list_for_providers(&providers)?;
             println!("listening on http://{effective_bind}");
-            spawn_token_expiry_display(token_manager.clone());
+            for upstream in &upstreams {
+                spawn_token_expiry_display(upstream.token_manager.clone());
+            }
             serve(
                 effective_bind,
-                AppState::new_with_model_fallback(
-                    token_manager,
-                    codex,
+                AppState::new_multi_with_model_fallback(
+                    upstreams,
                     effective_api_key,
                     model_list,
                     effective_model_fallback,
@@ -348,7 +361,10 @@ async fn run(cli: Cli) -> Result<()> {
             )
             .await
         }
-        Command::Refresh { auth_file } => refresh(auth_store(auth_file)?).await,
+        Command::Refresh {
+            auth_file,
+            provider,
+        } => refresh(auth_store(auth_file)?, provider).await,
         Command::Status { auth_file } => status(auth_store(auth_file)?).await,
         Command::Update { version } => update(version.as_deref()),
         Command::Daemon { command } => daemon_command(command, cli.verbose),
@@ -426,7 +442,10 @@ fn resolve_daemon_install_options(
     let effective_api_key = options
         .api_key
         .or_else(|| config_string(config.as_ref(), |item| item.api_key.clone()));
-    let effective_provider = resolve_provider(options.provider, config.as_ref())?;
+    let effective_provider = options
+        .provider
+        .map(|provider| provider.parse::<Provider>())
+        .transpose()?;
     let effective_model_fallback = resolve_model_fallback(options.model_fallback, config.as_ref());
     Ok(DaemonInstallOptions {
         executable: options.executable.map_or_else(std::env::current_exe, Ok)?,
@@ -517,6 +536,28 @@ fn resolve_provider(cli_or_option: Option<String>, config: Option<&AppConfig>) -
     )
 }
 
+fn resolve_served_providers(
+    store: &AuthStore,
+    cli_or_option: Option<String>,
+    config: Option<&AppConfig>,
+) -> Result<Vec<Provider>> {
+    if let Some(value) = cli_or_option {
+        return Ok(vec![value.parse()?]);
+    }
+
+    let mut providers = store
+        .load_all()?
+        .into_iter()
+        .map(|credentials| credentials.provider)
+        .collect::<Vec<_>>();
+    if providers.is_empty() {
+        providers.push(config.and_then(|item| item.provider).unwrap_or_default());
+    }
+    providers.sort_unstable();
+    providers.dedup();
+    Ok(providers)
+}
+
 fn reset_config(store: &AppConfigStore) -> Result<()> {
     store.delete()?;
     println!("removed runtime config at {}", store.path().display());
@@ -566,25 +607,46 @@ async fn login(store: AuthStore, provider: Provider, originator: &str) -> Result
 }
 
 /// Forces a refresh of the saved OAuth credentials and writes them back to disk.
-async fn refresh(store: AuthStore) -> Result<()> {
-    let credentials = store
-        .load()?
-        .ok_or_else(|| Error::config("not logged in; run `codexia login` first"))?;
-    let refreshed = match credentials.provider {
+async fn refresh(store: AuthStore, provider: Option<String>) -> Result<()> {
+    let credentials = if let Some(provider) = provider {
+        let provider = provider.parse::<Provider>()?;
+        store.load_provider(provider)?.ok_or_else(|| {
+            Error::config(format!(
+                "not logged in for {provider}; run `codexia login --provider {provider}` first"
+            ))
+        })?
+    } else {
+        let all = store.load_all()?;
+        if all.is_empty() {
+            return Err(Error::config("not logged in; run `codexia login` first"));
+        }
+        for credentials in all {
+            let refreshed = refresh_credentials(&credentials).await?;
+            store.save(&refreshed)?;
+            println!("refreshed {}", credential_subject(&refreshed));
+        }
+        return Ok(());
+    };
+
+    let refreshed = refresh_credentials(&credentials).await?;
+    store.save(&refreshed)?;
+    println!("refreshed {}", credential_subject(&refreshed));
+    Ok(())
+}
+
+async fn refresh_credentials(credentials: &Credentials) -> Result<Credentials> {
+    match credentials.provider {
         Provider::Codex => {
             CodexOAuthClient::default()
                 .refresh_token(&credentials.refresh_token)
-                .await?
+                .await
         }
         Provider::Grok => {
             GrokOAuthClient::default()
                 .refresh_token(&credentials.refresh_token)
-                .await?
+                .await
         }
-    };
-    store.save(&refreshed)?;
-    println!("refreshed {}", credential_subject(&refreshed));
-    Ok(())
+    }
 }
 
 /// Fetches token, plan, and rate-limit status and renders a human-readable report.

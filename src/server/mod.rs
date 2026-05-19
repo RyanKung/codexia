@@ -2,7 +2,9 @@
 
 use crate::{
     codex::{client::CodexClient, convert::normalize_model},
+    config::Provider,
     error::Result,
+    models::provider_for_model,
     openai::response::ModelList,
     status::StatusClient,
     token::TokenManager,
@@ -28,14 +30,24 @@ pub use auth::authorize;
 /// Shared application state used by all HTTP route handlers.
 #[derive(Clone)]
 pub struct AppState {
-    token_manager: TokenManager,
-    codex: CodexClient,
+    upstreams: Arc<Vec<UpstreamState>>,
     status: StatusClient,
     api_key: Option<Arc<str>>,
     models: ModelList,
     model_fallback: Option<Arc<str>>,
     responses: store::ResponseStore,
     batches: store::BatchStore,
+}
+
+#[derive(Clone)]
+/// Runtime state for one authenticated upstream provider.
+pub struct UpstreamState {
+    /// Provider served by this upstream.
+    pub provider: Provider,
+    /// Token manager for this provider.
+    pub token_manager: TokenManager,
+    /// HTTP client for this provider.
+    pub client: CodexClient,
 }
 
 impl AppState {
@@ -59,11 +71,39 @@ impl AppState {
         models: ModelList,
         model_fallback: Option<String>,
     ) -> Self {
-        let status = StatusClient::new(Client::new(), codex.base_url().to_owned());
+        Self::new_multi_with_model_fallback(
+            vec![UpstreamState {
+                provider: codex.provider(),
+                token_manager,
+                client: codex,
+            }],
+            api_key,
+            models,
+            model_fallback,
+        )
+    }
+
+    /// Builds application state from all configured upstream providers.
+    ///
+    /// # Panics
+    ///
+    /// Panics when called with an empty upstream list.
+    #[must_use]
+    pub fn new_multi_with_model_fallback(
+        upstreams: Vec<UpstreamState>,
+        api_key: Option<String>,
+        models: ModelList,
+        model_fallback: Option<String>,
+    ) -> Self {
+        let codex = upstreams
+            .iter()
+            .find(|upstream| upstream.provider == Provider::Codex)
+            .or_else(|| upstreams.first())
+            .expect("at least one upstream provider is required");
+        let status = StatusClient::new(Client::new(), codex.client.base_url().to_owned());
         Self {
-            token_manager,
+            upstreams: Arc::new(upstreams),
             status,
-            codex,
             api_key: api_key.map(Arc::from),
             models,
             model_fallback: model_fallback.map(Arc::from),
@@ -105,6 +145,22 @@ impl AppState {
             .data
             .iter()
             .any(|model| normalize_model(&model.id) == candidate)
+    }
+
+    pub(crate) fn upstream_for_model(&self, model: &str) -> Option<&UpstreamState> {
+        let provider = provider_for_model(model);
+        self.upstreams
+            .iter()
+            .find(|upstream| upstream.provider == provider)
+            .or_else(|| {
+                (provider == Provider::Codex)
+                    .then(|| self.upstreams.first())
+                    .flatten()
+            })
+    }
+
+    pub(crate) fn default_upstream(&self) -> Option<&UpstreamState> {
+        self.upstreams.first()
     }
 }
 
@@ -737,8 +793,8 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value = serde_json::from_slice::<Value>(&body).unwrap();
-        assert_eq!(value["account_id"], "acc_refreshed");
-        assert!(value.get("expires_at").is_some());
+        assert_eq!(value["providers"][0]["account_id"], "acc_refreshed");
+        assert!(value["providers"][0].get("expires_at").is_some());
         assert!(value.get("access_token").is_none());
         assert!(value.get("refresh_token").is_none());
 

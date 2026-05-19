@@ -1,5 +1,6 @@
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::{
     env,
     fmt::{self, Display},
@@ -10,7 +11,7 @@ use std::{
 };
 
 /// Upstream OAuth provider used by stored credentials and runtime requests.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum Provider {
     /// `OpenAI` Codex OAuth backed by the `ChatGPT` Codex backend.
@@ -73,6 +74,28 @@ pub struct Credentials {
     /// Upstream account identifier associated with the token pair.
     #[serde(default)]
     pub account_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct AuthFile {
+    version: u8,
+    #[serde(default)]
+    active_provider: Provider,
+    #[serde(default)]
+    providers: BTreeMap<Provider, Credentials>,
+}
+
+impl AuthFile {
+    fn single(credentials: Credentials) -> Self {
+        let provider = credentials.provider;
+        let mut providers = BTreeMap::new();
+        providers.insert(provider, credentials);
+        Self {
+            version: 2,
+            active_provider: provider,
+            providers,
+        }
+    }
 }
 
 impl Credentials {
@@ -164,8 +187,37 @@ impl AuthStore {
     ///
     /// Returns an error when the file exists but cannot be read or decoded.
     pub fn load(&self) -> Result<Option<Credentials>> {
+        Ok(self
+            .load_file()?
+            .and_then(|file| file.providers.get(&file.active_provider).cloned()))
+    }
+
+    /// Loads credentials for a specific provider from disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file exists but cannot be read or decoded.
+    pub fn load_provider(&self, provider: Provider) -> Result<Option<Credentials>> {
+        Ok(self
+            .load_file()?
+            .and_then(|file| file.providers.get(&provider).cloned()))
+    }
+
+    /// Returns all provider credentials currently stored on disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file exists but cannot be read or decoded.
+    pub fn load_all(&self) -> Result<Vec<Credentials>> {
+        Ok(self
+            .load_file()?
+            .map(|file| file.providers.into_values().collect())
+            .unwrap_or_default())
+    }
+
+    fn load_file(&self) -> Result<Option<AuthFile>> {
         match fs::read_to_string(&self.path) {
-            Ok(raw) => Ok(Some(serde_json::from_str(&raw)?)),
+            Ok(raw) => parse_auth_file(&raw).map(Some),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error.into()),
         }
@@ -178,6 +230,19 @@ impl AuthStore {
     /// Returns an error when the parent directory cannot be created, the JSON
     /// cannot be serialized, or the file cannot be written atomically.
     pub fn save(&self, credentials: &Credentials) -> Result<()> {
+        let mut file = self
+            .load_file()?
+            .unwrap_or_else(|| AuthFile::single(credentials.clone()));
+        let mut credentials = credentials.clone();
+        if credentials.account_id.is_empty() && credentials.provider == Provider::Codex {
+            credentials.provider = Provider::Codex;
+        }
+        file.active_provider = credentials.provider;
+        file.providers.insert(credentials.provider, credentials);
+        self.save_file(&file)
+    }
+
+    fn save_file(&self, file: &AuthFile) -> Result<()> {
         let parent = self
             .path
             .parent()
@@ -185,12 +250,20 @@ impl AuthStore {
         fs::create_dir_all(parent)?;
 
         let tmp = self.path.with_extension("json.tmp");
-        let bytes = serde_json::to_vec_pretty(credentials)?;
+        let bytes = serde_json::to_vec_pretty(file)?;
         // Write to a sibling temp file first so a partial write never replaces the live secrets.
         write_secret_file(&tmp, &bytes)?;
         fs::rename(tmp, &self.path)?;
         Ok(())
     }
+}
+
+fn parse_auth_file(raw: &str) -> Result<AuthFile> {
+    if let Ok(file) = serde_json::from_str::<AuthFile>(raw) {
+        return Ok(file);
+    }
+    let credentials = serde_json::from_str::<Credentials>(raw)?;
+    Ok(AuthFile::single(credentials))
 }
 
 /// Loads and saves the persisted application configuration file.

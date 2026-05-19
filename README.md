@@ -28,12 +28,15 @@ Grok OAuth uses the same local credential flow with xAI's OAuth endpoints:
 
 ```bash
 codexia login --provider grok
-codexia serve --provider grok --bind 127.0.0.1:14550 --api-key local-secret
+codexia serve --bind 127.0.0.1:14550 --api-key local-secret
 ```
 
-Grok exposes `grok-4.3`, `grok-4.3-fast`, and `grok-4` through the same local
-OpenAI-compatible and Anthropic-compatible routes. xAI may still restrict OAuth
-API access by account tier even when browser login succeeds.
+Credentials are stored per provider, so logging in to Grok does not replace
+Codex credentials. When both are present, `serve` exposes both Codex and Grok
+models through the same local OpenAI-compatible and Anthropic-compatible routes.
+Use `--provider grok` only when you intentionally want to serve one provider.
+xAI may still restrict OAuth API access by account tier even when browser login
+succeeds.
 
 OpenAI-compatible chat request:
 
@@ -139,12 +142,15 @@ codexia config reset
 The config file is stored at `~/.codexia/config.json` by default and is used as
 the fallback source for `codexia serve` and `codexia daemon install`.
 
-Refresh the stored Codex OAuth token while the server is running:
+Refresh stored OAuth tokens while the server is running:
 
 ```bash
 curl -X POST http://127.0.0.1:14550/v1/auth/refresh \
   -H 'authorization: Bearer local-secret'
 ```
+
+From the CLI, `codexia refresh` refreshes all saved providers. Use
+`codexia refresh --provider grok` to refresh only one provider.
 
 Check token expiry, account metadata, and rate-limit windows:
 
