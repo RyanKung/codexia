@@ -59,10 +59,11 @@ pub fn resolve_model_list_for_provider(provider: Provider) -> Result<ModelList> 
 /// Returns the provider implied by a model identifier.
 #[must_use]
 pub fn provider_for_model(model: &str) -> Provider {
-    let normalized = model
+    let normalized = model.strip_prefix("openai-codex/").unwrap_or(model);
+    let normalized = normalized
         .strip_prefix("xai/")
-        .or_else(|| model.strip_prefix("grok/"))
-        .unwrap_or(model);
+        .or_else(|| normalized.strip_prefix("grok/"))
+        .unwrap_or(normalized);
     if normalized.starts_with("grok-") {
         Provider::Grok
     } else {
@@ -123,5 +124,14 @@ mod tests {
 
         assert!(ids.iter().any(|id| id == "grok-4.3"));
         assert!(!ids.iter().any(|id| id == "gpt-5.5"));
+    }
+
+    #[test]
+    fn provider_detection_handles_prefixed_grok_models() {
+        assert_eq!(provider_for_model("grok-4.3"), Provider::Grok);
+        assert_eq!(provider_for_model("xai/grok-4.3"), Provider::Grok);
+        assert_eq!(provider_for_model("grok/grok-4.3"), Provider::Grok);
+        assert_eq!(provider_for_model("openai-codex/grok-4.3"), Provider::Grok);
+        assert_eq!(provider_for_model("openai-codex/gpt-5.5"), Provider::Codex);
     }
 }

@@ -16,7 +16,7 @@ use codexia::{
     config::{AppConfig, AppConfigStore, AuthStore, Credentials, Provider, now_unix},
     daemon::{self, DaemonInstallOptions},
     logging::{self, LogLevel},
-    models::resolve_model_list_for_providers,
+    models::{resolve_model_ids_for_provider, resolve_model_list_for_providers},
     oauth::{
         CodexOAuthClient, GrokOAuthClient, create_authorization_flow, parse_authorization_input,
     },
@@ -58,6 +58,8 @@ Examples:
   codexia daemon reinstall
   codexia daemon start
   codexia daemon status
+  codexia models
+  codexia models --provider grok
   codexia refresh
   codexia status
   codexia update
@@ -194,6 +196,18 @@ enum Command {
     Status {
         #[arg(long, value_name = "PATH", help = "Credential file to read/write")]
         auth_file: Option<PathBuf>,
+    },
+    #[command(
+        about = "List available models grouped by provider",
+        long_about = "Print the model identifiers Codexia exposes through /v1/models, grouped by upstream provider. Use --provider to list only one provider."
+    )]
+    Models {
+        #[arg(
+            long,
+            value_name = "PROVIDER",
+            help = "Provider to list: codex/openai or grok/xai"
+        )]
+        provider: Option<String>,
     },
     #[command(
         about = "Install the latest Codexia release with cargo",
@@ -366,8 +380,43 @@ async fn run(cli: Cli) -> Result<()> {
             provider,
         } => refresh(auth_store(auth_file)?, provider).await,
         Command::Status { auth_file } => status(auth_store(auth_file)?).await,
+        Command::Models { provider } => models(provider),
         Command::Update { version } => update(version.as_deref()),
         Command::Daemon { command } => daemon_command(command, cli.verbose),
+    }
+}
+
+fn models(provider: Option<String>) -> Result<()> {
+    let providers = match provider {
+        Some(provider) => vec![provider.parse()?],
+        None => vec![Provider::Codex, Provider::Grok],
+    };
+    print!("{}", format_models(&providers));
+    Ok(())
+}
+
+fn format_models(providers: &[Provider]) -> String {
+    providers
+        .iter()
+        .map(|provider| {
+            let models = resolve_model_ids_for_provider(*provider)
+                .into_iter()
+                .map(|id| format!("  {id}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!(
+                "{} ({provider})\n{models}\n",
+                model_provider_label(*provider)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+const fn model_provider_label(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Codex => "OpenAI",
+        Provider::Grok => "Grok",
     }
 }
 
@@ -889,9 +938,10 @@ fn credential_subject(credentials: &Credentials) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppConfig, DEFAULT_MODEL_FALLBACK, bind_from_config, build_update_command,
+        AppConfig, DEFAULT_MODEL_FALLBACK, bind_from_config, build_update_command, format_models,
         resolve_model_fallback,
     };
+    use codexia::config::Provider;
     use codexia::timefmt::format_duration;
 
     #[test]
@@ -969,5 +1019,23 @@ mod tests {
             resolve_model_fallback(None, Some(&config)),
             Some("gpt-5.4".into())
         );
+    }
+
+    #[test]
+    fn formats_models_grouped_by_provider() {
+        let output = format_models(&[Provider::Codex, Provider::Grok]);
+
+        assert!(output.contains("OpenAI (codex)\n  gpt-5.1"));
+        assert!(output.contains("Grok (grok)\n  grok-4.3"));
+        assert!(output.contains("\n\nGrok (grok)"));
+    }
+
+    #[test]
+    fn formats_single_provider_models() {
+        let output = format_models(&[Provider::Grok]);
+
+        assert!(output.starts_with("Grok (grok)\n"));
+        assert!(output.contains("  grok-4\n"));
+        assert!(!output.contains("gpt-5.5"));
     }
 }

@@ -239,7 +239,15 @@ codexia daemon install \
   --api-key local-secret
 ```
 
-Models returned by `/v1/models` default to OpenClaw's `openai-codex` registry:
+List the local model registry grouped by provider:
+
+```bash
+codexia models
+codexia models --provider openai
+codexia models --provider grok
+```
+
+Models returned by `/v1/models` include the OpenAI/Codex registry:
 
 ```text
 gpt-5.1
@@ -252,6 +260,14 @@ gpt-5.3-codex-spark
 gpt-5.4
 gpt-5.4-mini
 gpt-5.5
+```
+
+and the Grok registry:
+
+```text
+grok-4.3
+grok-4.3-fast
+grok-4
 ```
 
 Credentials are stored at `~/.codexia/auth.json` by default. Override with
