@@ -122,11 +122,10 @@ enum Command {
         #[arg(
             long,
             env = "ROTOM_PROVIDER",
-            default_value = "codex",
             value_name = "PROVIDER",
             help = "OAuth provider to authenticate: codex or grok"
         )]
-        provider: String,
+        provider: Option<String>,
         #[arg(
             long,
             default_value = "pi",
@@ -321,12 +320,9 @@ async fn run(cli: Cli) -> Result<()> {
             provider,
             originator,
         } => {
-            login(
-                auth_store(auth_file)?,
-                resolve_provider(Some(provider), None)?,
-                &originator,
-            )
-            .await
+            let store = auth_store(auth_file)?;
+            let provider = resolve_login_provider(&store, provider)?;
+            login(store, provider, &originator).await
         }
         Command::Config { command } => config_command(command.as_ref()),
         Command::Serve {
@@ -578,11 +574,63 @@ fn resolve_model_fallback(
         .or_else(|| Some(DEFAULT_MODEL_FALLBACK.to_owned()))
 }
 
-fn resolve_provider(cli_or_option: Option<String>, config: Option<&AppConfig>) -> Result<Provider> {
-    cli_or_option.map_or_else(
-        || Ok(config.and_then(|item| item.provider).unwrap_or_default()),
-        |value| value.parse(),
-    )
+fn resolve_login_provider(store: &AuthStore, provider: Option<String>) -> Result<Provider> {
+    provider.map_or_else(|| prompt_login_provider(store), |value| value.parse())
+}
+
+fn prompt_login_provider(store: &AuthStore) -> Result<Provider> {
+    let credentials = store.load_all()?;
+    println!("Select OAuth provider:");
+    for (index, provider) in LOGIN_PROVIDERS.iter().enumerate() {
+        println!(
+            "[{}] {}",
+            index + 1,
+            format_login_provider_choice(*provider, &credentials)
+        );
+    }
+    print!("Provider [1]: ");
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    parse_login_provider_choice(input.trim())
+}
+
+const LOGIN_PROVIDERS: [Provider; 2] = [Provider::Codex, Provider::Grok];
+
+fn parse_login_provider_choice(value: &str) -> Result<Provider> {
+    match value {
+        "" | "1" => Ok(Provider::Codex),
+        "2" => Ok(Provider::Grok),
+        other => other.parse(),
+    }
+}
+
+fn format_login_provider_choice(provider: Provider, credentials: &[Credentials]) -> String {
+    let label = login_provider_label(provider);
+    credentials
+        .iter()
+        .find(|item| item.provider == provider)
+        .map_or_else(
+            || label.to_owned(),
+            |item| format!("{label} ({})", login_provider_status(item)),
+        )
+}
+
+const fn login_provider_label(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Codex => "openai",
+        Provider::Grok => "grok",
+    }
+}
+
+fn login_provider_status(credentials: &Credentials) -> String {
+    let remaining_secs = credentials.expires_at.saturating_sub(now_unix());
+    if remaining_secs == 0 {
+        "logged in, expired".to_owned()
+    } else {
+        format!("logged in, expires in {}", format_duration(remaining_secs))
+    }
 }
 
 fn resolve_served_providers(
@@ -616,6 +664,12 @@ fn reset_config(store: &AppConfigStore) -> Result<()> {
 /// Runs the interactive OAuth login flow and persists the resulting credentials.
 async fn login(store: AuthStore, provider: Provider, originator: &str) -> Result<()> {
     let http = Client::new();
+    let existing_providers = store
+        .load_all()?
+        .into_iter()
+        .map(|credentials| credentials.provider)
+        .collect::<Vec<_>>();
+    let is_new_provider = !existing_providers.contains(&provider);
     let flow = match provider {
         Provider::Codex => create_authorization_flow(originator)?,
         Provider::Grok => {
@@ -652,7 +706,17 @@ async fn login(store: AuthStore, provider: Provider, originator: &str) -> Result
         "logged in {subject} and saved credentials to {}",
         store.path().display()
     );
+    if is_new_provider && !existing_providers.is_empty() {
+        println!("{}", new_provider_daemon_restart_hint(provider));
+    }
     Ok(())
+}
+
+fn new_provider_daemon_restart_hint(provider: Provider) -> String {
+    format!(
+        "If rotom daemon is already running, run `rotom daemon restart` to serve newly logged-in {} models.",
+        provider.display_name()
+    )
 }
 
 /// Forces a refresh of the saved OAuth credentials and writes them back to disk.
@@ -938,10 +1002,11 @@ fn credential_subject(credentials: &Credentials) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppConfig, DEFAULT_MODEL_FALLBACK, bind_from_config, build_update_command, format_models,
-        resolve_model_fallback,
+        AppConfig, DEFAULT_MODEL_FALLBACK, bind_from_config, build_update_command,
+        format_login_provider_choice, format_models, new_provider_daemon_restart_hint,
+        parse_login_provider_choice, resolve_model_fallback,
     };
-    use rotom::config::Provider;
+    use rotom::config::{Credentials, Provider, now_unix};
     use rotom::timefmt::format_duration;
 
     #[test]
@@ -1037,5 +1102,42 @@ mod tests {
         assert!(output.starts_with("Grok (grok)\n"));
         assert!(output.contains("  grok-4\n"));
         assert!(!output.contains("gpt-5.5"));
+    }
+
+    #[test]
+    fn parses_login_provider_choices() {
+        assert_eq!(parse_login_provider_choice("").unwrap(), Provider::Codex);
+        assert_eq!(parse_login_provider_choice("1").unwrap(), Provider::Codex);
+        assert_eq!(parse_login_provider_choice("2").unwrap(), Provider::Grok);
+        assert_eq!(
+            parse_login_provider_choice("openai").unwrap(),
+            Provider::Codex
+        );
+        assert_eq!(parse_login_provider_choice("grok").unwrap(), Provider::Grok);
+    }
+
+    #[test]
+    fn formats_login_provider_choice_with_status() {
+        let credentials = vec![Credentials {
+            provider: Provider::Codex,
+            access_token: "access".into(),
+            refresh_token: "refresh".into(),
+            expires_at: now_unix() + 90,
+            account_id: "account".into(),
+        }];
+
+        let openai = format_login_provider_choice(Provider::Codex, &credentials);
+        let grok = format_login_provider_choice(Provider::Grok, &credentials);
+
+        assert!(openai.starts_with("openai (logged in, expires in "));
+        assert_eq!(grok, "grok");
+    }
+
+    #[test]
+    fn formats_new_provider_daemon_restart_hint() {
+        assert_eq!(
+            new_provider_daemon_restart_hint(Provider::Grok),
+            "If rotom daemon is already running, run `rotom daemon restart` to serve newly logged-in Grok models."
+        );
     }
 }

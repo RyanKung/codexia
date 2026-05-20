@@ -22,8 +22,10 @@ rotom serve
 rotom update
 ```
 
-`login` prints the Codex OAuth URL. Complete the login in a browser, then paste
-the full redirected URL from the browser address bar, for example
+`login` lists the available OAuth providers and starts the selected flow. Use
+`rotom login --provider openai` or `rotom login --provider grok` to skip the
+prompt. Complete the login in a browser, then paste the full redirected URL
+from the browser address bar, for example
 `http://localhost:1455/auth/callback?code=...&state=...`. This matches
 OpenClaw's remote/headless fallback and does not require the gateway host to be
 reachable from the public internet.
@@ -39,6 +41,13 @@ Credentials are stored per provider, so logging in to Grok does not replace
 Codex credentials. When both are present, `serve` exposes both Codex and Grok
 models through the same local OpenAI-compatible and Anthropic-compatible routes.
 Use `--provider grok` only when you intentionally want to serve one provider.
+If `rotom daemon` is already running when you add a new provider, restart it so
+the running service loads the new provider:
+
+```bash
+rotom daemon restart
+```
+
 xAI may still restrict OAuth API access by account tier even when browser login
 succeeds.
 
