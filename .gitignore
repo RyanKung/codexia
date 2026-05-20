@@ -45,3 +45,8 @@ tramp
 *.bak
 *.orig
 *.rej
+
+# Demo outputs: keep README-friendly GIFs only.
+/demos/*
+!/demos/
+!/demos/*.gif

@@ -10,6 +10,20 @@
 Rust gateway that logs in with Codex or Grok OAuth and exposes OpenAI- and
 Anthropic-compatible APIs.
 
+## Demo
+
+Claude Code running through Grok:
+
+<p align="center">
+  <img src="demos/claude-grok-4.3.gif" alt="Claude Code using grok-4.3 through rotom" width="720">
+</p>
+
+Claude Code running through GPT:
+
+<p align="center">
+  <img src="demos/claude-gpt-5.5.gif" alt="Claude Code using gpt-5.5 through rotom" width="720">
+</p>
+
 ## Usage
 
 ```bash
