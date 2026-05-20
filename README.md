@@ -7,8 +7,12 @@
 [![CI](https://github.com/RyanKung/rotom/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/RyanKung/rotom/actions/workflows/ci.yml)
 [![Release](https://github.com/RyanKung/rotom/actions/workflows/release.yml/badge.svg?branch=master)](https://github.com/RyanKung/rotom/actions/workflows/release.yml)
 
-Rust gateway that logs in with Codex or Grok OAuth and exposes OpenAI- and
+Use Codex or Grok OAuth from tools that expect OpenAI- or
 Anthropic-compatible APIs.
+
+rotom is a local Rust gateway for Claude Code, OpenAI SDKs, Anthropic SDKs, and
+other API-compatible clients. Log in once with an OAuth provider, then point
+your tools at the local server.
 
 ## Demo
 
@@ -24,16 +28,22 @@ Claude Code running through GPT:
   <img src="demos/claude-gpt-5.5.gif" alt="Claude Code using gpt-5.5 through rotom" width="720">
 </p>
 
-## Usage
+## Quick Start
 
 ```bash
 cargo install rotom
 rotom login
-rotom config
-rotom serve
+rotom serve --bind 127.0.0.1:14550 --api-key local-secret
+```
 
-# later, update to the latest published release
-rotom update
+Set Claude Code or any Anthropic-compatible client to use the local gateway:
+
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:14550
+export ANTHROPIC_AUTH_TOKEN=local-secret
+export ANTHROPIC_MODEL="gpt-5.5"
+
+claude
 ```
 
 `login` lists the available OAuth providers and starts the selected flow. Use
@@ -41,8 +51,22 @@ rotom update
 prompt. Complete the login in a browser, then paste the full redirected URL
 from the browser address bar, for example
 `http://localhost:1455/auth/callback?code=...&state=...`. This matches
-OpenClaw's remote/headless fallback and does not require the gateway host to be
-reachable from the public internet.
+OpenClaw's remote/headless fallback and does not require your gateway host to
+be reachable from the public internet.
+
+`ANTHROPIC_BASE_URL` should point at the rotom server root, not `/v1`, because
+Anthropic clients append `/v1/messages` themselves.
+
+For non-interactive validation:
+
+```bash
+ANTHROPIC_BASE_URL=http://127.0.0.1:14550 \
+ANTHROPIC_AUTH_TOKEN=local-secret \
+ANTHROPIC_MODEL="gpt-5.5" \
+claude -p "Reply with the single word OK"
+```
+
+## Providers
 
 Grok OAuth uses the same local credential flow with xAI's OAuth endpoints:
 
@@ -64,6 +88,16 @@ rotom daemon restart
 
 xAI may still restrict OAuth API access by account tier even when browser login
 succeeds.
+
+List the model registry grouped by provider:
+
+```bash
+rotom models
+rotom models --provider openai
+rotom models --provider grok
+```
+
+## Use With SDKs
 
 OpenAI-compatible chat request:
 
@@ -90,38 +124,30 @@ curl http://127.0.0.1:14550/v1/messages \
   }'
 ```
 
-Claude Code / Anthropic SDK setup:
+## Runtime Options
+
+Optional local API key protection:
 
 ```bash
-export ANTHROPIC_BASE_URL=http://127.0.0.1:14550
-export ANTHROPIC_AUTH_TOKEN=local-secret
-export ANTHROPIC_MODEL="gpt-5.5"
-claude
+ROTOM_API_KEY=local-secret rotom serve
+curl http://127.0.0.1:14550/v1/models -H 'authorization: Bearer local-secret'
 ```
 
-`ANTHROPIC_BASE_URL` should point at the rotom server root, not `/v1`,
-because Anthropic clients append `/v1/messages` themselves.
-
-Minimal Claude Code flow:
+Interactive runtime configuration:
 
 ```bash
-rotom login
-rotom serve --bind 127.0.0.1:14550 --api-key local-secret
-
-export ANTHROPIC_BASE_URL=http://127.0.0.1:14550
-export ANTHROPIC_AUTH_TOKEN=local-secret
-export ANTHROPIC_MODEL="gpt-5.5"
-
-claude
+rotom config
+rotom config show
+rotom config reset
 ```
 
-For non-interactive validation, this works:
+The config file is stored at `~/.rotom/config.json` by default and is used as
+the fallback source for `rotom serve` and `rotom daemon install`.
+
+Update to the latest published release:
 
 ```bash
-ANTHROPIC_BASE_URL=http://127.0.0.1:14550 \
-ANTHROPIC_AUTH_TOKEN=local-secret \
-ANTHROPIC_MODEL="gpt-5.5" \
-claude -p "Reply with the single word OK"
+rotom update
 ```
 
 rotom defaults unsupported Anthropic-native model ids such as
@@ -137,37 +163,16 @@ default fallback is `gpt-5.5`.
 
 Common pitfalls:
 
-- Do not set `ANTHROPIC_BASE_URL` to `http://127.0.0.1:14550/v1`; Claude Code appends `/v1/messages` itself.
-- Use a model that `/v1/models` actually returns, such as `gpt-5.5`. If Claude Code defaults to `claude-sonnet-*`, the request will fail because rotom proxies Codex models, not Anthropic-hosted model IDs.
-- `ANTHROPIC_AUTH_TOKEN` is only the local gateway key configured with `--api-key`; it is not your upstream OpenAI/Codex OAuth token.
-- If you prefer a background service, install the daemon first and then point `ANTHROPIC_BASE_URL` at the daemon address instead of running `rotom serve` manually.
-
-Optional local API key protection:
-
-```bash
-ROTOM_API_KEY=local-secret rotom serve
-curl http://127.0.0.1:14550/v1/models -H 'authorization: Bearer local-secret'
-```
-
-You can combine it with the model fallback when running Claude Code against the
-gateway:
-
-```bash
-ROTOM_API_KEY=local-secret \
-ROTOM_MODEL_FALLBACK=gpt-5.5 \
-rotom serve
-```
-
-Interactive runtime configuration:
-
-```bash
-rotom config
-rotom config show
-rotom config reset
-```
-
-The config file is stored at `~/.rotom/config.json` by default and is used as
-the fallback source for `rotom serve` and `rotom daemon install`.
+- Do not set `ANTHROPIC_BASE_URL` to `http://127.0.0.1:14550/v1`; Claude
+  Code appends `/v1/messages` itself.
+- Use a model that `/v1/models` actually returns, such as `gpt-5.5`. If Claude
+  Code defaults to `claude-sonnet-*`, the request will fail because rotom
+  proxies Codex models, not Anthropic-hosted model IDs.
+- `ANTHROPIC_AUTH_TOKEN` is only the local gateway key configured with
+  `--api-key`; it is not your upstream OpenAI/Codex OAuth token.
+- If you prefer a background service, install the daemon first and then point
+  `ANTHROPIC_BASE_URL` at the daemon address instead of running `rotom serve`
+  manually.
 
 Refresh stored OAuth tokens while the server is running:
 
@@ -192,44 +197,20 @@ curl http://127.0.0.1:14550/v1/status \
   -H 'authorization: Bearer local-secret'
 ```
 
-Example response:
+Example fields:
 
 ```json
 {
   "account_id": "acc_123",
   "token": {
-    "expires_at": 1778098507,
-    "remaining_seconds": 813427,
-    "expires_at_local": "2026-05-05 12:15:07 +08:00"
+    "expires_at_local": "2026-05-05 12:15:07 +08:00",
+    "remaining_seconds": 813427
   },
   "account": {
-    "name": "Personal",
     "email": "user@example.com",
-    "structure": "personal",
     "plan": "chatgptpro",
-    "has_active_subscription": true,
-    "subscription_expires_at": "2026-05-11T15:16:00+00:00",
-    "subscription_expires_at_local": "2026-05-11 23:16:00 +08:00",
-    "subscription_remaining_seconds": 1212345
-  },
-  "credits_balance": 0,
-  "rate_limits": [
-    {
-      "name": "5h",
-      "remaining_percent": 97.0,
-      "reset_at": "1777297264",
-      "reset_at_local": "2026-04-27 21:41:04 +08:00",
-      "reset_in_seconds": 8658
-    },
-    {
-      "name": "weekly",
-      "remaining_percent": 68.0,
-      "reset_at": "1777400385",
-      "reset_at_local": "2026-04-29 02:19:45 +08:00",
-      "reset_in_seconds": 111779
-    }
-  ],
-  "warnings": []
+    "has_active_subscription": true
+  }
 }
 ```
 
@@ -264,14 +245,6 @@ The daemon runs `rotom serve` with the options passed at install time:
 rotom daemon install \
   --bind 127.0.0.1:14550 \
   --api-key local-secret
-```
-
-List the local model registry grouped by provider:
-
-```bash
-rotom models
-rotom models --provider openai
-rotom models --provider grok
 ```
 
 Models returned by `/v1/models` include the OpenAI/Codex registry:
@@ -320,10 +293,8 @@ rotom therefore accepts them without error and omits them from the upstream
 Codex request, so they should be treated as compatibility no-ops rather than
 effective sampling or output-length controls.
 
-`/v1/responses` currently supports `previous_response_id` only as an
-in-memory continuation mechanism within the same running rotom process. It is
-not exposed as a public retrievable/deletable response resource, and it should
-not be treated as durable storage across daemon restarts or process exits.
+`/v1/responses` supports `previous_response_id` only within the same running
+rotom process. rotom intentionally keeps this local state in memory.
 
 Image generation is exposed in two compatibility shapes:
 
