@@ -244,7 +244,7 @@ mod tests {
     use super::*;
     use crate::{
         Error,
-        config::{AuthStore, Credentials, now_unix},
+        config::{AuthStore, Credentials, Provider, now_unix},
         oauth::CodexOAuthClient,
         openai::response::ModelList,
         testsupport::TempDir,
@@ -848,6 +848,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value = serde_json::from_slice::<Value>(&body).unwrap();
+        assert_eq!(value["provider"], "codex");
         assert_eq!(value["account_id"], "acc_old");
         assert_eq!(value["account"]["plan"], "chatgptplus");
         assert!(value["account"]["subscription_expires_at_local"].is_string());
@@ -858,6 +859,53 @@ mod tests {
         assert!(value["rate_limits"][0]["reset_in_seconds"].is_number());
         assert!(value["token"]["expires_at_local"].is_string());
         assert!(value["warnings"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn status_returns_authenticated_snapshot_for_unsupported_provider() {
+        let dir = TempDir::new().unwrap();
+        let store = AuthStore::new(dir.path().join("auth.json"));
+        store
+            .save(&Credentials {
+                provider: Provider::Grok,
+                access_token: "access".into(),
+                refresh_token: "refresh".into(),
+                expires_at: now_unix() + 600,
+                account_id: String::new(),
+            })
+            .unwrap();
+
+        let http = Client::new();
+        let state = AppState::new_multi_with_model_fallback(
+            vec![UpstreamState {
+                provider: Provider::Grok,
+                token_manager: TokenManager::new_for_provider(store, Provider::Grok, http.clone()),
+                client: CodexClient::new_for_provider(http, Provider::Grok),
+            }],
+            Some("secret".into()),
+            ModelList::from_ids(["grok-4.3"]),
+            None,
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("secret"));
+
+        let response = handlers::status(axum::extract::State(state), headers).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value = serde_json::from_slice::<Value>(&body).unwrap();
+        assert_eq!(value["provider"], "grok");
+        assert!(value["token"]["remaining_seconds"].is_number());
+        assert!(value["account"].is_null());
+        assert!(value["rate_limits"].as_array().unwrap().is_empty());
+        assert_eq!(
+            value["warnings"].as_array().unwrap(),
+            &[
+                json!("Grok account metadata support is not implemented"),
+                json!("Grok rate-limit support is not implemented"),
+            ]
+        );
+        assert!(value.get("expires_at").is_none());
     }
 
     #[tokio::test]

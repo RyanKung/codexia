@@ -193,6 +193,14 @@ pub fn convert_tool_choice(tool_choice: Option<&Value>) -> Option<Value> {
 /// Converts a Responses request plus normalized input items into the Codex body.
 #[must_use]
 pub fn responses_to_codex_request(request: &ResponsesRequest, input: &[Value]) -> Value {
+    let text = request.extra.get("text").cloned().unwrap_or_else(|| {
+        json!({ "verbosity": request.extra.get("text_verbosity").and_then(Value::as_str).unwrap_or("medium") })
+    });
+    let include = request
+        .extra
+        .get("include")
+        .cloned()
+        .unwrap_or_else(|| json!(["reasoning.encrypted_content"]));
     let mut body = json!({
         "model": normalize_model(&request.model),
         "store": request.should_store(),
@@ -201,12 +209,24 @@ pub fn responses_to_codex_request(request: &ResponsesRequest, input: &[Value]) -
         "stream": true,
         "input": input,
         "instructions": request.instructions.as_deref().unwrap_or(""),
-        "text": { "verbosity": request.extra.get("text_verbosity").and_then(Value::as_str).unwrap_or("medium") },
-        "include": ["reasoning.encrypted_content"],
+        "text": text,
+        "include": include,
         "tool_choice": convert_tool_choice(request.tool_choice.as_ref()).unwrap_or_else(|| json!("auto")),
         "parallel_tool_calls": request.parallel_tool_calls()
     });
 
+    insert_optional(
+        &mut body,
+        "temperature",
+        request.temperature.map(Value::from),
+    );
+    insert_optional(&mut body, "top_p", request.top_p.map(Value::from));
+    insert_optional(
+        &mut body,
+        "max_output_tokens",
+        request.max_output_tokens.map(Value::from),
+    );
+    insert_optional(&mut body, "stop", request.extra.get("stop").cloned());
     insert_optional(
         &mut body,
         "service_tier",
@@ -469,10 +489,15 @@ mod tests {
     }
 
     #[test]
-    fn does_not_forward_unsupported_responses_token_limit() {
+    fn forwards_responses_controls_for_provider_filtering() {
         let request: ResponsesRequest = serde_json::from_value(json!({
             "model": "gpt-5.5",
+            "temperature": 0.2,
+            "top_p": 0.8,
             "max_output_tokens": 128,
+            "stop": ["DONE"],
+            "text": {"verbosity": "low"},
+            "include": ["reasoning.encrypted_content"],
             "input": "hello"
         }))
         .unwrap();
@@ -483,7 +508,12 @@ mod tests {
 
         let body = responses_to_codex_request(&request, &input);
 
-        assert_key_absent_recursive(&body, "max_output_tokens");
+        assert_eq!(body["temperature"], 0.2);
+        assert_eq!(body["top_p"], 0.8);
+        assert_eq!(body["max_output_tokens"], 128);
+        assert_eq!(body["stop"], json!(["DONE"]));
+        assert_eq!(body["text"]["verbosity"], "low");
+        assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
     }
 
     #[test]

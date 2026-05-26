@@ -188,9 +188,14 @@ Check token expiry, account metadata, and rate-limit windows:
 
 ```bash
 rotom status
+rotom status --provider grok
 ```
 
-Fetch the same status data over HTTP:
+By default, `rotom status` reports every saved provider. Use `--provider` to
+inspect only one provider. When the daemon responds on the configured bind
+address, `rotom status` also prints the local API endpoint URLs.
+
+Fetch status data over HTTP:
 
 ```bash
 curl http://127.0.0.1:14550/v1/status \
@@ -289,9 +294,11 @@ OpenAI compatibility currently covers:
 On `POST /v1/chat/completions`, rotom accepts common OpenAI compatibility
 fields such as `temperature`, `max_tokens`, `max_completion_tokens`, and
 `max_output_tokens`, but the current Codex upstream rejects those parameters.
-rotom therefore accepts them without error and omits them from the upstream
-Codex request, so they should be treated as compatibility no-ops rather than
-effective sampling or output-length controls.
+rotom therefore accepts them without error and omits them from upstream Codex
+requests, so they should be treated as Codex compatibility no-ops rather than
+effective sampling or output-length controls. Grok Responses requests preserve
+the supported controls that xAI accepts, including `temperature`, `top_p`,
+`max_output_tokens`, `stop`, `text`, `include`, and `parallel_tool_calls`.
 
 `/v1/responses` supports `previous_response_id` only within the same running
 rotom process. rotom intentionally keeps this local state in memory.

@@ -98,6 +98,16 @@ pub(in crate::server::handlers) fn anthropic_responses_request(
     let mut extra = request.extra.clone();
     extra.remove("rotom_anthropic_beta");
     extra.remove("rotom_anthropic_version");
+    if let Some(stop_sequences) = request
+        .stop_sequences
+        .as_ref()
+        .filter(|items| !items.is_empty())
+    {
+        extra.insert(
+            "stop".to_owned(),
+            Value::Array(stop_sequences.iter().cloned().map(Value::String).collect()),
+        );
+    }
     extra.insert(
         "rotom_raw_input_items".to_owned(),
         Value::Array(raw_input_items),
@@ -694,6 +704,7 @@ mod tests {
             "model": "gpt-5.5",
             "system": "be terse",
             "thinking": {"type": "enabled", "budget_tokens": 4096},
+            "stop_sequences": ["DONE"],
             "messages": [{"role": "user", "content": "hello"}]
         }))
         .unwrap();
@@ -716,6 +727,7 @@ mod tests {
             .unwrap();
         assert_eq!(items.len(), 2);
         assert_eq!(items[0]["role"], "developer");
+        assert_eq!(converted.extra["stop"], json!(["DONE"]));
     }
 
     #[test]

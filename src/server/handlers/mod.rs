@@ -18,7 +18,11 @@ use crate::{
         },
         types::{ChatCompletionRequest, ImageGenerationRequest, ResponsesRequest},
     },
-    server::{AppState, auth::authorize, status_response::build_status_response},
+    server::{
+        AppState,
+        auth::authorize,
+        status_response::{build_status_response, build_unsupported_provider_status_response},
+    },
 };
 use axum::{
     Json,
@@ -306,12 +310,7 @@ pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> Respon
     };
 
     if upstream.provider != crate::config::Provider::Codex {
-        return Json(json!({
-            "provider": credentials.provider,
-            "expires_at": credentials.expires_at,
-            "warnings": ["provider status is only available for codex"]
-        }))
-        .into_response();
+        return Json(build_unsupported_provider_status_response(&credentials)).into_response();
     }
 
     let snapshot = state.status.fetch_status(&credentials).await;

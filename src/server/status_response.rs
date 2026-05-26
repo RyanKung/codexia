@@ -14,6 +14,7 @@ pub fn build_status_response(credentials: &Credentials, snapshot: &StatusSnapsho
     let now = crate::config::now_unix();
 
     json!({
+        "provider": credentials.provider,
         "account_id": credentials.account_id,
         "token": {
             "expires_at": credentials.expires_at,
@@ -25,6 +26,21 @@ pub fn build_status_response(credentials: &Credentials, snapshot: &StatusSnapsho
         "rate_limits": snapshot.rate_limits.iter().map(|window| rate_limit_json(window, now)).collect::<Vec<_>>(),
         "warnings": snapshot.warnings,
     })
+}
+
+/// Builds the structured JSON payload for providers without account/rate-limit checks.
+pub fn build_unsupported_provider_status_response(credentials: &Credentials) -> Value {
+    let provider_name = credentials.provider.display_name();
+    let snapshot = StatusSnapshot {
+        account: None,
+        rate_limits: Vec::new(),
+        credits_balance: None,
+        warnings: vec![
+            format!("{provider_name} account metadata support is not implemented"),
+            format!("{provider_name} rate-limit support is not implemented"),
+        ],
+    };
+    build_status_response(credentials, &snapshot)
 }
 
 fn account_status_json(account: &AccountStatus, now_unix: i64) -> Value {

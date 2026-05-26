@@ -226,8 +226,9 @@ impl CodexClient {
 
     async fn send_body(&self, body: &Value, credentials: &Credentials) -> Result<Response> {
         let mut upstream_body = body.clone();
-        if self.provider == Provider::Grok {
-            remove_grok_unsupported_keys(&mut upstream_body);
+        match self.provider {
+            Provider::Codex => remove_codex_unsupported_keys(&mut upstream_body),
+            Provider::Grok => remove_grok_unsupported_keys(&mut upstream_body),
         }
         crate::logging::trace_json("upstream.request", &upstream_body);
         let url = self.responses_url();
@@ -337,7 +338,7 @@ pub fn grok_headers(credentials: &Credentials) -> Result<HeaderMap> {
 
 fn remove_grok_unsupported_keys(body: &mut Value) {
     if let Some(object) = body.as_object_mut() {
-        object.remove("include");
+        object.remove("service_tier");
         let has_tools = object
             .get("tools")
             .and_then(Value::as_array)
@@ -345,6 +346,15 @@ fn remove_grok_unsupported_keys(body: &mut Value) {
         if !has_tools {
             object.remove("tool_choice");
         }
+    }
+}
+
+fn remove_codex_unsupported_keys(body: &mut Value) {
+    if let Some(object) = body.as_object_mut() {
+        object.remove("temperature");
+        object.remove("top_p");
+        object.remove("max_output_tokens");
+        object.remove("stop");
     }
 }
 
@@ -433,12 +443,14 @@ mod tests {
             "model": "grok-4",
             "input": "hello",
             "include": ["reasoning.encrypted_content"],
+            "service_tier": "auto",
             "tool_choice": "auto"
         });
 
         remove_grok_unsupported_keys(&mut body);
 
-        assert!(body.get("include").is_none());
+        assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
+        assert!(body.get("service_tier").is_none());
         assert!(body.get("tool_choice").is_none());
     }
 
@@ -454,5 +466,26 @@ mod tests {
         remove_grok_unsupported_keys(&mut body);
 
         assert_eq!(body["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn removes_codex_unsupported_response_controls() {
+        let mut body = json!({
+            "model": "gpt-5.5",
+            "input": "hello",
+            "temperature": 0.2,
+            "top_p": 0.8,
+            "max_output_tokens": 128,
+            "stop": ["DONE"],
+            "parallel_tool_calls": false
+        });
+
+        remove_codex_unsupported_keys(&mut body);
+
+        assert!(body.get("temperature").is_none());
+        assert!(body.get("top_p").is_none());
+        assert!(body.get("max_output_tokens").is_none());
+        assert!(body.get("stop").is_none());
+        assert_eq!(body["parallel_tool_calls"], false);
     }
 }

@@ -190,11 +190,17 @@ enum Command {
     },
     #[command(
         about = "Fetch token, account, and rate-limit status",
-        long_about = "Refresh credentials if needed, then fetch token expiry, ChatGPT account metadata, and Codex rate-limit windows such as 5h/weekly remaining when available."
+        long_about = "Refresh saved credentials if needed, then fetch token expiry, ChatGPT account metadata, and Codex rate-limit windows such as 5h/weekly remaining when available. When --provider is omitted, reports all saved providers."
     )]
     Status {
         #[arg(long, value_name = "PATH", help = "Credential file to read/write")]
         auth_file: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "PROVIDER",
+            help = "Provider to inspect: codex/openai or grok/xai"
+        )]
+        provider: Option<String>,
     },
     #[command(
         about = "List available models grouped by provider",
@@ -375,7 +381,10 @@ async fn run(cli: Cli) -> Result<()> {
             auth_file,
             provider,
         } => refresh(auth_store(auth_file)?, provider).await,
-        Command::Status { auth_file } => status(auth_store(auth_file)?).await,
+        Command::Status {
+            auth_file,
+            provider,
+        } => status(auth_store(auth_file)?, provider).await,
         Command::Models { provider } => models(provider),
         Command::Update { version } => update(version.as_deref()),
         Command::Daemon { command } => daemon_command(command, cli.verbose),
@@ -763,20 +772,44 @@ async fn refresh_credentials(credentials: &Credentials) -> Result<Credentials> {
 }
 
 /// Fetches token, plan, and rate-limit status and renders a human-readable report.
-async fn status(store: AuthStore) -> Result<()> {
+async fn status(store: AuthStore, provider: Option<String>) -> Result<()> {
     let http = Client::new();
-    let stored = store
-        .load()?
-        .ok_or_else(|| Error::config("not logged in; run `rotom login` first"))?;
-    let provider = stored.provider;
-    let token_manager = TokenManager::new_for_provider(store, provider, http.clone());
+    let requested_provider = provider
+        .map(|value| value.parse::<Provider>())
+        .transpose()?;
+    let providers = resolve_status_providers(store.load_all()?, requested_provider)?;
+
+    for (index, provider) in providers.into_iter().enumerate() {
+        if index > 0 {
+            println!();
+        }
+        render_provider_status(&store, provider, http.clone()).await?;
+    }
+
+    if let Some(base_url) = running_daemon_base_url(&http).await {
+        println!();
+        println!("daemon: running at {base_url}");
+        println!("endpoints:");
+        for line in daemon_endpoint_lines(&base_url) {
+            println!("{line}");
+        }
+    }
+
+    Ok(())
+}
+
+async fn render_provider_status(store: &AuthStore, provider: Provider, http: Client) -> Result<()> {
+    let token_manager = TokenManager::new_for_provider(store.clone(), provider, http.clone());
     let credentials = token_manager.credentials().await?;
     println!("provider: {}", credentials.provider);
     println!("token: {}", token_expiry_message(&credentials));
     if provider == Provider::Grok {
-        println!("status: Grok account and rate-limit status are not available yet");
+        for line in unsupported_provider_status_lines(provider) {
+            println!("{line}");
+        }
         return Ok(());
     }
+    println!("status: authenticated");
     let snapshot = StatusClient::new(http, CodexClient::default_base_url())
         .fetch_status(&credentials)
         .await;
@@ -832,6 +865,73 @@ async fn status(store: AuthStore) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn resolve_status_providers(
+    credentials: Vec<Credentials>,
+    requested_provider: Option<Provider>,
+) -> Result<Vec<Provider>> {
+    if credentials.is_empty() {
+        return Err(Error::config("not logged in; run `rotom login` first"));
+    }
+
+    if let Some(provider) = requested_provider {
+        return if credentials.iter().any(|item| item.provider == provider) {
+            Ok(vec![provider])
+        } else {
+            Err(Error::config(format!(
+                "not logged in for provider {provider}; run `rotom login --provider {provider}` first"
+            )))
+        };
+    }
+
+    let mut providers = credentials
+        .into_iter()
+        .map(|credentials| credentials.provider)
+        .collect::<Vec<_>>();
+    providers.sort_unstable();
+    providers.dedup();
+    Ok(providers)
+}
+
+async fn running_daemon_base_url(http: &Client) -> Option<String> {
+    let config = load_app_config().ok().flatten();
+    let bind = bind_from_config(config.as_ref()).unwrap_or_else(default_bind);
+    let base_url = format!("http://{bind}");
+    let health_url = format!("{base_url}/health");
+    let response = http
+        .get(health_url)
+        .timeout(Duration::from_millis(500))
+        .send()
+        .await
+        .ok()?;
+
+    response.status().is_success().then_some(base_url)
+}
+
+fn daemon_endpoint_lines(base_url: &str) -> Vec<String> {
+    const ENDPOINTS: [(&str, &str); 15] = [
+        ("GET", "/health"),
+        ("GET", "/v1/status"),
+        ("GET", "/v1/models"),
+        ("POST", "/v1/auth/refresh"),
+        ("POST", "/v1/chat/completions"),
+        ("POST", "/v1/responses"),
+        ("POST", "/v1/responses/compact"),
+        ("POST", "/v1/responses/input_tokens"),
+        ("POST", "/v1/messages"),
+        ("POST", "/v1/messages/count_tokens"),
+        ("GET,POST", "/v1/messages/batches"),
+        ("GET,DELETE", "/v1/messages/batches/{batch_id}"),
+        ("POST", "/v1/messages/batches/{batch_id}/cancel"),
+        ("GET", "/v1/messages/batches/{batch_id}/results"),
+        ("POST", "/v1/images/generations"),
+    ];
+
+    ENDPOINTS
+        .iter()
+        .map(|(method, path)| format!("  {method:<10} {base_url}{path}"))
+        .collect()
 }
 
 /// Resolves the configured credential store path.
@@ -999,12 +1099,24 @@ fn credential_subject(credentials: &Credentials) -> String {
     }
 }
 
+fn unsupported_provider_status_lines(provider: Provider) -> [String; 3] {
+    let provider_name = provider.display_name();
+    [
+        "status: authenticated".to_owned(),
+        format!(
+            "account: not checked ({provider_name} account metadata support is not implemented)"
+        ),
+        format!("rate_limits: not checked ({provider_name} rate-limit support is not implemented)"),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         AppConfig, DEFAULT_MODEL_FALLBACK, bind_from_config, build_update_command,
-        format_login_provider_choice, format_models, new_provider_daemon_restart_hint,
-        parse_login_provider_choice, resolve_model_fallback,
+        daemon_endpoint_lines, format_login_provider_choice, format_models,
+        new_provider_daemon_restart_hint, parse_login_provider_choice, resolve_model_fallback,
+        resolve_status_providers, unsupported_provider_status_lines,
     };
     use rotom::config::{Credentials, Provider, now_unix};
     use rotom::timefmt::format_duration;
@@ -1134,10 +1246,108 @@ mod tests {
     }
 
     #[test]
+    fn resolves_all_saved_status_providers_by_default() {
+        let providers = resolve_status_providers(
+            vec![
+                Credentials {
+                    provider: Provider::Grok,
+                    access_token: "access".into(),
+                    refresh_token: "refresh".into(),
+                    expires_at: now_unix() + 90,
+                    account_id: String::new(),
+                },
+                Credentials {
+                    provider: Provider::Codex,
+                    access_token: "access".into(),
+                    refresh_token: "refresh".into(),
+                    expires_at: now_unix() + 90,
+                    account_id: "account".into(),
+                },
+            ],
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(providers, [Provider::Codex, Provider::Grok]);
+    }
+
+    #[test]
+    fn filters_status_provider_when_requested() {
+        let providers = resolve_status_providers(
+            vec![
+                Credentials {
+                    provider: Provider::Codex,
+                    access_token: "access".into(),
+                    refresh_token: "refresh".into(),
+                    expires_at: now_unix() + 90,
+                    account_id: "account".into(),
+                },
+                Credentials {
+                    provider: Provider::Grok,
+                    access_token: "access".into(),
+                    refresh_token: "refresh".into(),
+                    expires_at: now_unix() + 90,
+                    account_id: String::new(),
+                },
+            ],
+            Some(Provider::Grok),
+        )
+        .unwrap();
+
+        assert_eq!(providers, [Provider::Grok]);
+    }
+
+    #[test]
+    fn rejects_missing_status_provider() {
+        assert!(
+            resolve_status_providers(
+                vec![Credentials {
+                    provider: Provider::Codex,
+                    access_token: "access".into(),
+                    refresh_token: "refresh".into(),
+                    expires_at: now_unix() + 90,
+                    account_id: "account".into(),
+                }],
+                Some(Provider::Grok),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn formats_daemon_endpoint_lines_with_base_url() {
+        let lines = daemon_endpoint_lines("http://127.0.0.1:14550");
+
+        assert!(lines.contains(&"  GET        http://127.0.0.1:14550/health".to_owned()));
+        assert!(
+            lines.contains(&"  POST       http://127.0.0.1:14550/v1/chat/completions".to_owned())
+        );
+        assert!(
+            lines.contains(&"  GET,POST   http://127.0.0.1:14550/v1/messages/batches".to_owned())
+        );
+        assert!(
+            lines.contains(&"  POST       http://127.0.0.1:14550/v1/images/generations".to_owned())
+        );
+    }
+
+    #[test]
     fn formats_new_provider_daemon_restart_hint() {
         assert_eq!(
             new_provider_daemon_restart_hint(Provider::Grok),
             "If rotom daemon is already running, run `rotom daemon restart` to serve newly logged-in Grok models."
+        );
+    }
+
+    #[test]
+    fn formats_unsupported_provider_status_as_authenticated_with_missing_details() {
+        assert_eq!(
+            unsupported_provider_status_lines(Provider::Grok),
+            [
+                "status: authenticated".to_owned(),
+                "account: not checked (Grok account metadata support is not implemented)"
+                    .to_owned(),
+                "rate_limits: not checked (Grok rate-limit support is not implemented)".to_owned(),
+            ]
         );
     }
 }
