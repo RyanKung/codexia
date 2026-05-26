@@ -184,7 +184,7 @@ curl -X POST http://127.0.0.1:14550/v1/auth/refresh \
 From the CLI, `rotom refresh` refreshes all saved providers. Use
 `rotom refresh --provider grok` to refresh only one provider.
 
-Check token expiry, account metadata, and rate-limit windows:
+Check token expiry, authentication status, and daemon endpoints:
 
 ```bash
 rotom status

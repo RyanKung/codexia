@@ -22,8 +22,7 @@ use rotom::{
         CodexOAuthClient, GrokOAuthClient, create_authorization_flow, parse_authorization_input,
     },
     server::{AppState, UpstreamState, serve},
-    status::StatusClient,
-    timefmt::{format_duration, format_status_time_human},
+    timefmt::format_duration,
     token::TokenManager,
 };
 use std::{
@@ -189,8 +188,8 @@ enum Command {
         provider: Option<String>,
     },
     #[command(
-        about = "Fetch token, account, and rate-limit status",
-        long_about = "Refresh saved credentials if needed, then fetch token expiry, ChatGPT account metadata, and Codex rate-limit windows such as 5h/weekly remaining when available. When --provider is omitted, reports all saved providers."
+        about = "Show provider token status and daemon endpoints",
+        long_about = "Refresh saved credentials if needed, then show token expiry and authentication status for saved providers. When --provider is omitted, reports all saved providers. If the daemon is running, also prints its local API endpoint URLs."
     )]
     Status {
         #[arg(long, value_name = "PATH", help = "Credential file to read/write")]
@@ -771,7 +770,7 @@ async fn refresh_credentials(credentials: &Credentials) -> Result<Credentials> {
     }
 }
 
-/// Fetches token, plan, and rate-limit status and renders a human-readable report.
+/// Fetches token status and renders a human-readable report.
 async fn status(store: AuthStore, provider: Option<String>) -> Result<()> {
     let http = Client::new();
     let requested_provider = provider
@@ -799,71 +798,11 @@ async fn status(store: AuthStore, provider: Option<String>) -> Result<()> {
 }
 
 async fn render_provider_status(store: &AuthStore, provider: Provider, http: Client) -> Result<()> {
-    let token_manager = TokenManager::new_for_provider(store.clone(), provider, http.clone());
+    let token_manager = TokenManager::new_for_provider(store.clone(), provider, http);
     let credentials = token_manager.credentials().await?;
     println!("provider: {}", credentials.provider);
     println!("token: {}", token_expiry_message(&credentials));
-    if provider == Provider::Grok {
-        for line in unsupported_provider_status_lines(provider) {
-            println!("{line}");
-        }
-        return Ok(());
-    }
     println!("status: authenticated");
-    let snapshot = StatusClient::new(http, CodexClient::default_base_url())
-        .fetch_status(&credentials)
-        .await;
-
-    println!("account_id: {}", credentials.account_id);
-
-    if let Some(account) = snapshot.account {
-        if let Some(email) = account.email {
-            println!("email: {email}");
-        }
-        if let Some(plan) = account.plan {
-            match account.has_active_subscription {
-                Some(active) => println!("plan: {plan} (active: {active})"),
-                None => println!("plan: {plan}"),
-            }
-        }
-        if let Some(structure) = account.structure {
-            println!("account_structure: {structure}");
-        }
-        if let Some(name) = account.name {
-            println!("account_name: {name}");
-        }
-        if let Some(expires_at) = account.subscription_expires_at {
-            println!(
-                "subscription_expires_at: {}",
-                format_status_time_human(&expires_at)
-            );
-        }
-    }
-
-    if let Some(balance) = snapshot.credits_balance {
-        println!("credits_balance: {balance}");
-    }
-
-    if snapshot.rate_limits.is_empty() {
-        println!("rate_limits: unavailable");
-    } else {
-        for window in snapshot.rate_limits {
-            let mut line = format!(
-                "rate_limit_{}: {:.0}% remaining",
-                window.name, window.remaining_percent
-            );
-            if let Some(reset_at) = window.reset_at {
-                use std::fmt::Write as _;
-                let _ = write!(line, ", resets {}", format_status_time_human(&reset_at));
-            }
-            println!("{line}");
-        }
-    }
-
-    for warning in snapshot.warnings {
-        println!("warning: {warning}");
-    }
-
     Ok(())
 }
 
@@ -1088,35 +1027,16 @@ fn token_expiry_message(credentials: &Credentials) -> String {
 }
 
 fn credential_subject(credentials: &Credentials) -> String {
-    if credentials.account_id.is_empty() {
-        format!("{} credentials", credentials.provider.display_name())
-    } else {
-        format!(
-            "{} account {}",
-            credentials.provider.display_name(),
-            credentials.account_id
-        )
-    }
-}
-
-fn unsupported_provider_status_lines(provider: Provider) -> [String; 3] {
-    let provider_name = provider.display_name();
-    [
-        "status: authenticated".to_owned(),
-        format!(
-            "account: not checked ({provider_name} account metadata support is not implemented)"
-        ),
-        format!("rate_limits: not checked ({provider_name} rate-limit support is not implemented)"),
-    ]
+    format!("{} credentials", credentials.provider.display_name())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         AppConfig, DEFAULT_MODEL_FALLBACK, bind_from_config, build_update_command,
-        daemon_endpoint_lines, format_login_provider_choice, format_models,
+        credential_subject, daemon_endpoint_lines, format_login_provider_choice, format_models,
         new_provider_daemon_restart_hint, parse_login_provider_choice, resolve_model_fallback,
-        resolve_status_providers, unsupported_provider_status_lines,
+        resolve_status_providers, token_expiry_message,
     };
     use rotom::config::{Credentials, Provider, now_unix};
     use rotom::timefmt::format_duration;
@@ -1246,6 +1166,22 @@ mod tests {
     }
 
     #[test]
+    fn credential_subject_does_not_include_account_id() {
+        let credentials = Credentials {
+            provider: Provider::Codex,
+            access_token: "access".into(),
+            refresh_token: "refresh".into(),
+            expires_at: now_unix() + 90,
+            account_id: "account-secret".into(),
+        };
+
+        assert_eq!(credential_subject(&credentials), "Codex credentials");
+        let token_message = token_expiry_message(&credentials);
+        assert!(token_message.contains("(Codex credentials)"));
+        assert!(!token_message.contains("account-secret"));
+    }
+
+    #[test]
     fn resolves_all_saved_status_providers_by_default() {
         let providers = resolve_status_providers(
             vec![
@@ -1335,19 +1271,6 @@ mod tests {
         assert_eq!(
             new_provider_daemon_restart_hint(Provider::Grok),
             "If rotom daemon is already running, run `rotom daemon restart` to serve newly logged-in Grok models."
-        );
-    }
-
-    #[test]
-    fn formats_unsupported_provider_status_as_authenticated_with_missing_details() {
-        assert_eq!(
-            unsupported_provider_status_lines(Provider::Grok),
-            [
-                "status: authenticated".to_owned(),
-                "account: not checked (Grok account metadata support is not implemented)"
-                    .to_owned(),
-                "rate_limits: not checked (Grok rate-limit support is not implemented)".to_owned(),
-            ]
         );
     }
 }
