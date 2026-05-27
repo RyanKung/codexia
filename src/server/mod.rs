@@ -434,6 +434,20 @@ mod tests {
         )
     }
 
+    async fn codex_null_output_stream_handler() -> impl axum::response::IntoResponse {
+        (
+            [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+            concat!(
+                "event: response.output_text.delta\n",
+                "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"item_id\":\"msg_1\",\"content_index\":0,\"delta\":\"OK\"}\n\n",
+                "event: response.output_text.done\n",
+                "data: {\"type\":\"response.output_text.done\",\"output_index\":0,\"item_id\":\"msg_1\",\"content_index\":0,\"text\":\"OK\"}\n\n",
+                "event: response.completed\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_null_output\",\"model\":\"gpt-5.5\",\"status\":\"completed\",\"output\":null,\"usage\":{\"input_tokens\":12,\"output_tokens\":5,\"total_tokens\":17}}}\n\n"
+            ),
+        )
+    }
+
     async fn codex_incomplete_handler() -> impl axum::response::IntoResponse {
         (
             [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
@@ -544,6 +558,17 @@ mod tests {
 
     async fn spawn_cache_usage_stream_codex_server() -> String {
         let app = Router::new().route("/codex/responses", post(codex_cache_usage_stream_handler));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        url
+    }
+
+    async fn spawn_null_output_stream_codex_server() -> String {
+        let app = Router::new().route("/codex/responses", post(codex_null_output_stream_handler));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move {
@@ -1271,6 +1296,59 @@ mod tests {
         assert!(text.contains("event: response.completed"));
         assert!(text.contains("\"type\":\"image_generation_call\""));
         assert!(text.contains("\"result\":\"YWJj\""));
+    }
+
+    #[tokio::test]
+    async fn responses_raw_stream_backfills_null_terminal_output() {
+        let dir = TempDir::new().unwrap();
+        let store = AuthStore::new(dir.path().join("auth.json"));
+        store
+            .save(&Credentials {
+                provider: crate::config::Provider::Codex,
+                access_token: "access".into(),
+                refresh_token: "refresh".into(),
+                expires_at: now_unix() + 600,
+                account_id: "acc_old".into(),
+            })
+            .unwrap();
+        let http = Client::new();
+        let state = AppState::new(
+            TokenManager::new(
+                store,
+                CodexOAuthClient::new_with_token_url(http.clone(), spawn_refresh_server().await),
+            ),
+            CodexClient::new(http, spawn_null_output_stream_codex_server().await),
+            Some("secret".into()),
+            ModelList::from_ids(["gpt-5.5"]),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("secret"));
+
+        let response = handlers::responses(
+            axum::extract::State(state),
+            headers,
+            Json(
+                serde_json::from_value(json!({
+                    "model": "gpt-5.5",
+                    "stream": true,
+                    "input": "hello",
+                    "tools": [{"type":"image_generation","size":"1024x1024"}],
+                    "tool_choice": {"type":"image_generation"}
+                }))
+                .unwrap(),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("event: response.completed"));
+        assert!(!text.contains("\"output\":null"));
+        assert!(text.contains("\"output\":["));
+        assert!(text.contains("\"type\":\"message\""));
+        assert!(text.contains("\"id\":\"msg_1\""));
+        assert!(text.contains("\"text\":\"OK\""));
     }
 
     #[tokio::test]

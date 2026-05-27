@@ -221,10 +221,12 @@ pub(super) fn openai_raw_responses_sse(
 ) -> Sse<impl Stream<Item = std::result::Result<Event, Infallible>>> {
     let mapped = async_stream::stream! {
         let mut stream = stream;
+        let mut state = RawResponsesStreamState::default();
 
         while let Some(item) = stream.next().await {
             match item {
-                Ok(item) => {
+                Ok(mut item) => {
+                    sanitize_raw_responses_event(&mut item.value, &mut state);
                     if is_done_event(&item.value) {
                         if let Some(response) = item.value.get("response").cloned() {
                             let completed = response_object_from_upstream(&request, &response);
@@ -257,6 +259,113 @@ pub(super) fn openai_raw_responses_sse(
     };
 
     Sse::new(mapped).keep_alive(KeepAlive::default())
+}
+
+#[derive(Default)]
+struct RawResponsesStreamState {
+    output_items: std::collections::BTreeMap<u32, Value>,
+    text_items: std::collections::BTreeMap<u32, RawTextOutput>,
+}
+
+#[derive(Default)]
+struct RawTextOutput {
+    item_id: Option<String>,
+    text: String,
+}
+
+fn sanitize_raw_responses_event(event: &mut Value, state: &mut RawResponsesStreamState) {
+    let is_terminal = is_done_event(event);
+    match event.get("type").and_then(Value::as_str) {
+        Some("response.output_text.delta") => {
+            let index = output_index(event);
+            let text = event
+                .get("delta")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let item = state.text_items.entry(index).or_default();
+            remember_item_id(item, event);
+            item.text.push_str(text);
+        }
+        Some("response.output_text.done") => {
+            let index = output_index(event);
+            let text = event.get("text").and_then(Value::as_str);
+            let item = state.text_items.entry(index).or_default();
+            remember_item_id(item, event);
+            if let Some(text) = text {
+                text.clone_into(&mut item.text);
+            }
+        }
+        Some("response.output_item.done") => {
+            if let Some(item) = event.get("item").cloned() {
+                state.output_items.insert(output_index(event), item);
+            }
+        }
+        _ => {}
+    }
+
+    let Some(response) = event.get_mut("response").and_then(Value::as_object_mut) else {
+        return;
+    };
+    if is_terminal && response_output_needs_backfill(response.get("output")) {
+        response.insert("output".to_owned(), Value::Array(state.recovered_output()));
+    } else if response_output_needs_array(response.get("output")) {
+        response.insert("output".to_owned(), Value::Array(Vec::new()));
+    }
+}
+
+fn remember_item_id(item: &mut RawTextOutput, event: &Value) {
+    if item.item_id.is_none() {
+        item.item_id = event
+            .get("item_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+    }
+}
+
+fn response_output_needs_backfill(output: Option<&Value>) -> bool {
+    match output {
+        Some(Value::Array(items)) => items.is_empty(),
+        Some(Value::Null) | None => true,
+        Some(_) => false,
+    }
+}
+
+const fn response_output_needs_array(output: Option<&Value>) -> bool {
+    matches!(output, Some(Value::Null) | None)
+}
+
+impl RawResponsesStreamState {
+    fn recovered_output(&self) -> Vec<Value> {
+        let mut output = self.output_items.clone();
+        for (index, text_item) in &self.text_items {
+            if text_item.text.is_empty() {
+                continue;
+            }
+            output
+                .entry(*index)
+                .or_insert_with(|| synthesized_message_item(*index, text_item));
+        }
+
+        output.into_values().collect()
+    }
+}
+
+fn synthesized_message_item(index: u32, text_item: &RawTextOutput) -> Value {
+    let id = text_item
+        .item_id
+        .clone()
+        .unwrap_or_else(|| format!("msg_{index}"));
+    json!({
+        "type": "message",
+        "id": id,
+        "status": "completed",
+        "role": "assistant",
+        "content": [{
+            "type": "output_text",
+            "text": text_item.text,
+            "annotations": []
+        }]
+    })
 }
 
 #[allow(clippy::too_many_lines)]
@@ -680,4 +789,71 @@ fn reasoning_signature_from_event_item(event: &Value) -> Option<String> {
 struct ToolMeta {
     id: String,
     name: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn raw_responses_sanitizer_backfills_null_output_from_done_items() {
+        let mut state = RawResponsesStreamState::default();
+        let mut done_item = json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {
+                "type": "function_call",
+                "id": "fc_1",
+                "call_id": "call_1",
+                "name": "lookup",
+                "arguments": "{\"q\":\"x\"}"
+            }
+        });
+        sanitize_raw_responses_event(&mut done_item, &mut state);
+
+        let mut completed = json!({
+            "type": "response.completed",
+            "response": {
+                "id": "resp_1",
+                "model": "gpt-5.5",
+                "status": "completed",
+                "output": null
+            }
+        });
+        sanitize_raw_responses_event(&mut completed, &mut state);
+
+        assert_eq!(completed["response"]["output"][0]["type"], "function_call");
+        assert_eq!(completed["response"]["output"][0]["call_id"], "call_1");
+    }
+
+    #[test]
+    fn raw_responses_sanitizer_synthesizes_output_from_text_deltas() {
+        let mut state = RawResponsesStreamState::default();
+        let mut delta = json!({
+            "type": "response.output_text.delta",
+            "output_index": 0,
+            "item_id": "msg_1",
+            "delta": "OK"
+        });
+        sanitize_raw_responses_event(&mut delta, &mut state);
+
+        let mut completed = json!({
+            "type": "response.completed",
+            "response": {
+                "id": "resp_1",
+                "model": "gpt-5.5",
+                "status": "completed",
+                "output": null
+            }
+        });
+        sanitize_raw_responses_event(&mut completed, &mut state);
+
+        assert_eq!(completed["response"]["output"][0]["type"], "message");
+        assert_eq!(completed["response"]["output"][0]["id"], "msg_1");
+        assert_eq!(
+            completed["response"]["output"][0]["content"][0]["text"],
+            "OK"
+        );
+    }
 }
