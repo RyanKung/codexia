@@ -1488,6 +1488,7 @@ mod tests {
         assert!(text.contains("event: ping"));
         assert!(text.contains("\"type\":\"thinking\""));
         assert!(text.contains("\"type\":\"thinking_delta\""));
+        assert_eq!(text.matches("\"thinking\":\"step\"").count(), 1);
         assert!(text.contains("\"type\":\"signature_delta\""));
         assert!(text.contains("event: message_stop"));
     }

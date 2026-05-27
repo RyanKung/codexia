@@ -284,6 +284,7 @@ pub(super) fn anthropic_raw_messages_sse_response(
         let mut open_tool_blocks = std::collections::BTreeSet::<u32>::new();
         let mut open_thinking_blocks = std::collections::BTreeSet::<u32>::new();
         let mut seen_tool_blocks = std::collections::BTreeSet::<u32>::new();
+        let mut seen_thinking_text_blocks = std::collections::BTreeSet::<u32>::new();
         let mut tool_meta = std::collections::HashMap::<String, ToolMeta>::new();
         let mut usage = crate::anthropic::ResponseUsage {
             input_tokens,
@@ -399,7 +400,8 @@ pub(super) fn anthropic_raw_messages_sse_response(
                                 if open_thinking_blocks.insert(index) {
                                     yield_event_or_error!(thinking_block_start(index));
                                 }
-                                if !thinking.is_empty() {
+                                if !thinking.is_empty() && !seen_thinking_text_blocks.contains(&index) {
+                                    seen_thinking_text_blocks.insert(index);
                                     usage.output_tokens = usage
                                         .output_tokens
                                         .saturating_add(estimate_stream_tokens(&thinking));
@@ -427,6 +429,7 @@ pub(super) fn anthropic_raw_messages_sse_response(
                                 if open_thinking_blocks.insert(index) {
                                     yield_event_or_error!(thinking_block_start(index));
                                 }
+                                seen_thinking_text_blocks.insert(index);
                                 usage.output_tokens =
                                     usage.output_tokens.saturating_add(estimate_stream_tokens(delta));
                                 yield_event_or_error!(thinking_delta(index, delta));
