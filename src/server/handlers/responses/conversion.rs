@@ -5,13 +5,14 @@ use crate::{
     },
     error::Result,
     openai::types::{
-        ChatCompletionRequest, ChatContent, ChatContentPart, ChatMessage, ChatTool,
+        ChatCompletionRequest, ChatContent, ChatContentPart, ChatMessage, ChatTool, FunctionCall,
         ImageGenerationRequest, ImageUrl, ResponseInput, ResponseInputContent, ResponseInputItem,
-        ResponseMessageInputItem, ResponsesRequest,
+        ResponseMessageInputItem, ResponsesRequest, ToolCall,
     },
     server::AppState,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
+use serde_json::Map;
 use serde_json::{Value, json};
 
 pub(in crate::server::handlers) async fn load_previous_response(
@@ -73,6 +74,8 @@ pub(in crate::server::handlers) fn response_request_requires_raw_mode(
         .as_ref()
         .is_some_and(|tools| tools.iter().any(is_image_generation_tool))
         || previous_stores_generated_images(previous)
+        || response_input_requires_raw_mode(request.input.as_ref())
+        || previous_stores_raw_response_items(previous)
 }
 
 fn previous_stores_generated_images(
@@ -84,6 +87,41 @@ fn previous_stores_generated_images(
             .iter()
             .any(|item| item.get("type").and_then(Value::as_str) == Some("image_generation_call"))
     })
+}
+
+fn response_input_requires_raw_mode(input: Option<&ResponseInput>) -> bool {
+    match input {
+        Some(ResponseInput::Items(items)) => items.iter().any(response_item_requires_raw_mode),
+        Some(ResponseInput::Text(_)) | None => false,
+    }
+}
+
+const fn response_item_requires_raw_mode(item: &ResponseInputItem) -> bool {
+    matches!(
+        item,
+        ResponseInputItem::FunctionCall(_)
+            | ResponseInputItem::FunctionCallOutput(_)
+            | ResponseInputItem::Reasoning(_)
+            | ResponseInputItem::Raw(_)
+    )
+}
+
+fn previous_stores_raw_response_items(
+    previous: Option<&crate::server::store::StoredResponse>,
+) -> bool {
+    previous.is_some_and(|stored| {
+        stored
+            .input_items
+            .iter()
+            .any(is_native_response_replay_item)
+    })
+}
+
+fn is_native_response_replay_item(item: &Value) -> bool {
+    matches!(
+        item.get("type").and_then(Value::as_str),
+        Some("function_call" | "function_call_output" | "reasoning")
+    )
 }
 
 fn is_image_generation_tool(tool: &ChatTool) -> bool {
@@ -225,6 +263,9 @@ pub(in crate::server::handlers) fn collect_response_input_items(
                     id: None,
                     name: None,
                     tool_call_id: None,
+                    status: None,
+                    phase: None,
+                    extra: Map::new(),
                 },
             ))?);
         }
@@ -256,6 +297,28 @@ fn response_input_item_to_chat_message(item: &ResponseInputItem) -> Option<ChatM
             tool_call_id: message.tool_call_id.clone(),
             tool_calls: None,
         }),
+        ResponseInputItem::FunctionCall(call) => Some(ChatMessage {
+            role: "assistant".to_owned(),
+            content: None,
+            name: None,
+            tool_call_id: None,
+            tool_calls: Some(vec![ToolCall {
+                id: call.call_id.clone(),
+                kind: "function".to_owned(),
+                function: FunctionCall {
+                    name: call.name.clone(),
+                    arguments: response_arguments_to_string(&call.arguments),
+                },
+            }]),
+        }),
+        ResponseInputItem::FunctionCallOutput(output) => Some(ChatMessage {
+            role: "tool".to_owned(),
+            content: Some(ChatContent::Text(response_output_to_string(&output.output))),
+            name: None,
+            tool_call_id: Some(output.call_id.clone()),
+            tool_calls: None,
+        }),
+        ResponseInputItem::Reasoning(_) | ResponseInputItem::Raw(_) => None,
         ResponseInputItem::Compaction(compaction) => {
             decode_compaction_summary(&compaction.encrypted_content).map(|summary| ChatMessage {
                 role: "developer".to_owned(),
@@ -265,6 +328,22 @@ fn response_input_item_to_chat_message(item: &ResponseInputItem) -> Option<ChatM
                 tool_calls: None,
             })
         }
+    }
+}
+
+fn response_arguments_to_string(arguments: &Value) -> String {
+    match arguments {
+        Value::String(value) if !value.trim().is_empty() => value.clone(),
+        Value::Null => "{}".to_owned(),
+        other => other.to_string(),
+    }
+}
+
+fn response_output_to_string(output: &Value) -> String {
+    match output {
+        Value::String(value) => value.clone(),
+        Value::Null => String::new(),
+        other => other.to_string(),
     }
 }
 
@@ -363,6 +442,7 @@ fn json_text_input_part(text: &str) -> crate::openai::types::ResponseInputConten
         text: Some(text.to_owned()),
         image_url: None,
         detail: None,
+        extra: Map::new(),
     }
 }
 
@@ -863,5 +943,32 @@ mod tests {
         assert_eq!(items[1]["type"], "function_call");
         assert_eq!(items[2]["type"], "message");
         assert_eq!(items[2]["content"][0]["text"], "after");
+    }
+
+    #[test]
+    fn responses_function_history_requires_raw_mode() {
+        let request: ResponsesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "input": [
+                {"role": "user", "content": "hi"},
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "lookup",
+                    "arguments": "{\"q\":\"x\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "done"
+                }
+            ]
+        }))
+        .unwrap();
+
+        assert!(response_request_requires_raw_mode(&request, None));
+        let items = collect_response_input_items(&request, None).unwrap();
+        assert_eq!(items[1]["type"], "function_call");
+        assert_eq!(items[2]["type"], "function_call_output");
     }
 }

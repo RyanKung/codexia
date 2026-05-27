@@ -86,7 +86,8 @@ pub fn stop() -> Result<()> {
     match platform()? {
         Platform::MacOs => {
             let domain = launchd_domain()?;
-            run_command("launchctl", ["bootout", &domain, LAUNCHD_LABEL])
+            let target = launchd_service_target(&domain);
+            run_command("launchctl", ["bootout", &target])
         }
         Platform::Linux => systemctl(["stop", SYSTEMD_UNIT]),
     }
@@ -101,7 +102,7 @@ pub fn restart() -> Result<()> {
     match platform()? {
         Platform::MacOs => {
             let domain = launchd_domain()?;
-            let target = format!("{domain}/{LAUNCHD_LABEL}");
+            let target = launchd_service_target(&domain);
             run_command("launchctl", ["kickstart", "-k", &target])
         }
         Platform::Linux => systemctl(["restart", SYSTEMD_UNIT]),
@@ -129,7 +130,8 @@ pub fn uninstall() -> Result<()> {
     match platform()? {
         Platform::MacOs => {
             let domain = launchd_domain()?;
-            let _ = run_command("launchctl", ["bootout", &domain, LAUNCHD_LABEL]);
+            let target = launchd_service_target(&domain);
+            let _ = run_command("launchctl", ["bootout", &target]);
             let plist = launchd_plist_path()?;
             remove_if_exists(&plist)?;
             println!("removed {}", plist.display());
@@ -201,7 +203,7 @@ fn status_launchd() -> Result<()> {
     }
 
     let domain = launchd_domain()?;
-    let target = format!("{domain}/{LAUNCHD_LABEL}");
+    let target = launchd_service_target(&domain);
     let output = Command::new("launchctl")
         .args(["print", &target])
         .output()?;
@@ -375,6 +377,10 @@ fn launchd_domain() -> Result<String> {
     }
     let uid = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     Ok(format!("gui/{uid}"))
+}
+
+fn launchd_service_target(domain: &str) -> String {
+    format!("{domain}/{LAUNCHD_LABEL}")
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -665,6 +671,14 @@ mod tests {
         assert!(unit.contains("'local secret'"));
         assert!(unit.contains("Restart=always"));
         assert!(unit.contains("WantedBy=default.target"));
+    }
+
+    #[test]
+    fn formats_launchd_service_target() {
+        assert_eq!(
+            launchd_service_target("gui/501"),
+            "gui/501/com.rotom.daemon"
+        );
     }
 
     #[test]

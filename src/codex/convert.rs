@@ -151,19 +151,52 @@ fn convert_content_part(part: &ChatContentPart) -> Option<Value> {
 /// Returns an error when a function tool omits its function metadata.
 pub fn convert_tool(tool: &ChatTool) -> Result<Value> {
     if tool.kind == "function" {
-        let function = tool
+        let mut extra = tool.extra.clone();
+        let name = tool
             .function
             .as_ref()
+            .map(|function| function.name.clone())
+            .or_else(|| {
+                extra
+                    .remove("name")
+                    .and_then(|value| value.as_str().map(str::to_owned))
+            })
             .ok_or_else(|| Error::config("function tool is missing function metadata"))?;
+        let description = tool
+            .function
+            .as_ref()
+            .and_then(|function| function.description.clone())
+            .or_else(|| {
+                extra
+                    .remove("description")
+                    .and_then(|value| value.as_str().map(str::to_owned))
+            })
+            .unwrap_or_default();
+        let parameters = tool
+            .function
+            .as_ref()
+            .and_then(|function| function.parameters.clone())
+            .or_else(|| extra.remove("parameters"))
+            .unwrap_or_else(|| json!({ "type": "object" }));
+        let strict = tool
+            .function
+            .as_ref()
+            .and_then(|function| function.strict)
+            .or_else(|| extra.remove("strict").and_then(|value| value.as_bool()));
+
+        for key in ["name", "description", "parameters", "strict"] {
+            extra.remove(key);
+        }
+
         let mut value = json!({
             "type": "function",
-            "name": &function.name,
-            "description": function.description.clone().unwrap_or_default(),
-            "parameters": function.parameters.clone().unwrap_or_else(|| json!({ "type": "object" })),
-            "strict": function.strict
+            "name": name,
+            "description": description,
+            "parameters": parameters,
+            "strict": strict
         });
         if let Some(object) = value.as_object_mut() {
-            object.extend(tool.extra.clone());
+            object.extend(extra);
         }
         Ok(value)
     } else {
@@ -202,6 +235,7 @@ pub fn convert_tool_choice(tool_choice: Option<&Value>) -> Option<Value> {
 ///
 /// Returns an error when a function tool omits its function metadata.
 pub fn responses_to_codex_request(request: &ResponsesRequest, input: &[Value]) -> Result<Value> {
+    let input = normalize_responses_input_items(input);
     let text = request.extra.get("text").cloned().unwrap_or_else(|| {
         json!({ "verbosity": request.extra.get("text_verbosity").and_then(Value::as_str).unwrap_or("medium") })
     });
@@ -251,6 +285,72 @@ pub fn responses_to_codex_request(request: &ResponsesRequest, input: &[Value]) -
     strip_unsupported_keys(&mut body);
 
     Ok(body)
+}
+
+fn normalize_responses_input_items(input: &[Value]) -> Vec<Value> {
+    input.iter().map(normalize_responses_input_item).collect()
+}
+
+fn normalize_responses_input_item(item: &Value) -> Value {
+    let mut item = item.clone();
+    let Some(object) = item.as_object_mut() else {
+        return item;
+    };
+
+    let type_is_missing = object
+        .get("type")
+        .is_none_or(|kind| kind.is_null() || kind.as_str() == Some(""));
+    let is_message_like =
+        object.contains_key("role") && object.contains_key("content") && type_is_missing;
+    if is_message_like {
+        object.insert("type".to_owned(), Value::String("message".to_owned()));
+    }
+
+    if object.get("type").and_then(Value::as_str) == Some("message") {
+        let role = object
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("user")
+            .to_owned();
+        if let Some(content) = object.get_mut("content") {
+            normalize_responses_message_content(content, &role);
+        }
+    }
+
+    item
+}
+
+fn normalize_responses_message_content(content: &mut Value, role: &str) {
+    match content {
+        Value::String(text) => {
+            *content = Value::Array(vec![json!({
+                "type": responses_text_part_type(role),
+                "text": text.clone()
+            })]);
+        }
+        Value::Array(parts) => {
+            for part in parts {
+                let Some(object) = part.as_object_mut() else {
+                    continue;
+                };
+                if object.get("type").and_then(Value::as_str) == Some("text") {
+                    object.insert(
+                        "type".to_owned(),
+                        Value::String(responses_text_part_type(role).to_owned()),
+                    );
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn responses_text_part_type(role: &str) -> &'static str {
+    if role == "assistant" {
+        "output_text"
+    } else {
+        "input_text"
+    }
 }
 
 fn message_text(message: &ChatMessage) -> Option<String> {
@@ -467,6 +567,96 @@ mod tests {
         .unwrap();
 
         assert_eq!(body["tool_choice"], "required");
+    }
+
+    #[test]
+    fn accepts_flat_responses_function_tools() {
+        let request: ResponsesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "input": "hello",
+            "tools": [{
+                "type": "function",
+                "name": "lookup",
+                "description": "look things up",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "q": {"type": "string"}
+                    },
+                    "required": ["q"]
+                },
+                "strict": false
+            }]
+        }))
+        .unwrap();
+        let input = vec![json!({
+            "role": "user",
+            "content": [{"type": "input_text", "text": "hello"}]
+        })];
+
+        let body = responses_to_codex_request(&request, &input).unwrap();
+
+        assert_eq!(body["tools"][0]["type"], "function");
+        assert_eq!(body["tools"][0]["name"], "lookup");
+        assert_eq!(body["tools"][0]["description"], "look things up");
+        assert_eq!(body["tools"][0]["parameters"]["required"], json!(["q"]));
+        assert_eq!(body["tools"][0]["strict"], false);
+        assert!(body["tools"][0].get("function").is_none());
+    }
+
+    #[test]
+    fn accepts_nested_chat_function_tools() {
+        let body = to_codex_request(&request(json!({
+            "model": "gpt-5.4",
+            "messages": [],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "description": "look things up",
+                    "parameters": {"type": "object"},
+                    "strict": true
+                }
+            }]
+        })))
+        .unwrap();
+
+        assert_eq!(body["tools"][0]["type"], "function");
+        assert_eq!(body["tools"][0]["name"], "lookup");
+        assert_eq!(body["tools"][0]["description"], "look things up");
+        assert_eq!(body["tools"][0]["parameters"], json!({"type": "object"}));
+        assert_eq!(body["tools"][0]["strict"], true);
+    }
+
+    #[test]
+    fn normalizes_raw_responses_message_items_for_codex() {
+        let request: ResponsesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "input": []
+        }))
+        .unwrap();
+        let input = vec![
+            json!({"role": "user", "content": "hello"}),
+            json!({
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "hi"}]
+            }),
+            json!({
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "lookup",
+                "arguments": "{\"q\":\"x\"}"
+            }),
+        ];
+
+        let body = responses_to_codex_request(&request, &input).unwrap();
+
+        assert_eq!(body["input"][0]["type"], "message");
+        assert_eq!(body["input"][0]["content"][0]["type"], "input_text");
+        assert_eq!(body["input"][0]["content"][0]["text"], "hello");
+        assert_eq!(body["input"][1]["content"][0]["type"], "output_text");
+        assert_eq!(body["input"][2]["type"], "function_call");
     }
 
     #[test]

@@ -8,7 +8,7 @@ use crate::{
 };
 use futures_util::StreamExt;
 use reqwest::Response;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// Aggregated output built from a streamed Codex response.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -61,21 +61,80 @@ pub async fn collect_output(response: Response) -> Result<ChatOutput> {
 /// emitting a final response envelope.
 pub async fn collect_response_value(response: Response) -> Result<Value> {
     let mut events = Box::pin(sse::json_events(Box::pin(response.bytes_stream())));
+    let mut output = ChatOutput {
+        finish_reason: "stop".to_owned(),
+        ..ChatOutput::default()
+    };
     while let Some(event) = events.next().await {
         let event = event?;
-        if let Some(message) = event_error(&event) {
-            return Err(Error::upstream(message));
-        }
+        apply_event(&mut output, &event)?;
         if is_done_event(&event) {
-            return event.get("response").cloned().ok_or_else(|| {
+            let mut response = event.get("response").cloned().ok_or_else(|| {
                 Error::upstream("Codex response completed without a response payload")
-            });
+            })?;
+            backfill_response_output(&mut response, &output);
+            return Ok(response);
         }
     }
 
     Err(Error::upstream(
         "Codex response stream ended before completion",
     ))
+}
+
+fn backfill_response_output(response: &mut Value, output: &ChatOutput) {
+    let response_id = response_id(response).to_owned();
+    let Some(object) = response.as_object_mut() else {
+        return;
+    };
+    if !response_output_needs_backfill(object.get("output")) {
+        return;
+    }
+
+    object.insert(
+        "output".to_owned(),
+        Value::Array(recovered_response_output_items(&response_id, output)),
+    );
+}
+
+fn response_id(response: &Value) -> &str {
+    response.get("id").and_then(Value::as_str).unwrap_or("resp")
+}
+
+fn response_output_needs_backfill(output: Option<&Value>) -> bool {
+    match output {
+        Some(Value::Array(items)) => items.is_empty(),
+        Some(Value::Null) | None => true,
+        Some(_) => false,
+    }
+}
+
+fn recovered_response_output_items(response_id: &str, output: &ChatOutput) -> Vec<Value> {
+    let mut items = Vec::new();
+    if !output.text.is_empty() {
+        items.push(json!({
+            "id": format!("msg_{response_id}"),
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{
+                "type": "output_text",
+                "text": output.text,
+                "annotations": []
+            }]
+        }));
+    }
+
+    for tool_call in &output.tool_calls {
+        items.push(json!({
+            "type": "function_call",
+            "call_id": tool_call.id,
+            "name": tool_call.function.name,
+            "arguments": tool_call.function.arguments
+        }));
+    }
+
+    items
 }
 
 /// Applies one parsed Codex event to an in-progress chat output.
@@ -405,5 +464,22 @@ mod tests {
 
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].function.name, "lookup");
+    }
+
+    #[test]
+    fn backfills_empty_response_output_from_collected_text() {
+        let mut response = json!({
+            "id": "resp_1",
+            "output": []
+        });
+        let output = ChatOutput {
+            text: "ok".to_owned(),
+            ..ChatOutput::default()
+        };
+
+        backfill_response_output(&mut response, &output);
+
+        assert_eq!(response["output"][0]["type"], "message");
+        assert_eq!(response["output"][0]["content"][0]["text"], "ok");
     }
 }

@@ -137,39 +137,159 @@ impl ResponsesRequest {
 pub enum ResponseInput {
     /// Plain text input sent as a single user turn.
     Text(String),
-    /// Structured list of message-like input items.
+    /// Structured list of Responses input items.
     Items(Vec<ResponseInputItem>),
 }
 
 /// Structured input item accepted by the Responses API.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum ResponseInputItem {
     /// Message-like input item carrying a role and content payload.
     Message(ResponseMessageInputItem),
+    /// Replayed function call item emitted by a previous assistant turn.
+    FunctionCall(ResponseFunctionCallInputItem),
+    /// Replayed function call result item emitted by a tool turn.
+    FunctionCallOutput(ResponseFunctionCallOutputInputItem),
     /// Opaque compaction item returned by `/v1/responses/compact`.
     Compaction(ResponseCompactionItem),
+    /// Replayed encrypted reasoning item emitted by a previous assistant turn.
+    Reasoning(ResponseReasoningInputItem),
+    /// Provider-specific Responses input item preserved verbatim.
+    Raw(Value),
+}
+
+impl<'de> Deserialize<'de> for ResponseInputItem {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        let parsed = match value.get("type").and_then(Value::as_str) {
+            Some("function_call") => serde_json::from_value(value.clone()).map(Self::FunctionCall),
+            Some("function_call_output") => {
+                serde_json::from_value(value.clone()).map(Self::FunctionCallOutput)
+            }
+            Some("compaction") => serde_json::from_value(value.clone()).map(Self::Compaction),
+            Some("reasoning") => serde_json::from_value(value.clone()).map(Self::Reasoning),
+            Some("message") => serde_json::from_value(value.clone()).map(Self::Message),
+            _ if is_untyped_response_message(&value) => {
+                serde_json::from_value(value.clone()).map(Self::Message)
+            }
+            _ => Ok(Self::Raw(value.clone())),
+        };
+
+        Ok(parsed.unwrap_or(Self::Raw(value)))
+    }
+}
+
+fn is_untyped_response_message(value: &Value) -> bool {
+    response_item_type_is_missing(value)
+        && value.get("role").is_some()
+        && value.get("content").is_some()
+}
+
+fn response_item_type_is_missing(value: &Value) -> bool {
+    match value.get("type") {
+        None | Some(Value::Null) => true,
+        Some(Value::String(kind)) => kind.is_empty(),
+        Some(_) => false,
+    }
 }
 
 /// Message-like structured input item accepted by the Responses API.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ResponseMessageInputItem {
     /// Object type, commonly `message`.
-    #[serde(default, rename = "type")]
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     /// Message role such as `user`, `assistant`, `developer`, `system`, or `tool`.
     pub role: String,
     /// Message payload represented as text or structured parts.
     pub content: ResponseInputContent,
     /// Optional item identifier supplied by the caller.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     /// Optional participant name for providers that support named messages.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Tool call identifier referenced by a `tool` role item.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Optional Responses item status such as `completed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Optional Responses item phase preserved for replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    /// Provider-specific message item fields preserved verbatim.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// Replayed Responses function call item accepted as input.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ResponseFunctionCallInputItem {
+    /// Object type, commonly `function_call`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Stable call identifier used by the paired output item.
+    pub call_id: String,
+    /// Function name selected by the model.
+    pub name: String,
+    /// JSON-encoded function arguments, or a provider-specific JSON value.
+    #[serde(default)]
+    pub arguments: Value,
+    /// Optional Responses item identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Optional Responses item status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Provider-specific function call fields preserved verbatim.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// Replayed Responses function call result item accepted as input.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ResponseFunctionCallOutputInputItem {
+    /// Object type, commonly `function_call_output`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Stable call identifier matching a function call item.
+    pub call_id: String,
+    /// Tool output payload.
+    #[serde(default)]
+    pub output: Value,
+    /// Optional Responses item identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Optional Responses item status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Provider-specific function output fields preserved verbatim.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// Replayed encrypted reasoning item accepted as input.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ResponseReasoningInputItem {
+    /// Object type, commonly `reasoning`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Encrypted reasoning payload emitted by the upstream.
+    pub encrypted_content: String,
+    /// Optional summary payload preserved for replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<Value>,
+    /// Optional Responses item identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Provider-specific reasoning fields preserved verbatim.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
 /// Opaque compaction item returned by the Responses compaction endpoint.
@@ -199,14 +319,17 @@ pub struct ResponseInputContentPart {
     #[serde(rename = "type")]
     pub kind: String,
     /// Text payload for text parts.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     /// Image URL or data URL payload for image parts.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_url: Option<String>,
     /// Optional image detail hint such as `low`, `high`, or `auto`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// Provider-specific content part fields preserved verbatim.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
 /// Single chat message in an OpenAI-compatible conversation.
@@ -397,7 +520,94 @@ mod tests {
                 assert_eq!(compaction.kind, "compaction");
                 assert_eq!(compaction.encrypted_content, "opaque");
             }
-            ResponseInputItem::Message(_) => panic!("expected compaction item"),
+            _ => panic!("expected compaction item"),
+        }
+    }
+
+    #[test]
+    fn parses_responses_function_and_reasoning_input_items() {
+        let request: ResponsesRequest = serde_json::from_value(serde_json::json!({
+            "model": "gpt-5.5",
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "lookup",
+                    "arguments": "{\"q\":\"x\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "done"
+                },
+                {
+                    "type": "reasoning",
+                    "encrypted_content": "opaque",
+                    "summary": []
+                }
+            ]
+        }))
+        .unwrap();
+
+        let items = match request.input.unwrap() {
+            ResponseInput::Items(items) => items,
+            ResponseInput::Text(_) => panic!("expected structured input"),
+        };
+        assert_eq!(items.len(), 3);
+        match &items[0] {
+            ResponseInputItem::FunctionCall(call) => {
+                assert_eq!(call.call_id, "call_1");
+                assert_eq!(call.name, "lookup");
+            }
+            _ => panic!("expected function call item"),
+        }
+        match &items[1] {
+            ResponseInputItem::FunctionCallOutput(output) => {
+                assert_eq!(output.call_id, "call_1");
+                assert_eq!(output.output, serde_json::json!("done"));
+            }
+            _ => panic!("expected function call output item"),
+        }
+        match &items[2] {
+            ResponseInputItem::Reasoning(reasoning) => {
+                assert_eq!(reasoning.encrypted_content, "opaque");
+            }
+            _ => panic!("expected reasoning item"),
+        }
+    }
+
+    #[test]
+    fn preserves_unknown_typed_response_items_as_raw() {
+        let request: ResponsesRequest = serde_json::from_value(serde_json::json!({
+            "model": "gpt-5.5",
+            "input": [
+                {
+                    "type": "future_item",
+                    "role": "assistant",
+                    "content": "opaque"
+                },
+                {
+                    "role": "user",
+                    "content": "hello"
+                }
+            ]
+        }))
+        .unwrap();
+
+        let items = match request.input.unwrap() {
+            ResponseInput::Items(items) => items,
+            ResponseInput::Text(_) => panic!("expected structured input"),
+        };
+
+        match &items[0] {
+            ResponseInputItem::Raw(raw) => assert_eq!(raw["type"], "future_item"),
+            _ => panic!("expected unknown typed item to stay raw"),
+        }
+        match &items[1] {
+            ResponseInputItem::Message(message) => {
+                assert_eq!(message.role, "user");
+            }
+            _ => panic!("expected untyped role/content item to parse as message"),
         }
     }
 }
