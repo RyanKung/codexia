@@ -1,4 +1,5 @@
 /target
+/.claude/
 
 # Credentials and local environment files
 /.codexia/
