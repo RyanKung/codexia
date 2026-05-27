@@ -154,7 +154,10 @@ pub async fn responses(
             Ok(items) => items,
             Err(error) => return error.into_response(),
         };
-        let body = responses_to_codex_request(&request, &input_items);
+        let body = match responses_to_codex_request(&request, &input_items) {
+            Ok(body) => body,
+            Err(error) => return error.into_response(),
+        };
         trace_named_tools("responses_tools_upstream", &upstream_tool_names(&body));
         if request.wants_stream() {
             return match upstream.client.stream_response(body, &credentials).await {
@@ -387,7 +390,10 @@ pub async fn messages(
         Ok(items) => items,
         Err(error) => return anthropic_error_response(&error),
     };
-    let body = responses_to_codex_request(&response_request, &input_items);
+    let body = match responses_to_codex_request(&response_request, &input_items) {
+        Ok(body) => body,
+        Err(error) => return anthropic_error_response(&error),
+    };
     trace_named_tools("messages_tools_upstream", &upstream_tool_names(&body));
 
     let input_tokens = estimate_response_input_tokens(&response_request, &input_items);
@@ -437,7 +443,10 @@ pub async fn image_generations(
         Ok(items) => items,
         Err(error) => return error.into_response(),
     };
-    let body = responses_to_codex_request(&response_request, &input_items);
+    let body = match responses_to_codex_request(&response_request, &input_items) {
+        Ok(body) => body,
+        Err(error) => return error.into_response(),
+    };
 
     match upstream.client.complete_response(body, &credentials).await {
         Ok(value) => {

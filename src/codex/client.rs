@@ -222,7 +222,7 @@ impl CodexClient {
         request: &crate::openai::types::ChatCompletionRequest,
         credentials: &Credentials,
     ) -> Result<Response> {
-        self.send_body(&to_codex_request(request), credentials)
+        self.send_body(&to_codex_request(request)?, credentials)
             .await
     }
 

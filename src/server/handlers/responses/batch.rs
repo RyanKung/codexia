@@ -119,14 +119,11 @@ async fn run_message_batch_upstream(
         Ok(credentials) => credentials,
         Err(error) => return errored_batch_result(custom_id, &error),
     };
-    match upstream
-        .client
-        .complete_response(
-            responses_to_codex_request(&response_request, &input_items),
-            &credentials,
-        )
-        .await
-    {
+    let body = match responses_to_codex_request(&response_request, &input_items) {
+        Ok(body) => body,
+        Err(error) => return errored_batch_result(custom_id, &error),
+    };
+    match upstream.client.complete_response(body, &credentials).await {
         Ok(response) => MessageBatchResult {
             custom_id,
             result: MessageBatchResultType::Succeeded {

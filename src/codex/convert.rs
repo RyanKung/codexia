@@ -1,5 +1,9 @@
-use crate::openai::types::{
-    ChatCompletionRequest, ChatContent, ChatContentPart, ChatMessage, ChatTool, ResponsesRequest,
+use crate::{
+    Error, Result,
+    openai::types::{
+        ChatCompletionRequest, ChatContent, ChatContentPart, ChatMessage, ChatTool,
+        ResponsesRequest,
+    },
 };
 use serde_json::{Value, json};
 
@@ -13,7 +17,11 @@ pub fn normalize_model(model: &str) -> String {
 }
 
 /// Converts a chat completions request into the JSON body expected by Codex.
-pub fn to_codex_request(request: &ChatCompletionRequest) -> Value {
+///
+/// # Errors
+///
+/// Returns an error when a function tool omits its function metadata.
+pub fn to_codex_request(request: &ChatCompletionRequest) -> Result<Value> {
     let (instructions, input) = split_messages(&request.messages);
     let mut body = json!({
         "model": normalize_model(&request.model),
@@ -43,7 +51,7 @@ pub fn to_codex_request(request: &ChatCompletionRequest) -> Value {
             .map(|stop| json!(stop)),
     );
     if let Some(tools) = request.tools.as_ref().filter(|tools| !tools.is_empty()) {
-        body["tools"] = Value::Array(tools.iter().map(convert_tool).collect());
+        body["tools"] = Value::Array(tools.iter().map(convert_tool).collect::<Result<Vec<_>>>()?);
     }
 
     if let Some(effort) = request.reasoning_effort.as_deref() {
@@ -55,7 +63,7 @@ pub fn to_codex_request(request: &ChatCompletionRequest) -> Value {
 
     strip_unsupported_keys(&mut body);
 
-    body
+    Ok(body)
 }
 
 fn split_messages(messages: &[ChatMessage]) -> (String, Vec<Value>) {
@@ -138,17 +146,15 @@ fn convert_content_part(part: &ChatContentPart) -> Option<Value> {
 
 /// Converts one compatibility-layer tool definition into the upstream Codex shape.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics when a tool declares `"function"` as its type but omits the
-/// corresponding function metadata payload.
-#[must_use]
-pub fn convert_tool(tool: &ChatTool) -> Value {
+/// Returns an error when a function tool omits its function metadata.
+pub fn convert_tool(tool: &ChatTool) -> Result<Value> {
     if tool.kind == "function" {
         let function = tool
             .function
             .as_ref()
-            .expect("function tool metadata missing");
+            .ok_or_else(|| Error::config("function tool is missing function metadata"))?;
         let mut value = json!({
             "type": "function",
             "name": &function.name,
@@ -159,11 +165,11 @@ pub fn convert_tool(tool: &ChatTool) -> Value {
         if let Some(object) = value.as_object_mut() {
             object.extend(tool.extra.clone());
         }
-        value
+        Ok(value)
     } else {
         let mut value = Value::Object(tool.extra.clone());
         value["type"] = Value::String(tool.kind.clone());
-        value
+        Ok(value)
     }
 }
 
@@ -191,8 +197,11 @@ pub fn convert_tool_choice(tool_choice: Option<&Value>) -> Option<Value> {
 }
 
 /// Converts a Responses request plus normalized input items into the Codex body.
-#[must_use]
-pub fn responses_to_codex_request(request: &ResponsesRequest, input: &[Value]) -> Value {
+///
+/// # Errors
+///
+/// Returns an error when a function tool omits its function metadata.
+pub fn responses_to_codex_request(request: &ResponsesRequest, input: &[Value]) -> Result<Value> {
     let text = request.extra.get("text").cloned().unwrap_or_else(|| {
         json!({ "verbosity": request.extra.get("text_verbosity").and_then(Value::as_str).unwrap_or("medium") })
     });
@@ -233,7 +242,7 @@ pub fn responses_to_codex_request(request: &ResponsesRequest, input: &[Value]) -
         request.service_tier.clone().map(Value::from),
     );
     if let Some(tools) = request.tools.as_ref().filter(|tools| !tools.is_empty()) {
-        body["tools"] = Value::Array(tools.iter().map(convert_tool).collect());
+        body["tools"] = Value::Array(tools.iter().map(convert_tool).collect::<Result<Vec<_>>>()?);
     }
     if let Some(reasoning) = request.reasoning.clone() {
         body["reasoning"] = reasoning;
@@ -241,7 +250,7 @@ pub fn responses_to_codex_request(request: &ResponsesRequest, input: &[Value]) -
 
     strip_unsupported_keys(&mut body);
 
-    body
+    Ok(body)
 }
 
 fn message_text(message: &ChatMessage) -> Option<String> {
@@ -363,7 +372,8 @@ mod tests {
                 {"role": "user", "content": "hello"}
             ],
             "temperature": 0.2
-        })));
+        })))
+        .unwrap();
 
         assert_eq!(body["model"], "gpt-5.4");
         assert_eq!(body["instructions"], "be terse");
@@ -380,7 +390,8 @@ mod tests {
             "top_p": 0.7,
             "parallel_tool_calls": false,
             "stop": ["DONE"]
-        })));
+        })))
+        .unwrap();
 
         assert!(body.get("temperature").is_none());
         assert!(body.get("top_p").is_none());
@@ -400,7 +411,8 @@ mod tests {
                 }]},
                 {"role": "tool", "tool_call_id": "call_1", "content": "done"}
             ]
-        })));
+        })))
+        .unwrap();
 
         assert_eq!(body["input"][0]["type"], "function_call");
         assert_eq!(body["input"][1]["type"], "function_call_output");
@@ -412,7 +424,8 @@ mod tests {
             "model": "gpt-5.5",
             "messages": [],
             "reasoning_effort": "minimal"
-        })));
+        })))
+        .unwrap();
 
         assert_eq!(body["reasoning"]["effort"], "low");
     }
@@ -423,7 +436,8 @@ mod tests {
             "model": "gpt-5.4",
             "messages": [],
             "max_completion_tokens": 42
-        })));
+        })))
+        .unwrap();
 
         assert_key_absent_recursive(&body, "max_output_tokens");
     }
@@ -434,7 +448,8 @@ mod tests {
             "model": "gpt-5.4",
             "messages": [],
             "tool_choice": {"type": "function", "function": {"name": "lookup"}}
-        })));
+        })))
+        .unwrap();
 
         assert_eq!(
             body["tool_choice"],
@@ -448,7 +463,8 @@ mod tests {
             "model": "gpt-5.4",
             "messages": [],
             "tool_choice": "required"
-        })));
+        })))
+        .unwrap();
 
         assert_eq!(body["tool_choice"], "required");
     }
@@ -465,7 +481,7 @@ mod tests {
             "content": [{"type": "input_text", "text": "hello"}]
         })];
 
-        let body = responses_to_codex_request(&request, &input);
+        let body = responses_to_codex_request(&request, &input).unwrap();
 
         assert_eq!(body["instructions"], "");
     }
@@ -483,7 +499,7 @@ mod tests {
             "content": [{"type": "input_text", "text": "hello"}]
         })];
 
-        let body = responses_to_codex_request(&request, &input);
+        let body = responses_to_codex_request(&request, &input).unwrap();
 
         assert_eq!(body["stream"], true);
     }
@@ -506,7 +522,7 @@ mod tests {
             "content": [{"type": "input_text", "text": "hello"}]
         })];
 
-        let body = responses_to_codex_request(&request, &input);
+        let body = responses_to_codex_request(&request, &input).unwrap();
 
         assert_eq!(body["temperature"], 0.2);
         assert_eq!(body["top_p"], 0.8);
@@ -532,7 +548,8 @@ mod tests {
                 },
                 "cache_control": {"type": "ephemeral"}
             }]
-        })));
+        })))
+        .unwrap();
 
         assert_key_absent_recursive(&body, "cache_control");
     }
@@ -560,8 +577,23 @@ mod tests {
             }]
         })];
 
-        let body = responses_to_codex_request(&request, &input);
+        let body = responses_to_codex_request(&request, &input).unwrap();
 
         assert_key_absent_recursive(&body, "cache_control");
+    }
+
+    #[test]
+    fn rejects_function_tool_without_metadata() {
+        let error = to_codex_request(&request(json!({
+            "model": "gpt-5.4",
+            "messages": [],
+            "tools": [{"type": "function"}]
+        })))
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "configuration error: function tool is missing function metadata"
+        );
     }
 }
