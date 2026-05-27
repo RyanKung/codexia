@@ -23,6 +23,8 @@ use reqwest::{
 use serde_json::Value;
 use std::pin::Pin;
 
+const CODEX_PRIORITY_SERVICE_TIER: &str = "priority";
+
 /// Default upstream base URL for `Codex` response requests.
 pub const DEFAULT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api";
 
@@ -355,6 +357,30 @@ fn remove_codex_unsupported_keys(body: &mut Value) {
         object.remove("top_p");
         object.remove("max_output_tokens");
         object.remove("stop");
+        normalize_codex_service_tier(object);
+    }
+}
+
+fn normalize_codex_service_tier(object: &mut serde_json::Map<String, Value>) {
+    let Some(tier) = object.get("service_tier").and_then(Value::as_str) else {
+        return;
+    };
+    if let Some(normalized) = normalize_codex_service_tier_value(tier) {
+        object.insert(
+            "service_tier".to_owned(),
+            Value::String(normalized.to_owned()),
+        );
+    } else {
+        object.remove("service_tier");
+    }
+}
+
+fn normalize_codex_service_tier_value(tier: &str) -> Option<&'static str> {
+    let tier = tier.trim();
+    if tier.eq_ignore_ascii_case("priority") || tier.eq_ignore_ascii_case("fast") {
+        Some(CODEX_PRIORITY_SERVICE_TIER)
+    } else {
+        None
     }
 }
 
@@ -477,6 +503,7 @@ mod tests {
             "top_p": 0.8,
             "max_output_tokens": 128,
             "stop": ["DONE"],
+            "service_tier": "fast",
             "parallel_tool_calls": false
         });
 
@@ -486,6 +513,20 @@ mod tests {
         assert!(body.get("top_p").is_none());
         assert!(body.get("max_output_tokens").is_none());
         assert!(body.get("stop").is_none());
+        assert_eq!(body["service_tier"], "priority");
         assert_eq!(body["parallel_tool_calls"], false);
+    }
+
+    #[test]
+    fn removes_codex_unknown_service_tier() {
+        let mut body = json!({
+            "model": "gpt-5.5",
+            "input": "hello",
+            "service_tier": "standard_only"
+        });
+
+        remove_codex_unsupported_keys(&mut body);
+
+        assert!(body.get("service_tier").is_none());
     }
 }

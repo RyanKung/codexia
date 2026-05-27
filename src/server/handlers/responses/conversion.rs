@@ -1,7 +1,7 @@
 use crate::{
     anthropic::{
         ContentBlock, Message, MessageContent, MessagesRequest, SystemPrompt, ToolResultContent,
-        to_openai_request,
+        normalize_anthropic_effort, to_openai_request,
     },
     error::Result,
     openai::types::{
@@ -122,8 +122,8 @@ pub(in crate::server::handlers) fn anthropic_responses_request(
         top_p: openai.top_p,
         tools: openai.tools,
         tool_choice: openai.tool_choice,
-        service_tier: None,
-        reasoning: anthropic_reasoning(request.thinking.as_ref()),
+        service_tier: request.upstream_service_tier(),
+        reasoning: anthropic_reasoning(request),
         max_output_tokens: request.max_tokens,
         parallel_tool_calls: openai.parallel_tool_calls,
         store: Some(false),
@@ -366,20 +366,62 @@ fn json_text_input_part(text: &str) -> crate::openai::types::ResponseInputConten
     }
 }
 
-fn anthropic_reasoning(thinking: Option<&Value>) -> Option<Value> {
-    let thinking = thinking?;
-    let budget_tokens = thinking.get("budget_tokens").and_then(Value::as_u64);
-    let effort = match budget_tokens {
-        Some(tokens) if tokens >= 8_192 => "high",
-        Some(tokens) if tokens >= 2_048 => "medium",
-        Some(_) => "low",
-        None => "medium",
+fn anthropic_reasoning(request: &MessagesRequest) -> Option<Value> {
+    let effort = request
+        .output_effort()
+        .or_else(|| anthropic_thinking_effort(request.thinking.as_ref()))?;
+    let summary = if anthropic_thinking_enabled(request.thinking.as_ref()) {
+        "detailed"
+    } else {
+        "auto"
     };
 
     Some(json!({
         "effort": effort,
-        "summary": "detailed"
+        "summary": summary
     }))
+}
+
+fn anthropic_thinking_enabled(thinking: Option<&Value>) -> bool {
+    thinking.is_some_and(|thinking| {
+        !thinking
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("disabled"))
+    })
+}
+
+fn anthropic_thinking_effort(thinking: Option<&Value>) -> Option<String> {
+    let thinking = thinking?;
+    if thinking
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind.eq_ignore_ascii_case("disabled"))
+    {
+        return None;
+    }
+    if let Some(effort) = thinking
+        .get("effort")
+        .and_then(Value::as_str)
+        .and_then(normalize_anthropic_effort)
+    {
+        return Some(effort);
+    }
+
+    let budget_tokens = thinking.get("budget_tokens").and_then(Value::as_u64);
+    match budget_tokens {
+        Some(tokens) if tokens >= 8_192 => Some("high".to_owned()),
+        Some(tokens) if tokens >= 2_048 => Some("medium".to_owned()),
+        Some(_) => Some("low".to_owned()),
+        None if thinking
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("adaptive")) =>
+        {
+            Some("high".to_owned())
+        }
+        None => Some("medium".to_owned()),
+    }
 }
 
 fn anthropic_raw_input_items(request: &MessagesRequest) -> Vec<Value> {
@@ -728,6 +770,70 @@ mod tests {
         assert_eq!(items.len(), 2);
         assert_eq!(items[0]["role"], "developer");
         assert_eq!(converted.extra["stop"], json!(["DONE"]));
+    }
+
+    #[test]
+    fn anthropic_messages_map_output_config_effort_and_fast_speed() {
+        let request: MessagesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "output_config": {"effort": "max"},
+            "service_tier": "standard_only",
+            "speed": "fast",
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .unwrap();
+
+        let converted = anthropic_responses_request(&request).unwrap();
+
+        assert_eq!(converted.service_tier.as_deref(), Some("priority"));
+        assert_eq!(
+            converted
+                .reasoning
+                .as_ref()
+                .and_then(|value| value.get("effort"))
+                .and_then(Value::as_str),
+            Some("xhigh")
+        );
+        assert_eq!(
+            converted
+                .reasoning
+                .as_ref()
+                .and_then(|value| value.get("summary"))
+                .and_then(Value::as_str),
+            Some("auto")
+        );
+        assert!(!converted.extra.contains_key("output_config"));
+        assert!(!converted.extra.contains_key("speed"));
+    }
+
+    #[test]
+    fn anthropic_messages_map_service_tier_auto_to_codex_priority() {
+        let request: MessagesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "service_tier": "auto",
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .unwrap();
+
+        let converted = anthropic_responses_request(&request).unwrap();
+
+        assert_eq!(converted.service_tier.as_deref(), Some("priority"));
+    }
+
+    #[test]
+    fn anthropic_messages_skip_standard_service_tier_and_disabled_thinking() {
+        let request: MessagesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "service_tier": "standard_only",
+            "thinking": {"type": "disabled"},
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .unwrap();
+
+        let converted = anthropic_responses_request(&request).unwrap();
+
+        assert!(converted.service_tier.is_none());
+        assert!(converted.reasoning.is_none());
     }
 
     #[test]

@@ -56,16 +56,71 @@ pub struct MessagesRequest {
     /// Optional thinking configuration passed through by compatible clients.
     #[serde(default)]
     pub thinking: Option<Value>,
+    /// Optional Anthropic output configuration, including effort.
+    #[serde(default)]
+    pub output_config: Option<Value>,
+    /// Optional Anthropic service tier hint such as `auto` or `standard_only`.
+    #[serde(default)]
+    pub service_tier: Option<String>,
+    /// Optional Anthropic beta speed hint such as `fast`.
+    #[serde(default)]
+    pub speed: Option<String>,
     /// Additional provider-specific fields preserved verbatim.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
+
+const CODEX_PRIORITY_SERVICE_TIER: &str = "priority";
 
 impl MessagesRequest {
     /// Returns whether the request should use streaming responses.
     #[must_use]
     pub fn wants_stream(&self) -> bool {
         self.stream.unwrap_or(false)
+    }
+
+    /// Maps Anthropic priority/speed controls to the upstream Codex service tier.
+    #[must_use]
+    pub(crate) fn upstream_service_tier(&self) -> Option<String> {
+        if self
+            .speed
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|speed| speed.eq_ignore_ascii_case("fast"))
+        {
+            return Some(CODEX_PRIORITY_SERVICE_TIER.to_owned());
+        }
+
+        let tier = self.service_tier.as_deref()?.trim();
+        if tier.eq_ignore_ascii_case("auto")
+            || tier.eq_ignore_ascii_case("priority")
+            || tier.eq_ignore_ascii_case("fast")
+        {
+            Some(CODEX_PRIORITY_SERVICE_TIER.to_owned())
+        } else {
+            None
+        }
+    }
+
+    /// Returns the normalized Anthropic output effort, when the caller supplied one.
+    #[must_use]
+    pub(crate) fn output_effort(&self) -> Option<String> {
+        self.output_config
+            .as_ref()
+            .and_then(|config| config.get("effort"))
+            .and_then(Value::as_str)
+            .and_then(normalize_anthropic_effort)
+    }
+}
+
+/// Converts Anthropic effort aliases into Codex reasoning effort values.
+pub(crate) fn normalize_anthropic_effort(value: &str) -> Option<String> {
+    let normalized = value.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+    match normalized.as_str() {
+        "low" | "medium" | "high" | "xhigh" => Some(normalized),
+        "extra_high" | "extra" | "max" => Some("xhigh".to_owned()),
+        "minimal" | "min" => Some("low".to_owned()),
+        _ => None,
     }
 }
 
@@ -492,8 +547,8 @@ pub fn to_openai_request(request: &MessagesRequest) -> Result<ChatCompletionRequ
         top_p: request.top_p,
         tools: request.tools.as_ref().map(|tools| convert_tools(tools)),
         tool_choice: request.tool_choice.clone().map(convert_tool_choice),
-        service_tier: None,
-        reasoning_effort: None,
+        service_tier: request.upstream_service_tier(),
+        reasoning_effort: request.output_effort(),
         max_completion_tokens: request.max_tokens,
         max_tokens: request.max_tokens,
         parallel_tool_calls: Some(parallel_tool_calls_enabled(request.tool_choice.as_ref())),
@@ -790,6 +845,15 @@ pub fn estimate_input_tokens(request: &MessagesRequest) -> u32 {
 
     if let Some(thinking) = request.thinking.as_ref() {
         text.push_str(&thinking.to_string());
+    }
+    if let Some(output_config) = request.output_config.as_ref() {
+        text.push_str(&output_config.to_string());
+    }
+    if let Some(service_tier) = request.service_tier.as_deref() {
+        text.push_str(service_tier);
+    }
+    if let Some(speed) = request.speed.as_deref() {
+        text.push_str(speed);
     }
 
     estimate_tokens_from_text(&text)
