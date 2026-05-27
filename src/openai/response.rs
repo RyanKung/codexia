@@ -125,7 +125,7 @@ pub struct ResponseOutputItem {
     pub id: String,
     /// Object type, such as `message` or `function_call`.
     #[serde(rename = "type")]
-    pub kind: &'static str,
+    pub kind: String,
     /// Role associated with the output item when it is a message.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<&'static str>,
@@ -149,6 +149,12 @@ pub struct ResponseOutputItem {
     /// Revised prompt reported by the upstream image generator.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revised_prompt: Option<String>,
+    /// Reasoning summary payload emitted by reasoning-capable upstream models.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<Value>,
+    /// Opaque encrypted reasoning payload emitted by the upstream.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encrypted_content: Option<String>,
 }
 
 /// Message content block within a Responses API output item.
@@ -288,7 +294,7 @@ pub fn response_message_item(id: String, text: Option<String>) -> ResponseOutput
 
     ResponseOutputItem {
         id,
-        kind: "message",
+        kind: "message".to_owned(),
         role: Some("assistant"),
         status: "completed".to_owned(),
         content,
@@ -297,6 +303,8 @@ pub fn response_message_item(id: String, text: Option<String>) -> ResponseOutput
         arguments: None,
         result: None,
         revised_prompt: None,
+        summary: None,
+        encrypted_content: None,
     }
 }
 
@@ -305,7 +313,7 @@ pub fn response_message_item(id: String, text: Option<String>) -> ResponseOutput
 pub fn response_function_call_item(id: String, tool_call: ToolCall) -> ResponseOutputItem {
     ResponseOutputItem {
         id,
-        kind: "function_call",
+        kind: "function_call".to_owned(),
         role: None,
         status: "completed".to_owned(),
         content: Vec::new(),
@@ -314,6 +322,8 @@ pub fn response_function_call_item(id: String, tool_call: ToolCall) -> ResponseO
         arguments: Some(tool_call.function.arguments),
         result: None,
         revised_prompt: None,
+        summary: None,
+        encrypted_content: None,
     }
 }
 
@@ -326,7 +336,7 @@ pub fn response_image_generation_item(
 ) -> ResponseOutputItem {
     ResponseOutputItem {
         id,
-        kind: "image_generation_call",
+        kind: "image_generation_call".to_owned(),
         role: None,
         status: "completed".to_owned(),
         content: Vec::new(),
@@ -335,6 +345,31 @@ pub fn response_image_generation_item(
         arguments: None,
         result: Some(result),
         revised_prompt,
+        summary: None,
+        encrypted_content: None,
+    }
+}
+
+/// Builds a reasoning output item for the Responses API.
+#[must_use]
+pub fn response_reasoning_item(
+    id: String,
+    summary: Option<Value>,
+    encrypted_content: Option<String>,
+) -> ResponseOutputItem {
+    ResponseOutputItem {
+        id,
+        kind: "reasoning".to_owned(),
+        role: None,
+        status: "completed".to_owned(),
+        content: Vec::new(),
+        call_id: None,
+        name: None,
+        arguments: None,
+        result: None,
+        revised_prompt: None,
+        summary,
+        encrypted_content,
     }
 }
 

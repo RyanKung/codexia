@@ -1,7 +1,7 @@
 use crate::{
     openai::response::{
         GeneratedImage, ResponseObject, Usage, response_function_call_item,
-        response_image_generation_item, response_message_item,
+        response_image_generation_item, response_message_item, response_reasoning_item,
     },
     openai::types::ResponsesRequest,
     server::AppState,
@@ -246,6 +246,17 @@ fn response_output_items_from_upstream(
                     ));
                 }
             }
+            Some("reasoning") => {
+                output.push(response_reasoning_item(
+                    item.get("id")
+                        .and_then(Value::as_str)
+                        .map_or_else(|| format!("rs_{index}"), str::to_owned),
+                    item.get("summary").cloned(),
+                    item.get("encrypted_content")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                ));
+            }
             _ => {}
         }
     }
@@ -257,7 +268,7 @@ fn response_output_to_input_items(
 ) -> Vec<Value> {
     let mut output = Vec::new();
     for item in items {
-        match item.kind {
+        match item.kind.as_str() {
             "message" => {
                 let content = item
                     .content
@@ -291,6 +302,19 @@ fn response_output_to_input_items(
                 "result": item.result,
                 "revised_prompt": item.revised_prompt,
             })),
+            "reasoning" => {
+                if let Some(encrypted_content) = item.encrypted_content.as_ref() {
+                    let mut reasoning = json!({
+                        "type": "reasoning",
+                        "id": item.id,
+                        "encrypted_content": encrypted_content,
+                    });
+                    if let Some(summary) = item.summary.as_ref() {
+                        reasoning["summary"] = summary.clone();
+                    }
+                    output.push(reasoning);
+                }
+            }
             _ => {}
         }
     }
@@ -400,5 +424,85 @@ mod tests {
             Some("max_output_tokens")
         );
         assert_eq!(mapped.output[0].kind, "message");
+    }
+
+    #[test]
+    fn response_object_from_upstream_preserves_reasoning_items() {
+        let request = ResponsesRequest {
+            model: "gpt-5.5".to_owned(),
+            input: None,
+            instructions: None,
+            stream: Some(false),
+            temperature: None,
+            top_p: None,
+            tools: None,
+            tool_choice: None,
+            service_tier: None,
+            reasoning: None,
+            max_output_tokens: None,
+            parallel_tool_calls: None,
+            store: Some(false),
+            previous_response_id: None,
+            metadata: None,
+            extra: serde_json::Map::new(),
+        };
+        let response = json!({
+            "id": "resp_reasoning",
+            "status": "completed",
+            "model": "gpt-5.5",
+            "output": [{
+                "type": "reasoning",
+                "id": "rs_1",
+                "summary": [{"type": "summary_text", "text": "work"}],
+                "encrypted_content": "sig"
+            }]
+        });
+
+        let mapped = response_object_from_upstream(&request, &response);
+
+        assert_eq!(mapped.output[0].kind, "reasoning");
+        assert_eq!(
+            mapped.output[0].summary.as_ref().unwrap(),
+            &json!([{"type": "summary_text", "text": "work"}])
+        );
+        assert_eq!(mapped.output[0].encrypted_content.as_deref(), Some("sig"));
+    }
+
+    #[test]
+    fn stored_response_items_replay_reasoning_only_with_encrypted_content() {
+        let response = ResponseObject {
+            id: "resp_reasoning".to_owned(),
+            object: "response",
+            created_at: 1,
+            status: "completed".to_owned(),
+            error: None,
+            incomplete_details: None,
+            instructions: None,
+            max_output_tokens: None,
+            model: "gpt-5.5".to_owned(),
+            output: vec![response_reasoning_item(
+                "rs_1".to_owned(),
+                Some(json!([{"type": "summary_text", "text": "work"}])),
+                Some("sig".to_owned()),
+            )],
+            parallel_tool_calls: true,
+            store: true,
+            temperature: None,
+            tool_choice: None,
+            tools: Vec::new(),
+            usage: None,
+            metadata: None,
+            previous_response_id: None,
+        };
+
+        let stored = stored_response_input_items(Vec::new(), &response);
+
+        assert_eq!(stored[0]["type"], "reasoning");
+        assert_eq!(stored[0]["id"], "rs_1");
+        assert_eq!(stored[0]["encrypted_content"], "sig");
+        assert_eq!(
+            stored[0]["summary"],
+            json!([{"type": "summary_text", "text": "work"}])
+        );
     }
 }

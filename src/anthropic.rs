@@ -623,7 +623,7 @@ pub fn from_openai_response_object(response: ResponseObject) -> MessageResponse 
     let mut content = Vec::new();
 
     for item in &response.output {
-        match item.kind {
+        match item.kind.as_str() {
             "message" => {
                 let text = item
                     .content
@@ -640,6 +640,19 @@ pub fn from_openai_response_object(response: ResponseObject) -> MessageResponse 
                     name: item.name.clone().unwrap_or_default(),
                     input: parse_arguments(item.arguments.as_deref().unwrap_or("{}")),
                 });
+            }
+            "reasoning" => {
+                let thinking = item
+                    .summary
+                    .as_ref()
+                    .and_then(Value::as_array)
+                    .map_or_else(String::new, |parts| joined_reasoning_text(parts));
+                if !thinking.is_empty() {
+                    content.push(ResponseContentBlock::Thinking {
+                        thinking,
+                        signature: item.encrypted_content.clone(),
+                    });
+                }
             }
             _ => {}
         }

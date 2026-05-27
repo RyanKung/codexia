@@ -236,6 +236,7 @@ pub fn convert_tool_choice(tool_choice: Option<&Value>) -> Option<Value> {
 /// Returns an error when a function tool omits its function metadata.
 pub fn responses_to_codex_request(request: &ResponsesRequest, input: &[Value]) -> Result<Value> {
     let input = normalize_responses_input_items(input);
+    let store = request.should_store() && !input_requires_stateless_replay(&input);
     let text = request.extra.get("text").cloned().unwrap_or_else(|| {
         json!({ "verbosity": request.extra.get("text_verbosity").and_then(Value::as_str).unwrap_or("medium") })
     });
@@ -246,7 +247,7 @@ pub fn responses_to_codex_request(request: &ResponsesRequest, input: &[Value]) -
         .unwrap_or_else(|| json!(["reasoning.encrypted_content"]));
     let mut body = json!({
         "model": normalize_model(&request.model),
-        "store": request.should_store(),
+        "store": store,
         // Codex currently expects SSE upstream even when the downstream API
         // requested a one-shot JSON response.
         "stream": true,
@@ -285,6 +286,15 @@ pub fn responses_to_codex_request(request: &ResponsesRequest, input: &[Value]) -
     strip_unsupported_keys(&mut body);
 
     Ok(body)
+}
+
+fn input_requires_stateless_replay(input: &[Value]) -> bool {
+    input.iter().any(|item| {
+        matches!(
+            item.get("type").and_then(Value::as_str),
+            Some("function_call" | "function_call_output" | "reasoning" | "image_generation_call")
+        )
+    })
 }
 
 fn normalize_responses_input_items(input: &[Value]) -> Vec<Value> {
@@ -692,6 +702,31 @@ mod tests {
         let body = responses_to_codex_request(&request, &input).unwrap();
 
         assert_eq!(body["stream"], true);
+    }
+
+    #[test]
+    fn responses_native_replay_forces_upstream_store_false() {
+        let request: ResponsesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "input": []
+        }))
+        .unwrap();
+        let input = vec![
+            json!({
+                "type": "reasoning",
+                "id": "rs_1",
+                "summary": [{"type": "summary_text", "text": "work"}],
+                "encrypted_content": "sig"
+            }),
+            json!({
+                "role": "user",
+                "content": [{"type": "input_text", "text": "hello"}]
+            }),
+        ];
+
+        let body = responses_to_codex_request(&request, &input).unwrap();
+
+        assert_eq!(body["store"], false);
     }
 
     #[test]
