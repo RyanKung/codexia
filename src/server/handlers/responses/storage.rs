@@ -17,7 +17,7 @@ pub(in crate::server::handlers) fn response_object_from_chat(
             index: 0,
             message: crate::openai::response::AssistantMessage {
                 role: "assistant",
-                content: None,
+                content: String::new(),
                 tool_calls: None,
                 images: None,
             },
@@ -26,7 +26,7 @@ pub(in crate::server::handlers) fn response_object_from_chat(
     });
     let output = build_responses_output_items(
         &response.id,
-        choice.message.content.as_deref().unwrap_or_default(),
+        &choice.message.content,
         choice.message.tool_calls.unwrap_or_default(),
         choice.message.images.unwrap_or_default(),
     );

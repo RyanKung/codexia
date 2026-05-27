@@ -96,6 +96,14 @@ impl CodexClient {
         let response = self.send_chat(&request, credentials).await?;
         let output = collect_output(response).await?;
 
+        let usage = output.usage;
+        let message = AssistantMessage {
+            role: "assistant",
+            content: output.text,
+            tool_calls: (!output.tool_calls.is_empty()).then_some(output.tool_calls),
+            images: (!output.images.is_empty()).then_some(output.images),
+        };
+
         Ok(ChatCompletionResponse {
             id,
             object: "chat.completion",
@@ -103,19 +111,10 @@ impl CodexClient {
             model,
             choices: vec![ChatChoice {
                 index: 0,
-                message: AssistantMessage {
-                    role: "assistant",
-                    content: if output.text.is_empty() && !output.tool_calls.is_empty() {
-                        None
-                    } else {
-                        Some(output.text)
-                    },
-                    tool_calls: (!output.tool_calls.is_empty()).then_some(output.tool_calls),
-                    images: (!output.images.is_empty()).then_some(output.images),
-                },
+                message,
                 finish_reason: output.finish_reason,
             }],
-            usage: output.usage,
+            usage,
         })
     }
 

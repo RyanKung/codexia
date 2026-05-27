@@ -56,8 +56,8 @@ pub struct ChatChoice {
 pub struct AssistantMessage {
     /// Message role, always `assistant`.
     pub role: &'static str,
-    /// Assistant text content, when present.
-    pub content: Option<String>,
+    /// Assistant text content.
+    pub content: String,
     /// Tool calls emitted alongside or instead of text.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
@@ -523,6 +523,25 @@ pub fn chunk_finished(id: &str, created: i64, model: &str, reason: &str) -> Chat
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn serializes_empty_assistant_content_as_string() {
+        let message = AssistantMessage {
+            role: "assistant",
+            content: String::new(),
+            tool_calls: Some(vec![ToolCall {
+                id: "call_1".to_owned(),
+                kind: "function".to_owned(),
+                function: FunctionCall {
+                    name: "lookup".to_owned(),
+                    arguments: "{}".to_owned(),
+                },
+            }]),
+            images: None,
+        };
+
+        assert_eq!(serde_json::to_value(message).unwrap()["content"], "");
+    }
 
     #[test]
     fn extracts_generated_image_from_plain_base64_result() {

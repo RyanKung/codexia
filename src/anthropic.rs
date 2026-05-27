@@ -566,8 +566,10 @@ pub fn from_openai_response(response: ChatCompletionResponse) -> MessageResponse
         .unwrap_or_else(empty_choice);
     let mut content = Vec::new();
 
-    if let Some(text) = choice.message.content.filter(|text| !text.is_empty()) {
-        content.push(ResponseContentBlock::Text { text });
+    if !choice.message.content.is_empty() {
+        content.push(ResponseContentBlock::Text {
+            text: choice.message.content,
+        });
     }
 
     for tool_call in choice.message.tool_calls.into_iter().flatten() {
@@ -1587,7 +1589,7 @@ fn empty_choice() -> crate::openai::response::ChatChoice {
         index: 0,
         message: crate::openai::response::AssistantMessage {
             role: "assistant",
-            content: Some(String::new()),
+            content: String::new(),
             tool_calls: None,
             images: None,
         },
@@ -1757,7 +1759,7 @@ mod tests {
                 index: 0,
                 message: crate::openai::response::AssistantMessage {
                     role: "assistant",
-                    content: Some("hello".into()),
+                    content: "hello".into(),
                     tool_calls: Some(vec![ToolCall {
                         id: "call_1".into(),
                         kind: "function".into(),
