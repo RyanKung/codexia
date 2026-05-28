@@ -240,6 +240,83 @@ mod tests {
     }
 
     #[test]
+    fn codex_adapter_prepares_request_and_headers() {
+        let adapter = adapter_for_provider(Provider::Codex);
+        let mut body = json!({
+            "model": "gpt-5.5",
+            "input": "hello",
+            "temperature": 0.2,
+            "top_p": 0.8,
+            "max_output_tokens": 128,
+            "stop": ["DONE"],
+            "service_tier": "fast"
+        });
+        let credentials = Credentials {
+            provider: Provider::Codex,
+            access_token: "token".into(),
+            refresh_token: "refresh".into(),
+            expires_at: 1,
+            account_id: "acc".into(),
+        };
+
+        adapter.prepare_request(&mut body);
+        let headers = adapter.headers(&credentials).unwrap();
+
+        assert_eq!(adapter.provider(), Provider::Codex);
+        assert_eq!(adapter.default_base_url(), DEFAULT_CODEX_BASE_URL);
+        assert_eq!(
+            adapter.responses_url("https://chatgpt.com/backend-api"),
+            "https://chatgpt.com/backend-api/codex/responses"
+        );
+        assert!(body.get("temperature").is_none());
+        assert!(body.get("top_p").is_none());
+        assert!(body.get("max_output_tokens").is_none());
+        assert!(body.get("stop").is_none());
+        assert_eq!(body["service_tier"], "priority");
+        assert_eq!(headers["chatgpt-account-id"], "acc");
+    }
+
+    #[test]
+    fn grok_adapter_preserves_supported_response_controls() {
+        let adapter = adapter_for_provider(Provider::Grok);
+        let mut body = json!({
+            "model": "grok-4",
+            "input": "hello",
+            "temperature": 0.2,
+            "top_p": 0.8,
+            "stop": ["DONE"],
+            "include": ["reasoning.encrypted_content"],
+            "service_tier": "auto",
+            "tool_choice": "auto",
+            "tools": [{"type": "function", "name": "lookup"}]
+        });
+        let credentials = Credentials {
+            provider: Provider::Grok,
+            access_token: "token".into(),
+            refresh_token: String::new(),
+            expires_at: 1,
+            account_id: String::new(),
+        };
+
+        adapter.prepare_request(&mut body);
+        let headers = adapter.headers(&credentials).unwrap();
+
+        assert_eq!(adapter.provider(), Provider::Grok);
+        assert_eq!(adapter.default_base_url(), XAI_API_BASE_URL);
+        assert_eq!(
+            adapter.responses_url("https://api.x.ai/v1"),
+            "https://api.x.ai/v1/responses"
+        );
+        assert_eq!(body["temperature"], 0.2);
+        assert_eq!(body["top_p"], 0.8);
+        assert_eq!(body["stop"], json!(["DONE"]));
+        assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
+        assert_eq!(body["tool_choice"], "auto");
+        assert!(body.get("service_tier").is_none());
+        assert_eq!(headers["authorization"], "Bearer token");
+    }
+
+    #[test]
     fn removes_grok_tool_choice_without_tools() {
         let mut body = json!({
             "model": "grok-4",

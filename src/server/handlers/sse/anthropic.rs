@@ -569,3 +569,115 @@ struct ToolMeta {
     id: String,
     name: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{body::to_bytes, response::IntoResponse};
+    use futures_util::stream;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn raw_messages_sse_maps_tool_call_lifecycle_without_server() {
+        let upstream_events: Vec<Result<crate::codex::sse::JsonSseEvent>> = vec![
+            Ok(json_sse_event(json!({
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_weather",
+                    "call_id": "call_weather",
+                    "name": "get_weather",
+                    "arguments": ""
+                }
+            }))),
+            Ok(json_sse_event(json!({
+                "type": "response.function_call_arguments.delta",
+                "output_index": 0,
+                "item_id": "fc_weather",
+                "delta": "{\"city\":\"Paris\"}"
+            }))),
+            Ok(json_sse_event(json!({
+                "type": "response.function_call_arguments.done",
+                "output_index": 0,
+                "item_id": "fc_weather"
+            }))),
+            Ok(json_sse_event(json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_weather",
+                    "call_id": "call_weather",
+                    "name": "get_weather",
+                    "arguments": "{\"city\":\"Paris\"}"
+                }
+            }))),
+            Ok(json_sse_event(json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_weather",
+                    "model": "gpt-5.5",
+                    "status": "completed",
+                    "output": [{
+                        "type": "function_call",
+                        "id": "fc_weather",
+                        "call_id": "call_weather",
+                        "name": "get_weather",
+                        "arguments": "{\"city\":\"Paris\"}"
+                    }],
+                    "usage": {
+                        "input_tokens": 7,
+                        "output_tokens": 4,
+                        "total_tokens": 11
+                    }
+                }
+            }))),
+        ];
+
+        let response = anthropic_raw_messages_sse_response(
+            Box::pin(stream::iter(upstream_events)),
+            "gpt-5.5".to_owned(),
+            3,
+        )
+        .into_response();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+
+        assert_sse_events_in_order(
+            &text,
+            &[
+                "event: message_start",
+                "event: content_block_start",
+                "event: content_block_delta",
+                "event: content_block_stop",
+                "event: message_delta",
+                "event: message_stop",
+            ],
+        );
+        assert!(text.contains("\"type\":\"tool_use\""));
+        assert!(text.contains("\"id\":\"call_weather\""));
+        assert!(text.contains("\"name\":\"get_weather\""));
+        assert!(text.contains("\"partial_json\":\"{\\\"city\\\":\\\"Paris\\\"}\""));
+        assert!(text.contains("\"stop_reason\":\"tool_use\""));
+        assert!(text.contains("\"input_tokens\":7"));
+        assert!(text.contains("\"output_tokens\":4"));
+        assert!(!text.contains("event: error"));
+    }
+
+    fn json_sse_event(value: Value) -> crate::codex::sse::JsonSseEvent {
+        let event = value.get("type").and_then(Value::as_str).map(str::to_owned);
+        crate::codex::sse::JsonSseEvent { event, value }
+    }
+
+    fn assert_sse_events_in_order(stream: &str, events: &[&str]) {
+        let mut offset = 0;
+        for event in events {
+            let remaining = &stream[offset..];
+            let position = remaining
+                .find(event)
+                .unwrap_or_else(|| panic!("missing SSE event {event}"));
+            offset += position + event.len();
+        }
+    }
+}
