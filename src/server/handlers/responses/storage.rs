@@ -45,6 +45,8 @@ pub(in crate::server::handlers) fn response_object_from_chat(
         parallel_tool_calls: request.parallel_tool_calls(),
         store: request.should_store(),
         temperature: request.temperature,
+        top_p: request.top_p,
+        text: response_text_config(request),
         tool_choice: request.tool_choice.clone(),
         tools: request
             .tools
@@ -53,8 +55,11 @@ pub(in crate::server::handlers) fn response_object_from_chat(
             .into_iter()
             .filter_map(|tool| serde_json::to_value(tool).ok())
             .collect(),
+        truncation: response_truncation(request),
         usage: response.usage,
+        user: response_user(request),
         metadata: request.metadata.clone(),
+        reasoning: response_reasoning(request),
         previous_response_id: request.previous_response_id.clone(),
     }
 }
@@ -102,13 +107,56 @@ pub(in crate::server::handlers) fn response_object_from_upstream(
             .unwrap_or(&request.model)
             .to_owned(),
         output,
-        parallel_tool_calls: request.parallel_tool_calls(),
-        store: request.should_store(),
-        temperature: request.temperature,
-        tool_choice: request.tool_choice.clone(),
-        tools: response_tool_values(request.tools.clone()),
+        parallel_tool_calls: response
+            .get("parallel_tool_calls")
+            .and_then(Value::as_bool)
+            .unwrap_or_else(|| request.parallel_tool_calls()),
+        store: response
+            .get("store")
+            .and_then(Value::as_bool)
+            .unwrap_or_else(|| request.should_store()),
+        temperature: response
+            .get("temperature")
+            .and_then(Value::as_f64)
+            .or(request.temperature),
+        top_p: response
+            .get("top_p")
+            .and_then(Value::as_f64)
+            .or(request.top_p),
+        text: response
+            .get("text")
+            .cloned()
+            .unwrap_or_else(|| response_text_config(request)),
+        tool_choice: response
+            .get("tool_choice")
+            .filter(|value| !value.is_null())
+            .cloned()
+            .or_else(|| request.tool_choice.clone()),
+        tools: response
+            .get("tools")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_else(|| response_tool_values(request.tools.clone())),
+        truncation: response
+            .get("truncation")
+            .and_then(Value::as_str)
+            .map_or_else(|| response_truncation(request), str::to_owned),
         usage: parse_upstream_usage(response.get("usage")),
-        metadata: request.metadata.clone(),
+        user: response
+            .get("user")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| response_user(request)),
+        metadata: response
+            .get("metadata")
+            .and_then(Value::as_object)
+            .cloned()
+            .or_else(|| request.metadata.clone()),
+        reasoning: response
+            .get("reasoning")
+            .filter(|value| !value.is_null())
+            .cloned()
+            .or_else(|| response_reasoning(request)),
         previous_response_id: request.previous_response_id.clone(),
     }
 }
@@ -372,12 +420,49 @@ pub(in crate::server::handlers) fn response_object(
         parallel_tool_calls: request.parallel_tool_calls(),
         store: request.should_store(),
         temperature: request.temperature,
+        top_p: request.top_p,
+        text: response_text_config(request),
         tool_choice: request.tool_choice.clone(),
         tools: response_tool_values(request.tools.clone()),
+        truncation: response_truncation(request),
         usage,
+        user: response_user(request),
         metadata: request.metadata.clone(),
+        reasoning: response_reasoning(request),
         previous_response_id: request.previous_response_id.clone(),
     }
+}
+
+fn response_text_config(request: &ResponsesRequest) -> Value {
+    request
+        .extra
+        .get("text")
+        .cloned()
+        .unwrap_or_else(|| json!({"format": {"type": "text"}}))
+}
+
+fn response_truncation(request: &ResponsesRequest) -> String {
+    request
+        .extra
+        .get("truncation")
+        .and_then(Value::as_str)
+        .unwrap_or("disabled")
+        .to_owned()
+}
+
+fn response_user(request: &ResponsesRequest) -> Option<String> {
+    request
+        .extra
+        .get("user")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+fn response_reasoning(request: &ResponsesRequest) -> Option<Value> {
+    request
+        .reasoning
+        .clone()
+        .or_else(|| Some(json!({"effort": null, "summary": null})))
 }
 
 #[cfg(test)]
@@ -454,6 +539,16 @@ mod tests {
             "id": "resp_reasoning",
             "status": "completed",
             "model": "gpt-5.5",
+            "parallel_tool_calls": false,
+            "store": false,
+            "temperature": 0.5,
+            "top_p": 0.9,
+            "text": {"format": {"type": "json_object"}},
+            "tool_choice": "required",
+            "tools": [{"type": "function", "name": "lookup"}],
+            "truncation": "auto",
+            "user": "user_1",
+            "metadata": {"trace": "abc"},
             "output": [{
                 "type": "reasoning",
                 "id": "rs_1",
@@ -464,6 +559,19 @@ mod tests {
 
         let mapped = response_object_from_upstream(&request, &response);
 
+        assert!(!mapped.parallel_tool_calls);
+        assert!(!mapped.store);
+        assert_eq!(mapped.temperature, Some(0.5));
+        assert_eq!(mapped.top_p, Some(0.9));
+        assert_eq!(mapped.text, json!({"format": {"type": "json_object"}}));
+        assert_eq!(mapped.tool_choice, Some(json!("required")));
+        assert_eq!(
+            mapped.tools,
+            vec![json!({"type": "function", "name": "lookup"})]
+        );
+        assert_eq!(mapped.truncation, "auto");
+        assert_eq!(mapped.user.as_deref(), Some("user_1"));
+        assert_eq!(mapped.metadata.as_ref().unwrap()["trace"], "abc");
         assert_eq!(mapped.output[0].kind, "reasoning");
         assert_eq!(
             mapped.output[0].summary.as_ref().unwrap(),
@@ -492,10 +600,15 @@ mod tests {
             parallel_tool_calls: true,
             store: true,
             temperature: None,
+            top_p: None,
+            text: json!({"format": {"type": "text"}}),
             tool_choice: None,
             tools: Vec::new(),
+            truncation: "disabled".to_owned(),
             usage: None,
+            user: None,
             metadata: None,
+            reasoning: Some(json!({"effort": null, "summary": null})),
             previous_response_id: None,
         };
 

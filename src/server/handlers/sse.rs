@@ -35,6 +35,17 @@ fn response_created_event(response: &ResponseObject) -> Event {
     )
 }
 
+fn response_in_progress_event(response: &ResponseObject) -> Event {
+    Event::default().event("response.in_progress").data(
+        json!({
+            "type": "response.in_progress",
+            "sequence_number": 1,
+            "response": response,
+        })
+        .to_string(),
+    )
+}
+
 fn response_output_item_added_event(
     sequence_number: u64,
     response_id: &str,
@@ -203,16 +214,11 @@ fn response_finished_lifecycle_events(
     ]
 }
 
-fn response_completed_event(
-    sequence_number: u64,
-    finish_reason: &str,
-    response: &ResponseObject,
-) -> Event {
+fn response_completed_event(sequence_number: u64, response: &ResponseObject) -> Event {
     Event::default().event("response.completed").data(
         json!({
             "type": "response.completed",
             "sequence_number": sequence_number,
-            "finish_reason": finish_reason,
             "response": response,
         })
         .to_string(),
@@ -272,6 +278,7 @@ fn response_function_call_arguments_done_event(
     response_id: &str,
     output_index: u32,
     item_id: &str,
+    name: &str,
     arguments: &str,
 ) -> Event {
     Event::default()
@@ -283,6 +290,7 @@ fn response_function_call_arguments_done_event(
                 "response_id": response_id,
                 "output_index": output_index,
                 "item_id": item_id,
+                "name": name,
                 "arguments": arguments
             })
             .to_string(),
@@ -345,6 +353,7 @@ fn response_function_call_events(
         response_id,
         output_index,
         item_id,
+        &tool_call.function.name,
         &tool_call.function.arguments,
     ));
     events.push(response_function_call_item_done_event(
@@ -404,7 +413,7 @@ impl OpenAiResponsesStreamState {
         Self {
             text_item_id: format!("msg_{response_id}"),
             response_id,
-            sequence_number: 1,
+            sequence_number: 2,
             output_text: String::new(),
             tool_calls: Vec::new(),
             text_item_started: false,
@@ -495,6 +504,7 @@ pub(super) fn openai_responses_sse(
             None,
         );
         yield Ok(response_created_event(&created_response));
+        yield Ok(response_in_progress_event(&created_response));
 
         let mut stream = stream;
         let mut stream_state = OpenAiResponsesStreamState::new(response_id.clone());
@@ -523,7 +533,7 @@ pub(super) fn openai_responses_sse(
                         }
                     }
 
-                    if let Some(reason) = choice.finish_reason {
+                    if choice.finish_reason.is_some() {
                         let output_text = stream_state.output_text.clone();
                         let tool_calls = std::mem::take(&mut stream_state.tool_calls);
                         let output = build_responses_output_items(
@@ -551,11 +561,7 @@ pub(super) fn openai_responses_sse(
                         for event in stream_state.text_done_events() {
                             yield Ok(event);
                         }
-                        yield Ok(response_completed_event(
-                            stream_state.sequence_number,
-                            &reason,
-                            &completed,
-                        ));
+                        yield Ok(response_completed_event(stream_state.sequence_number, &completed));
                         return;
                     }
                 }
@@ -624,6 +630,7 @@ pub(super) fn openai_raw_responses_sse(
 struct RawResponsesStreamState {
     output_items: std::collections::BTreeMap<u32, Value>,
     text_items: std::collections::BTreeMap<u32, RawTextOutput>,
+    function_names: std::collections::BTreeMap<u32, String>,
 }
 
 #[derive(Default)]
@@ -654,9 +661,20 @@ fn sanitize_raw_responses_event(event: &mut Value, state: &mut RawResponsesStrea
                 text.clone_into(&mut item.text);
             }
         }
+        Some("response.output_item.added") => remember_function_name(state, event),
         Some("response.output_item.done") => {
+            remember_function_name(state, event);
             if let Some(item) = event.get("item").cloned() {
                 state.output_items.insert(output_index(event), item);
+            }
+        }
+        Some("response.function_call_arguments.done") => {
+            let index = output_index(event);
+            if event.get("name").and_then(Value::as_str).is_none()
+                && let Some(name) = state.function_names.get(&index)
+                && let Some(object) = event.as_object_mut()
+            {
+                object.insert("name".to_owned(), Value::String(name.clone()));
             }
         }
         _ => {}
@@ -689,6 +707,20 @@ fn remember_item_id(item: &mut RawTextOutput, event: &Value) {
             .get("item_id")
             .and_then(Value::as_str)
             .map(str::to_owned);
+    }
+}
+
+fn remember_function_name(state: &mut RawResponsesStreamState, event: &Value) {
+    let Some(item) = event.get("item") else {
+        return;
+    };
+    if item.get("type").and_then(Value::as_str) != Some("function_call") {
+        return;
+    }
+    if let Some(name) = item.get("name").and_then(Value::as_str) {
+        state
+            .function_names
+            .insert(output_index(event), name.to_owned());
     }
 }
 

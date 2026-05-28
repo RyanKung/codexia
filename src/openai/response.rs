@@ -106,14 +106,24 @@ pub struct ResponseObject {
     pub store: bool,
     /// Optional sampling temperature recorded on the response.
     pub temperature: Option<f64>,
+    /// Optional nucleus sampling parameter recorded on the response.
+    pub top_p: Option<f64>,
+    /// Text output configuration recorded on the response.
+    pub text: Value,
     /// Tool choice recorded on the response.
     pub tool_choice: Option<Value>,
     /// Tool definitions recorded on the response.
     pub tools: Vec<Value>,
+    /// Truncation strategy recorded on the response.
+    pub truncation: String,
     /// Optional token accounting information.
     pub usage: Option<Usage>,
+    /// Optional user identifier recorded on the response.
+    pub user: Option<String>,
     /// Optional user metadata preserved on the response.
     pub metadata: Option<Map<String, Value>>,
+    /// Optional reasoning configuration recorded on the response.
+    pub reasoning: Option<Value>,
     /// Identifier of the referenced previous response, when supplied.
     pub previous_response_id: Option<String>,
 }

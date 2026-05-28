@@ -737,6 +737,16 @@ mod tests {
         }
     }
 
+    fn sse_frame<'a>(stream: &'a str, event: &str) -> &'a str {
+        let start = stream
+            .find(event)
+            .unwrap_or_else(|| panic!("missing stream event {event}"));
+        let end = stream[start..]
+            .find("\n\n")
+            .map_or(stream.len(), |offset| start + offset);
+        &stream[start..end]
+    }
+
     fn find_forbidden_key_path(value: &Value, key: &str) -> Option<String> {
         match value {
             Value::Object(object) => {
@@ -1283,6 +1293,10 @@ mod tests {
         assert_eq!(value["object"], "response");
         assert_eq!(value["status"], "completed");
         assert_eq!(value["output"][0]["type"], "message");
+        assert_eq!(value["text"]["format"]["type"], "text");
+        assert_eq!(value["truncation"], "disabled");
+        assert!(value["top_p"].is_null());
+        assert!(value["reasoning"]["effort"].is_null());
     }
 
     #[tokio::test]
@@ -1383,6 +1397,7 @@ mod tests {
             &text,
             &[
                 "event: response.created",
+                "event: response.in_progress",
                 "event: response.output_item.added",
                 "event: response.content_part.added",
                 "event: response.output_text.delta",
@@ -1446,6 +1461,7 @@ mod tests {
             &text,
             &[
                 "event: response.created",
+                "event: response.in_progress",
                 "event: response.output_item.added",
                 "event: response.function_call_arguments.delta",
                 "event: response.function_call_arguments.done",
@@ -1456,7 +1472,9 @@ mod tests {
         assert!(text.contains("\"type\":\"function_call\""));
         assert!(text.contains("\"name\":\"lookup\""));
         assert!(text.contains("\"arguments\":\"{\\\"q\\\":\\\"x\\\"}\""));
-        assert!(text.contains("\"finish_reason\":\"tool_calls\""));
+        let done_frame = sse_frame(&text, "event: response.function_call_arguments.done");
+        assert!(done_frame.contains("\"name\":\"lookup\""));
+        assert!(!text.contains("\"finish_reason\""));
         assert!(!text.contains("event: response.content_part.added"));
         assert!(!text.contains("\"type\":\"message\""));
     }
@@ -1568,7 +1586,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn responses_chat_stream_completes_incomplete_result_finish_reason() {
+    async fn responses_chat_stream_completes_incomplete_result_without_finish_reason() {
         let dir = TempDir::new().unwrap();
         let store = AuthStore::new(dir.path().join("auth.json"));
         store
@@ -1611,7 +1629,7 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let text = String::from_utf8(body.to_vec()).unwrap();
         assert!(text.contains("event: response.completed"));
-        assert!(text.contains("\"finish_reason\":\"stop\""));
+        assert!(!text.contains("\"finish_reason\""));
         assert!(!text.contains("\"incomplete_result\""));
         assert!(text.contains("\"text\":\"OK\""));
     }
