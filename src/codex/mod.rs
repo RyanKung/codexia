@@ -4,5 +4,6 @@ pub mod client;
 pub mod convert;
 /// Aggregates streamed Codex events into chat output state.
 pub mod events;
+mod responses_input;
 /// Parses server-sent events emitted by Codex streaming responses.
 pub mod sse;
