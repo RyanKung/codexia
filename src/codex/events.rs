@@ -25,6 +25,12 @@ pub struct ChatOutput {
     pub finish_reason: String,
 }
 
+impl ChatOutput {
+    fn has_usable_result(&self) -> bool {
+        !self.text.is_empty() || !self.tool_calls.is_empty() || !self.images.is_empty()
+    }
+}
+
 /// Consumes a streamed Codex HTTP response and folds its SSE events into one output.
 ///
 /// # Errors
@@ -46,7 +52,11 @@ pub async fn collect_output(response: Response) -> Result<ChatOutput> {
         }
     }
 
-    if !output.tool_calls.is_empty() {
+    if output.tool_calls.is_empty() {
+        let has_usable_result = output.has_usable_result();
+        output.finish_reason =
+            normalize_incomplete_result_finish_reason(output.finish_reason, has_usable_result);
+    } else {
         "tool_calls".clone_into(&mut output.finish_reason);
     }
 
@@ -114,6 +124,21 @@ pub(crate) fn normalize_incomplete_result_response(response: &mut Value) -> bool
     object.insert("status".to_owned(), Value::String("completed".to_owned()));
     object.insert("incomplete_details".to_owned(), Value::Null);
     true
+}
+
+pub(crate) fn normalize_incomplete_result_finish_reason(
+    reason: String,
+    has_usable_result: bool,
+) -> String {
+    if reason == "incomplete_result" && has_usable_result {
+        "stop".to_owned()
+    } else {
+        reason
+    }
+}
+
+pub(crate) fn response_has_usable_output(response: &Value) -> bool {
+    response_output_has_usable_result(response.get("output"))
 }
 
 fn incomplete_details_code(response: &Value) -> Option<&str> {
@@ -571,6 +596,35 @@ mod tests {
 
         assert_eq!(response["status"], "completed");
         assert!(response["incomplete_details"].is_null());
+    }
+
+    #[test]
+    fn normalizes_incomplete_result_finish_reason_with_usable_output() {
+        let output = ChatOutput {
+            text: "ok".to_owned(),
+            finish_reason: "incomplete_result".to_owned(),
+            ..ChatOutput::default()
+        };
+        let has_usable_result = output.has_usable_result();
+
+        assert_eq!(
+            normalize_incomplete_result_finish_reason(output.finish_reason, has_usable_result,),
+            "stop"
+        );
+    }
+
+    #[test]
+    fn preserves_incomplete_result_finish_reason_without_usable_output() {
+        let output = ChatOutput {
+            finish_reason: "incomplete_result".to_owned(),
+            ..ChatOutput::default()
+        };
+        let has_usable_result = output.has_usable_result();
+
+        assert_eq!(
+            normalize_incomplete_result_finish_reason(output.finish_reason, has_usable_result,),
+            "incomplete_result"
+        );
     }
 
     #[test]

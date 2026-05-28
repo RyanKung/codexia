@@ -4,7 +4,8 @@ use crate::{
         convert::to_codex_request,
         events::{
             collect_output, collect_response_value, event_error, event_tool_call, finish_reason,
-            is_done_event, response_tool_calls, text_delta,
+            is_done_event, normalize_incomplete_result_finish_reason, response_has_usable_output,
+            response_tool_calls, text_delta,
         },
         sse,
     },
@@ -140,6 +141,7 @@ impl CodexClient {
             let mut finished = false;
             let mut tool_call_count = 0_u32;
             let mut seen_tool_call_ids = std::collections::HashSet::<String>::new();
+            let mut saw_usable_output = false;
 
             while let Some(event) = events.next().await {
                 let event = event?;
@@ -148,6 +150,7 @@ impl CodexClient {
                 }
                 if let Some(delta) = text_delta(&event) {
                     if !delta.is_empty() {
+                        saw_usable_output = true;
                         yield chunk_with_content(&id, created, &model, delta);
                     }
                 }
@@ -156,6 +159,7 @@ impl CodexClient {
                         // The SSE stream can repeat tool calls across incremental and completed events.
                         yield chunk_with_tool_call(&id, created, &model, tool_call_count, tool_call);
                         tool_call_count += 1;
+                        saw_usable_output = true;
                     }
                 }
                 if is_done_event(&event) {
@@ -164,13 +168,23 @@ impl CodexClient {
                         if seen_tool_call_ids.insert(tool_call.id.clone()) {
                             yield chunk_with_tool_call(&id, created, &model, tool_call_count, tool_call);
                             tool_call_count += 1;
+                            saw_usable_output = true;
                         }
+                    }
+                    if event
+                        .get("response")
+                        .is_some_and(response_has_usable_output)
+                    {
+                        saw_usable_output = true;
                     }
                     finished = true;
                     let reason = if tool_call_count > 0 {
                         "tool_calls".to_owned()
                     } else {
-                        finish_reason(&event)
+                        normalize_incomplete_result_finish_reason(
+                            finish_reason(&event),
+                            saw_usable_output,
+                        )
                     };
                     yield chunk_finished(&id, created, &model, &reason);
                     break;
