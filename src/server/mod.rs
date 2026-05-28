@@ -699,6 +699,16 @@ mod tests {
         url
     }
 
+    fn assert_stream_events_in_order(stream: &str, events: &[&str]) {
+        let mut cursor = 0;
+        for event in events {
+            let offset = stream[cursor..]
+                .find(event)
+                .unwrap_or_else(|| panic!("missing stream event {event} after byte {cursor}"));
+            cursor += offset + event.len();
+        }
+    }
+
     fn find_forbidden_key_path(value: &Value, key: &str) -> Option<String> {
         match value {
             Value::Object(object) => {
@@ -1296,6 +1306,69 @@ mod tests {
         assert!(text.contains("event: response.completed"));
         assert!(text.contains("\"type\":\"image_generation_call\""));
         assert!(text.contains("\"result\":\"YWJj\""));
+    }
+
+    #[tokio::test]
+    async fn responses_stream_emits_text_output_item_lifecycle() {
+        let dir = TempDir::new().unwrap();
+        let store = AuthStore::new(dir.path().join("auth.json"));
+        store
+            .save(&Credentials {
+                provider: crate::config::Provider::Codex,
+                access_token: "access".into(),
+                refresh_token: "refresh".into(),
+                expires_at: now_unix() + 600,
+                account_id: "acc_old".into(),
+            })
+            .unwrap();
+        let http = Client::new();
+        let state = AppState::new(
+            TokenManager::new(
+                store,
+                CodexOAuthClient::new_with_token_url(http.clone(), spawn_refresh_server().await),
+            ),
+            CodexClient::new(http, spawn_cache_usage_stream_codex_server().await),
+            Some("secret".into()),
+            ModelList::from_ids(["gpt-5.5"]),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("secret"));
+
+        let response = handlers::responses(
+            axum::extract::State(state),
+            headers,
+            Json(
+                serde_json::from_value(json!({
+                    "model": "gpt-5.5",
+                    "stream": true,
+                    "input": "hello"
+                }))
+                .unwrap(),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert_stream_events_in_order(
+            &text,
+            &[
+                "event: response.created",
+                "event: response.output_item.added",
+                "event: response.content_part.added",
+                "event: response.output_text.delta",
+                "event: response.output_text.done",
+                "event: response.content_part.done",
+                "event: response.output_item.done",
+                "event: response.completed",
+            ],
+        );
+        assert!(text.contains("\"type\":\"message\""));
+        assert!(text.contains("\"role\":\"assistant\""));
+        assert!(text.contains("\"status\":\"in_progress\""));
+        assert!(text.contains("\"status\":\"completed\""));
+        assert!(text.contains("\"text\":\"OK\""));
     }
 
     #[tokio::test]

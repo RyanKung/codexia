@@ -31,6 +31,67 @@ fn response_created_event(response: &ResponseObject) -> Event {
     )
 }
 
+fn response_output_item_added_event(
+    sequence_number: u64,
+    response_id: &str,
+    item_id: &str,
+) -> Event {
+    Event::default().event("response.output_item.added").data(
+        json!({
+            "type": "response.output_item.added",
+            "sequence_number": sequence_number,
+            "response_id": response_id,
+            "output_index": 0,
+            "item": {
+                "id": item_id,
+                "type": "message",
+                "status": "in_progress",
+                "role": "assistant",
+                "content": []
+            }
+        })
+        .to_string(),
+    )
+}
+
+fn output_text_part(text: &str) -> Value {
+    json!({
+        "type": "output_text",
+        "text": text,
+        "annotations": []
+    })
+}
+
+fn response_content_part_added_event(
+    sequence_number: u64,
+    response_id: &str,
+    item_id: &str,
+) -> Event {
+    Event::default().event("response.content_part.added").data(
+        json!({
+            "type": "response.content_part.added",
+            "sequence_number": sequence_number,
+            "response_id": response_id,
+            "item_id": item_id,
+            "output_index": 0,
+            "content_index": 0,
+            "part": output_text_part("")
+        })
+        .to_string(),
+    )
+}
+
+fn response_started_lifecycle_events(
+    sequence_number: u64,
+    response_id: &str,
+    item_id: &str,
+) -> [Event; 2] {
+    [
+        response_output_item_added_event(sequence_number, response_id, item_id),
+        response_content_part_added_event(sequence_number.saturating_add(1), response_id, item_id),
+    ]
+}
+
 fn response_output_text_delta_event(
     sequence_number: u64,
     response_id: &str,
@@ -51,11 +112,17 @@ fn response_output_text_delta_event(
     )
 }
 
-fn response_output_text_done_event(sequence_number: u64, item_id: &str, text: &str) -> Event {
+fn response_output_text_done_event(
+    sequence_number: u64,
+    response_id: &str,
+    item_id: &str,
+    text: &str,
+) -> Event {
     Event::default().event("response.output_text.done").data(
         json!({
             "type": "response.output_text.done",
             "sequence_number": sequence_number,
+            "response_id": response_id,
             "item_id": item_id,
             "output_index": 0,
             "content_index": 0,
@@ -63,6 +130,73 @@ fn response_output_text_done_event(sequence_number: u64, item_id: &str, text: &s
         })
         .to_string(),
     )
+}
+
+fn response_content_part_done_event(
+    sequence_number: u64,
+    response_id: &str,
+    item_id: &str,
+    text: &str,
+) -> Event {
+    Event::default().event("response.content_part.done").data(
+        json!({
+            "type": "response.content_part.done",
+            "sequence_number": sequence_number,
+            "response_id": response_id,
+            "item_id": item_id,
+            "output_index": 0,
+            "content_index": 0,
+            "part": output_text_part(text)
+        })
+        .to_string(),
+    )
+}
+
+fn response_output_item_done_event(
+    sequence_number: u64,
+    response_id: &str,
+    item_id: &str,
+    text: &str,
+) -> Event {
+    Event::default().event("response.output_item.done").data(
+        json!({
+            "type": "response.output_item.done",
+            "sequence_number": sequence_number,
+            "response_id": response_id,
+            "output_index": 0,
+            "item": {
+                "id": item_id,
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [output_text_part(text)]
+            }
+        })
+        .to_string(),
+    )
+}
+
+fn response_finished_lifecycle_events(
+    sequence_number: u64,
+    response_id: &str,
+    item_id: &str,
+    text: &str,
+) -> [Event; 3] {
+    [
+        response_output_text_done_event(sequence_number, response_id, item_id, text),
+        response_content_part_done_event(
+            sequence_number.saturating_add(1),
+            response_id,
+            item_id,
+            text,
+        ),
+        response_output_item_done_event(
+            sequence_number.saturating_add(2),
+            response_id,
+            item_id,
+            text,
+        ),
+    ]
 }
 
 fn response_completed_event(
@@ -141,6 +275,11 @@ pub(super) fn openai_responses_sse(
         let mut output_text = String::new();
         let mut tool_calls = Vec::new();
 
+        for event in response_started_lifecycle_events(sequence_number, &response_id, &output_item_id) {
+            yield Ok(event);
+            sequence_number = sequence_number.saturating_add(1);
+        }
+
         while let Some(item) = stream.next().await {
             match item {
                 Ok(chunk) => {
@@ -192,12 +331,15 @@ pub(super) fn openai_responses_sse(
                                 input_items: stored_items,
                             }).await;
                         }
-                        yield Ok(response_output_text_done_event(
+                        for event in response_finished_lifecycle_events(
                             sequence_number,
+                            &response_id,
                             &output_item_id,
                             &output_text,
-                        ));
-                        sequence_number = sequence_number.saturating_add(1);
+                        ) {
+                            yield Ok(event);
+                            sequence_number = sequence_number.saturating_add(1);
+                        }
                         yield Ok(response_completed_event(sequence_number, &reason, &completed));
                         return;
                     }
