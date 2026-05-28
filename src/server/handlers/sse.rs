@@ -22,6 +22,8 @@ use futures_util::{Stream, StreamExt, stream};
 use serde_json::{Value, json};
 use std::{convert::Infallible, pin::Pin};
 
+use crate::openai::types::ToolCall;
+
 fn response_created_event(response: &ResponseObject) -> Event {
     Event::default().event("response.created").data(
         json!({
@@ -217,6 +219,144 @@ fn response_completed_event(
     )
 }
 
+fn response_function_call_item_added_event(
+    sequence_number: u64,
+    response_id: &str,
+    output_index: u32,
+    item_id: &str,
+    tool_call: &ToolCall,
+) -> Event {
+    Event::default().event("response.output_item.added").data(
+        json!({
+            "type": "response.output_item.added",
+            "sequence_number": sequence_number,
+            "response_id": response_id,
+            "output_index": output_index,
+            "item": {
+                "id": item_id,
+                "type": "function_call",
+                "status": "in_progress",
+                "call_id": tool_call.id,
+                "name": tool_call.function.name,
+                "arguments": ""
+            }
+        })
+        .to_string(),
+    )
+}
+
+fn response_function_call_arguments_delta_event(
+    sequence_number: u64,
+    response_id: &str,
+    output_index: u32,
+    item_id: &str,
+    arguments: &str,
+) -> Event {
+    Event::default()
+        .event("response.function_call_arguments.delta")
+        .data(
+            json!({
+                "type": "response.function_call_arguments.delta",
+                "sequence_number": sequence_number,
+                "response_id": response_id,
+                "output_index": output_index,
+                "item_id": item_id,
+                "delta": arguments
+            })
+            .to_string(),
+        )
+}
+
+fn response_function_call_arguments_done_event(
+    sequence_number: u64,
+    response_id: &str,
+    output_index: u32,
+    item_id: &str,
+    arguments: &str,
+) -> Event {
+    Event::default()
+        .event("response.function_call_arguments.done")
+        .data(
+            json!({
+                "type": "response.function_call_arguments.done",
+                "sequence_number": sequence_number,
+                "response_id": response_id,
+                "output_index": output_index,
+                "item_id": item_id,
+                "arguments": arguments
+            })
+            .to_string(),
+        )
+}
+
+fn response_function_call_item_done_event(
+    sequence_number: u64,
+    response_id: &str,
+    output_index: u32,
+    item_id: &str,
+    tool_call: &ToolCall,
+) -> Event {
+    Event::default().event("response.output_item.done").data(
+        json!({
+            "type": "response.output_item.done",
+            "sequence_number": sequence_number,
+            "response_id": response_id,
+            "output_index": output_index,
+            "item": {
+                "id": item_id,
+                "type": "function_call",
+                "status": "completed",
+                "call_id": tool_call.id,
+                "name": tool_call.function.name,
+                "arguments": tool_call.function.arguments
+            }
+        })
+        .to_string(),
+    )
+}
+
+fn response_function_call_events(
+    sequence_number: u64,
+    response_id: &str,
+    output_index: u32,
+    item_id: &str,
+    tool_call: &ToolCall,
+) -> Vec<Event> {
+    let mut events = vec![response_function_call_item_added_event(
+        sequence_number,
+        response_id,
+        output_index,
+        item_id,
+        tool_call,
+    )];
+    let mut next_sequence = sequence_number.saturating_add(1);
+    if !tool_call.function.arguments.is_empty() {
+        events.push(response_function_call_arguments_delta_event(
+            next_sequence,
+            response_id,
+            output_index,
+            item_id,
+            &tool_call.function.arguments,
+        ));
+        next_sequence = next_sequence.saturating_add(1);
+    }
+    events.push(response_function_call_arguments_done_event(
+        next_sequence,
+        response_id,
+        output_index,
+        item_id,
+        &tool_call.function.arguments,
+    ));
+    events.push(response_function_call_item_done_event(
+        next_sequence.saturating_add(1),
+        response_id,
+        output_index,
+        item_id,
+        tool_call,
+    ));
+    events
+}
+
 fn response_error_event(error: &crate::Error) -> Event {
     Event::default().event("error").data(
         json!({
@@ -250,6 +390,91 @@ pub(super) fn sse_response(
     Sse::new(mapped.chain(done)).keep_alive(KeepAlive::default())
 }
 
+struct OpenAiResponsesStreamState {
+    response_id: String,
+    text_item_id: String,
+    sequence_number: u64,
+    output_text: String,
+    tool_calls: Vec<ToolCall>,
+    text_item_started: bool,
+}
+
+impl OpenAiResponsesStreamState {
+    fn new(response_id: String) -> Self {
+        Self {
+            text_item_id: format!("msg_{response_id}"),
+            response_id,
+            sequence_number: 1,
+            output_text: String::new(),
+            tool_calls: Vec::new(),
+            text_item_started: false,
+        }
+    }
+
+    fn text_delta_events(&mut self, text: &str) -> Vec<Event> {
+        if text.is_empty() {
+            return Vec::new();
+        }
+
+        let mut events = Vec::new();
+        if !self.text_item_started {
+            events.extend(response_started_lifecycle_events(
+                self.sequence_number,
+                &self.response_id,
+                &self.text_item_id,
+            ));
+            self.sequence_number = self.sequence_number.saturating_add(2);
+            self.text_item_started = true;
+        }
+
+        self.output_text.push_str(text);
+        events.push(response_output_text_delta_event(
+            self.sequence_number,
+            &self.response_id,
+            &self.text_item_id,
+            text,
+        ));
+        self.sequence_number = self.sequence_number.saturating_add(1);
+        events
+    }
+
+    fn tool_call_events(&mut self, tool_call: ToolCall) -> Vec<Event> {
+        let tool_index = if self.text_item_started {
+            self.tool_calls.len().saturating_add(1)
+        } else {
+            self.tool_calls.len()
+        };
+        let output_index = u32::try_from(tool_index).unwrap_or(u32::MAX);
+        let item_id = format!("fc_{}_{tool_index}", self.response_id);
+        let events = response_function_call_events(
+            self.sequence_number,
+            &self.response_id,
+            output_index,
+            &item_id,
+            &tool_call,
+        );
+        self.sequence_number = self
+            .sequence_number
+            .saturating_add(u64::try_from(events.len()).unwrap_or(u64::MAX));
+        self.tool_calls.push(tool_call);
+        events
+    }
+
+    fn text_done_events(&mut self) -> Vec<Event> {
+        if !self.text_item_started {
+            return Vec::new();
+        }
+        let events = response_finished_lifecycle_events(
+            self.sequence_number,
+            &self.response_id,
+            &self.text_item_id,
+            &self.output_text,
+        );
+        self.sequence_number = self.sequence_number.saturating_add(3);
+        events.into()
+    }
+}
+
 pub(super) fn openai_responses_sse(
     stream: Pin<
         Box<dyn Stream<Item = Result<crate::openai::response::ChatCompletionChunk>> + Send>,
@@ -261,7 +486,6 @@ pub(super) fn openai_responses_sse(
 ) -> Sse<impl Stream<Item = std::result::Result<Event, Infallible>>> {
     let mapped = async_stream::stream! {
         let created_at = crate::config::now_unix();
-        let output_item_id = format!("msg_{response_id}");
         let created_response = response_object(
             &request,
             response_id.clone(),
@@ -273,14 +497,7 @@ pub(super) fn openai_responses_sse(
         yield Ok(response_created_event(&created_response));
 
         let mut stream = stream;
-        let mut sequence_number = 1_u64;
-        let mut output_text = String::new();
-        let mut tool_calls = Vec::new();
-
-        for event in response_started_lifecycle_events(sequence_number, &response_id, &output_item_id) {
-            yield Ok(event);
-            sequence_number = sequence_number.saturating_add(1);
-        }
+        let mut stream_state = OpenAiResponsesStreamState::new(response_id.clone());
 
         while let Some(item) = stream.next().await {
             match item {
@@ -290,27 +507,25 @@ pub(super) fn openai_responses_sse(
                     };
 
                     if let Some(text) = choice.delta.content {
-                        if !text.is_empty() {
-                            output_text.push_str(&text);
-                            yield Ok(response_output_text_delta_event(
-                                sequence_number,
-                                &response_id,
-                                &output_item_id,
-                                &text,
-                            ));
-                            sequence_number = sequence_number.saturating_add(1);
+                        for event in stream_state.text_delta_events(&text) {
+                            yield Ok(event);
                         }
                     }
 
                     for tool_call in choice.delta.tool_calls.into_iter().flatten() {
-                        tool_calls.push(crate::openai::types::ToolCall {
+                        let tool_call = crate::openai::types::ToolCall {
                             id: tool_call.id,
                             kind: tool_call.kind.to_owned(),
                             function: tool_call.function,
-                        });
+                        };
+                        for event in stream_state.tool_call_events(tool_call) {
+                            yield Ok(event);
+                        }
                     }
 
                     if let Some(reason) = choice.finish_reason {
+                        let output_text = stream_state.output_text.clone();
+                        let tool_calls = std::mem::take(&mut stream_state.tool_calls);
                         let output = build_responses_output_items(
                             &response_id,
                             &output_text,
@@ -333,16 +548,14 @@ pub(super) fn openai_responses_sse(
                                 input_items: stored_items,
                             }).await;
                         }
-                        for event in response_finished_lifecycle_events(
-                            sequence_number,
-                            &response_id,
-                            &output_item_id,
-                            &output_text,
-                        ) {
+                        for event in stream_state.text_done_events() {
                             yield Ok(event);
-                            sequence_number = sequence_number.saturating_add(1);
                         }
-                        yield Ok(response_completed_event(sequence_number, &reason, &completed));
+                        yield Ok(response_completed_event(
+                            stream_state.sequence_number,
+                            &reason,
+                            &completed,
+                        ));
                         return;
                     }
                 }

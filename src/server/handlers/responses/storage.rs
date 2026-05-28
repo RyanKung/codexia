@@ -152,10 +152,14 @@ pub(in crate::server::handlers) fn build_responses_output_items(
     tool_calls: Vec<crate::openai::types::ToolCall>,
     images: Vec<GeneratedImage>,
 ) -> Vec<crate::openai::response::ResponseOutputItem> {
-    let mut output = vec![response_message_item(
-        format!("msg_{response_id}"),
-        Some(output_text.to_owned()),
-    )];
+    let has_non_message_output = !tool_calls.is_empty() || !images.is_empty();
+    let mut output = Vec::new();
+    if !output_text.is_empty() || !has_non_message_output {
+        output.push(response_message_item(
+            format!("msg_{response_id}"),
+            Some(output_text.to_owned()),
+        ));
+    }
     for (index, tool_call) in tool_calls.into_iter().enumerate() {
         output.push(response_function_call_item(
             format!("fc_{response_id}_{index}"),
