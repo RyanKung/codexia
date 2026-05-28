@@ -304,12 +304,18 @@ effective sampling or output-length controls. Grok Responses requests preserve
 the supported controls that xAI accepts, including `temperature`, `top_p`,
 `max_output_tokens`, `stop`, `text`, `include`, and `parallel_tool_calls`.
 
-`/v1/responses` keeps the historical local replay behavior for existing
-OpenClaw and agent clients. Local response ids can be retrieved, deleted, and
-listed for input items while the same rotom process remains alive. Grok
-response retrieve/delete is forwarded to xAI only for unknown ids when Grok is
-the unambiguous configured upstream. Codex resource lifecycle calls are not
-claimed as upstream-supported unless the ChatGPT Codex backend adds that API.
+`/v1/responses` uses provider-specific creation paths. Codex keeps the
+historical local replay behavior for existing OpenClaw and agent clients, so
+simple Codex requests receive rotom-local response ids and can be retrieved,
+deleted, and listed for input items while the same rotom process remains alive.
+Grok requests use xAI's native Responses create API, return upstream response
+ids, and mirror stored responses locally for compatibility. Grok
+`previous_response_id` is forwarded to xAI when it points at an upstream-backed
+response; local-only history is still replayed by rotom. Grok retrieve/delete
+is forwarded to xAI for unknown ids, and upstream-backed local Grok records are
+deleted upstream before the local mirror is removed. Codex resource lifecycle
+calls are not claimed as upstream-supported unless the ChatGPT Codex backend
+adds that API.
 
 Image generation is exposed in two compatibility shapes:
 

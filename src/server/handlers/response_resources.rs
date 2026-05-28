@@ -42,6 +42,17 @@ fn response_resource_not_found(response_id: &str) -> Response {
     .into_response()
 }
 
+fn upstream_for_provider(
+    state: &AppState,
+    provider: crate::config::Provider,
+) -> Option<UpstreamState> {
+    state
+        .upstreams
+        .iter()
+        .find(|upstream| upstream.provider == provider)
+        .cloned()
+}
+
 /// Retrieves a stored Responses API object.
 ///
 /// Existing local response ids are served from rotom's in-memory compatibility
@@ -92,6 +103,44 @@ pub async fn delete_response(
 ) -> Response {
     if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
         return error.into_response();
+    }
+
+    if let Some(stored) = state.responses.get(&response_id).await {
+        if stored.upstream_resource {
+            let Some(upstream) = upstream_for_provider(&state, stored.provider) else {
+                return Error::config(format!(
+                    "provider {} is not configured for response `{response_id}`",
+                    stored.provider
+                ))
+                .into_response();
+            };
+            if upstream.client.response_resource_capabilities().delete
+                != ResponseResourceCapability::UpstreamSupported
+            {
+                return Error::upstream_with_status(
+                    StatusCode::NOT_IMPLEMENTED,
+                    format!(
+                        "{} upstream does not support Responses resource DELETE",
+                        stored.provider.display_name()
+                    ),
+                )
+                .into_response();
+            }
+            let credentials = match upstream.token_manager.credentials().await {
+                Ok(credentials) => credentials,
+                Err(error) => return error.into_response(),
+            };
+            let deleted = match upstream
+                .client
+                .delete_response(&response_id, &credentials)
+                .await
+            {
+                Ok(value) => value,
+                Err(error) => return error.into_response(),
+            };
+            state.responses.remove(&response_id).await;
+            return Json(deleted).into_response();
+        }
     }
 
     if let Some(stored) = state.responses.remove(&response_id).await {

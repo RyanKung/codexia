@@ -4,8 +4,9 @@ use crate::{
         convert::to_codex_request,
         events::{
             collect_output, collect_response_value, event_error, event_tool_call, finish_reason,
-            is_done_event, normalize_incomplete_result_finish_reason, response_has_usable_output,
-            response_tool_calls, text_delta,
+            is_done_event, normalize_incomplete_result_finish_reason,
+            normalize_incomplete_result_response, response_has_usable_output, response_tool_calls,
+            text_delta,
         },
         sse,
         upstream::{UpstreamProvider, adapter_for_provider},
@@ -19,7 +20,7 @@ use crate::{
 use futures_util::{Stream, StreamExt};
 use reqwest::{
     Client, Method, Response,
-    header::{ACCEPT, HeaderValue},
+    header::{ACCEPT, CONTENT_TYPE, HeaderValue},
 };
 use serde_json::Value;
 use std::pin::Pin;
@@ -27,8 +28,8 @@ use std::pin::Pin;
 /// Default upstream base URL for `Codex` response requests.
 pub use crate::codex::upstream::DEFAULT_CODEX_BASE_URL;
 pub use crate::codex::upstream::{
-    ResponseResourceCapabilities, ResponseResourceCapability, codex_headers, grok_headers,
-    resolve_codex_url, resolve_grok_responses_url,
+    ResponseCreationStrategy, ResponseResourceCapabilities, ResponseResourceCapability,
+    codex_headers, grok_headers, resolve_codex_url, resolve_grok_responses_url,
 };
 
 #[derive(Clone)]
@@ -93,6 +94,12 @@ impl CodexClient {
     #[must_use]
     pub fn response_resource_capabilities(&self) -> ResponseResourceCapabilities {
         self.upstream_provider().resource_capabilities()
+    }
+
+    /// Returns how this provider should create OpenAI-compatible response objects.
+    #[must_use]
+    pub fn response_creation_strategy(&self) -> ResponseCreationStrategy {
+        self.upstream_provider().response_creation_strategy()
     }
 
     /// Sends a non-streaming chat completion request and collects the full response body.
@@ -226,7 +233,13 @@ impl CodexClient {
         credentials: &Credentials,
     ) -> Result<Value> {
         let response = self.send_body(&request, credentials).await?;
-        collect_response_value(response).await
+        if response_is_json(&response) {
+            let mut value = response.json::<Value>().await?;
+            normalize_incomplete_result_response(&mut value);
+            Ok(value)
+        } else {
+            collect_response_value(response).await
+        }
     }
 
     /// Sends a streaming Responses-style request body and yields raw upstream JSON SSE events.
@@ -371,6 +384,14 @@ fn unsupported_response_resource(provider: Provider, operation: &str) -> Error {
     )
 }
 
+fn response_is_json(response: &Response) -> bool {
+    response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("application/json"))
+}
+
 async fn parse_error_response(response: Response, provider: Provider) -> Error {
     let status = response.status();
     let text = response.text().await.unwrap_or_default();
@@ -420,5 +441,13 @@ mod tests {
 
         assert_eq!(codex.upstream_provider().provider(), Provider::Codex);
         assert_eq!(grok.upstream_provider().provider(), Provider::Grok);
+        assert_eq!(
+            codex.response_creation_strategy(),
+            ResponseCreationStrategy::ChatCompatibility
+        );
+        assert_eq!(
+            grok.response_creation_strategy(),
+            ResponseCreationStrategy::NativeResponses
+        );
     }
 }

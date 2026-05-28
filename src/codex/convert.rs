@@ -1,6 +1,7 @@
 use super::responses_input;
 use crate::{
     Error, Result,
+    config::Provider,
     openai::types::{
         ChatCompletionRequest, ChatContent, ChatContentPart, ChatMessage, ChatTool,
         ResponsesRequest,
@@ -236,13 +237,27 @@ pub fn convert_tool_choice(tool_choice: Option<&Value>) -> Option<Value> {
 ///
 /// Returns an error when a function tool omits its function metadata.
 pub fn responses_to_codex_request(request: &ResponsesRequest, input: &[Value]) -> Result<Value> {
+    responses_to_upstream_request(Provider::Codex, request, input)
+}
+
+/// Converts a Responses request plus normalized input items into a provider request body.
+///
+/// # Errors
+///
+/// Returns an error when a function tool omits its function metadata.
+pub fn responses_to_upstream_request(
+    provider: Provider,
+    request: &ResponsesRequest,
+    input: &[Value],
+) -> Result<Value> {
     let normalized = responses_input::normalize(input);
     let input = normalized.items;
-    let store = request.should_store() && !input_requires_stateless_replay(&input);
     let instructions = responses_input::combined_instructions(
         request.instructions.as_deref(),
         &normalized.instructions,
     );
+    let stream = upstream_stream_value(provider, request);
+    let store = upstream_store_value(provider, request, &input);
     let text = request.extra.get("text").cloned().unwrap_or_else(|| {
         json!({ "verbosity": request.extra.get("text_verbosity").and_then(Value::as_str).unwrap_or("medium") })
     });
@@ -254,16 +269,16 @@ pub fn responses_to_codex_request(request: &ResponsesRequest, input: &[Value]) -
     let mut body = json!({
         "model": normalize_model(&request.model),
         "store": store,
-        // Codex currently expects SSE upstream even when the downstream API
-        // requested a one-shot JSON response.
-        "stream": true,
+        "stream": stream,
         "input": input,
-        "instructions": instructions,
         "text": text,
         "include": include,
         "tool_choice": convert_tool_choice(request.tool_choice.as_ref()).unwrap_or_else(|| json!("auto")),
         "parallel_tool_calls": request.parallel_tool_calls()
     });
+    if should_include_instructions(provider, request, &instructions) {
+        body["instructions"] = Value::String(instructions);
+    }
 
     insert_optional(
         &mut body,
@@ -288,10 +303,44 @@ pub fn responses_to_codex_request(request: &ResponsesRequest, input: &[Value]) -
     if let Some(reasoning) = request.reasoning.clone() {
         body["reasoning"] = reasoning;
     }
+    if provider == Provider::Grok {
+        insert_optional(
+            &mut body,
+            "previous_response_id",
+            request.previous_response_id.clone().map(Value::from),
+        );
+    }
 
     strip_unsupported_keys(&mut body);
 
     Ok(body)
+}
+
+fn upstream_stream_value(provider: Provider, request: &ResponsesRequest) -> bool {
+    match provider {
+        // Codex currently expects SSE upstream even when the downstream API
+        // requested a one-shot JSON response.
+        Provider::Codex => true,
+        Provider::Grok => request.wants_stream(),
+    }
+}
+
+fn upstream_store_value(provider: Provider, request: &ResponsesRequest, input: &[Value]) -> bool {
+    match provider {
+        Provider::Codex => request.should_store() && !input_requires_stateless_replay(input),
+        Provider::Grok => request.should_store(),
+    }
+}
+
+const fn should_include_instructions(
+    provider: Provider,
+    request: &ResponsesRequest,
+    instructions: &str,
+) -> bool {
+    match provider {
+        Provider::Codex => true,
+        Provider::Grok => !instructions.is_empty() && request.previous_response_id.is_none(),
+    }
 }
 
 fn input_requires_stateless_replay(input: &[Value]) -> bool {
@@ -708,7 +757,7 @@ mod tests {
     }
 
     #[test]
-    fn responses_requests_force_upstream_streaming() {
+    fn codex_responses_requests_force_upstream_streaming() {
         let request: ResponsesRequest = serde_json::from_value(json!({
             "model": "gpt-5.5",
             "stream": false,
@@ -726,7 +775,44 @@ mod tests {
     }
 
     #[test]
-    fn responses_native_replay_forces_upstream_store_false() {
+    fn grok_responses_requests_preserve_downstream_streaming() {
+        let request: ResponsesRequest = serde_json::from_value(json!({
+            "model": "grok-4.3",
+            "stream": false,
+            "input": "hello"
+        }))
+        .unwrap();
+        let input = vec![json!({
+            "role": "user",
+            "content": [{"type": "input_text", "text": "hello"}]
+        })];
+
+        let body = responses_to_upstream_request(Provider::Grok, &request, &input).unwrap();
+
+        assert_eq!(body["stream"], false);
+        assert!(body.get("instructions").is_none());
+    }
+
+    #[test]
+    fn grok_responses_requests_forward_non_empty_instructions_without_previous_response_id() {
+        let request: ResponsesRequest = serde_json::from_value(json!({
+            "model": "grok-4.3",
+            "instructions": "be terse",
+            "input": "hello"
+        }))
+        .unwrap();
+        let input = vec![json!({
+            "role": "user",
+            "content": [{"type": "input_text", "text": "hello"}]
+        })];
+
+        let body = responses_to_upstream_request(Provider::Grok, &request, &input).unwrap();
+
+        assert_eq!(body["instructions"], "be terse");
+    }
+
+    #[test]
+    fn codex_responses_native_replay_forces_upstream_store_false() {
         let request: ResponsesRequest = serde_json::from_value(json!({
             "model": "gpt-5.5",
             "input": []
@@ -748,6 +834,28 @@ mod tests {
         let body = responses_to_codex_request(&request, &input).unwrap();
 
         assert_eq!(body["store"], false);
+    }
+
+    #[test]
+    fn grok_responses_native_replay_preserves_store_and_previous_response_id() {
+        let request: ResponsesRequest = serde_json::from_value(json!({
+            "model": "grok-4.3",
+            "store": true,
+            "previous_response_id": "resp_upstream",
+            "input": []
+        }))
+        .unwrap();
+        let input = vec![json!({
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "done"
+        })];
+
+        let body = responses_to_upstream_request(Provider::Grok, &request, &input).unwrap();
+
+        assert_eq!(body["store"], true);
+        assert_eq!(body["previous_response_id"], "resp_upstream");
+        assert!(body.get("instructions").is_none());
     }
 
     #[test]

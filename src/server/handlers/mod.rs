@@ -11,7 +11,10 @@ use crate::{
         MessageBatchListResponse, MessageBatchRequestCounts, MessagesRequest, error_body,
         estimate_input_tokens, from_openai_response_value, message_batch_list_response,
     },
-    codex::{client::ResponseResourceCapability, convert::responses_to_codex_request},
+    codex::{
+        client::{ResponseCreationStrategy, ResponseResourceCapability},
+        convert::responses_to_upstream_request,
+    },
     config::{Credentials, Provider},
     openai::{
         response::{
@@ -111,6 +114,35 @@ fn upstream_response_resource_supported(upstream: &UpstreamState) -> bool {
         == ResponseResourceCapability::UpstreamSupported
 }
 
+fn should_use_native_responses_path(
+    upstream: &UpstreamState,
+    request: &ResponsesRequest,
+    previous: Option<&crate::server::store::StoredResponse>,
+) -> bool {
+    match upstream.client.response_creation_strategy() {
+        ResponseCreationStrategy::NativeResponses => true,
+        ResponseCreationStrategy::ChatCompatibility => {
+            response_request_requires_raw_mode(request, previous)
+        }
+    }
+}
+
+fn can_forward_previous_response_id(upstream: &UpstreamState, request: &ResponsesRequest) -> bool {
+    request.previous_response_id.is_some()
+        && upstream.client.response_creation_strategy() == ResponseCreationStrategy::NativeResponses
+        && upstream_response_resource_supported(upstream)
+}
+
+fn should_use_upstream_previous_response(
+    upstream: &UpstreamState,
+    request: &ResponsesRequest,
+    previous: Option<&crate::server::store::StoredResponse>,
+) -> bool {
+    can_forward_previous_response_id(upstream, request)
+        && previous
+            .is_none_or(|stored| stored.provider == upstream.provider && stored.upstream_resource)
+}
+
 async fn store_response_if_requested(
     state: &AppState,
     request: &ResponsesRequest,
@@ -137,11 +169,33 @@ async fn run_raw_response(
     request: ResponsesRequest,
     previous: Option<&crate::server::store::StoredResponse>,
 ) -> Response {
-    let input_items = match collect_response_input_items(&request, previous) {
+    let use_upstream_previous = should_use_upstream_previous_response(upstream, &request, previous);
+    let upstream_previous = if use_upstream_previous {
+        None
+    } else {
+        previous
+    };
+    let upstream_input_items = match collect_response_input_items(&request, upstream_previous) {
         Ok(items) => items,
         Err(error) => return error.into_response(),
     };
-    let body = match responses_to_codex_request(&request, &input_items) {
+    let storage_input_items = if use_upstream_previous && previous.is_some() {
+        match collect_response_input_items(&request, previous) {
+            Ok(items) => items,
+            Err(error) => return error.into_response(),
+        }
+    } else {
+        upstream_input_items.clone()
+    };
+    let mut upstream_request = request.clone();
+    if !use_upstream_previous {
+        upstream_request.previous_response_id = None;
+    }
+    let body = match responses_to_upstream_request(
+        upstream.provider,
+        &upstream_request,
+        &upstream_input_items,
+    ) {
         Ok(body) => body,
         Err(error) => return error.into_response(),
     };
@@ -151,7 +205,7 @@ async fn run_raw_response(
             Ok(stream) => openai_raw_responses_sse(
                 stream,
                 request,
-                input_items,
+                storage_input_items,
                 state.responses.clone(),
                 upstream.provider,
                 upstream_response_resource_supported(upstream),
@@ -168,7 +222,7 @@ async fn run_raw_response(
                 state,
                 &request,
                 response_object.clone(),
-                input_items,
+                storage_input_items,
                 upstream.provider,
                 upstream_response_resource_supported(upstream),
             )
@@ -226,10 +280,11 @@ pub async fn responses(
     let previous =
         match load_previous_response(&state, request.previous_response_id.as_deref()).await {
             Ok(previous) => previous,
+            Err(_) if can_forward_previous_response_id(upstream, &request) => None,
             Err(error) => return error.into_response(),
         };
 
-    if response_request_requires_raw_mode(&request, previous.as_ref()) {
+    if should_use_native_responses_path(upstream, &request, previous.as_ref()) {
         return run_raw_response(&state, upstream, &credentials, request, previous.as_ref()).await;
     }
 
@@ -454,10 +509,11 @@ pub async fn messages(
         Ok(items) => items,
         Err(error) => return anthropic_error_response(&error),
     };
-    let body = match responses_to_codex_request(&response_request, &input_items) {
-        Ok(body) => body,
-        Err(error) => return anthropic_error_response(&error),
-    };
+    let body =
+        match responses_to_upstream_request(upstream.provider, &response_request, &input_items) {
+            Ok(body) => body,
+            Err(error) => return anthropic_error_response(&error),
+        };
     trace_named_tools("messages_tools_upstream", &upstream_tool_names(&body));
 
     let input_tokens = estimate_response_input_tokens(&response_request, &input_items);
@@ -507,10 +563,11 @@ pub async fn image_generations(
         Ok(items) => items,
         Err(error) => return error.into_response(),
     };
-    let body = match responses_to_codex_request(&response_request, &input_items) {
-        Ok(body) => body,
-        Err(error) => return error.into_response(),
-    };
+    let body =
+        match responses_to_upstream_request(upstream.provider, &response_request, &input_items) {
+            Ok(body) => body,
+            Err(error) => return error.into_response(),
+        };
 
     match upstream.client.complete_response(body, &credentials).await {
         Ok(value) => {

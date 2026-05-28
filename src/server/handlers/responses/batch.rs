@@ -2,7 +2,7 @@ use crate::anthropic::{
     MessageBatchRequest, MessageBatchResult, MessageBatchResultType, error_body,
     from_openai_response_value,
 };
-use crate::codex::convert::responses_to_codex_request;
+use crate::codex::convert::responses_to_upstream_request;
 use crate::server::handlers::responses::{
     anthropic_responses_request, collect_response_input_items,
 };
@@ -119,10 +119,11 @@ async fn run_message_batch_upstream(
         Ok(credentials) => credentials,
         Err(error) => return errored_batch_result(custom_id, &error),
     };
-    let body = match responses_to_codex_request(&response_request, &input_items) {
-        Ok(body) => body,
-        Err(error) => return errored_batch_result(custom_id, &error),
-    };
+    let body =
+        match responses_to_upstream_request(upstream.provider, &response_request, &input_items) {
+            Ok(body) => body,
+            Err(error) => return errored_batch_result(custom_id, &error),
+        };
     match upstream.client.complete_response(body, &credentials).await {
         Ok(response) => MessageBatchResult {
             custom_id,

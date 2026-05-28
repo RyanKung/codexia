@@ -39,6 +39,15 @@ pub struct ResponseResourceCapabilities {
     pub list_input_items: ResponseResourceCapability,
 }
 
+/// Provider-specific strategy for creating Responses API objects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseCreationStrategy {
+    /// Preserve the historical rotom compatibility path unless native replay is required.
+    ChatCompatibility,
+    /// Use the upstream provider's native `/responses` create endpoint.
+    NativeResponses,
+}
+
 pub(super) trait UpstreamProvider: Sync {
     fn provider(&self) -> Provider;
 
@@ -49,6 +58,8 @@ pub(super) trait UpstreamProvider: Sync {
     fn response_resource_url(&self, base_url: &str, response_id: &str) -> Option<String>;
 
     fn resource_capabilities(&self) -> ResponseResourceCapabilities;
+
+    fn response_creation_strategy(&self) -> ResponseCreationStrategy;
 
     fn headers(&self, credentials: &Credentials) -> Result<HeaderMap>;
 
@@ -81,6 +92,10 @@ impl UpstreamProvider for CodexUpstream {
             cancel: ResponseResourceCapability::Unsupported,
             list_input_items: ResponseResourceCapability::LocalCompat,
         }
+    }
+
+    fn response_creation_strategy(&self) -> ResponseCreationStrategy {
+        ResponseCreationStrategy::ChatCompatibility
     }
 
     fn headers(&self, credentials: &Credentials) -> Result<HeaderMap> {
@@ -121,6 +136,10 @@ impl UpstreamProvider for GrokUpstream {
             cancel: ResponseResourceCapability::Unsupported,
             list_input_items: ResponseResourceCapability::LocalCompat,
         }
+    }
+
+    fn response_creation_strategy(&self) -> ResponseCreationStrategy {
+        ResponseCreationStrategy::NativeResponses
     }
 
     fn headers(&self, credentials: &Credentials) -> Result<HeaderMap> {
@@ -340,6 +359,10 @@ mod tests {
                 list_input_items: ResponseResourceCapability::LocalCompat,
             }
         );
+        assert_eq!(
+            adapter.response_creation_strategy(),
+            ResponseCreationStrategy::ChatCompatibility
+        );
         assert!(body.get("temperature").is_none());
         assert!(body.get("top_p").is_none());
         assert!(body.get("max_output_tokens").is_none());
@@ -391,6 +414,10 @@ mod tests {
                 cancel: ResponseResourceCapability::Unsupported,
                 list_input_items: ResponseResourceCapability::LocalCompat,
             }
+        );
+        assert_eq!(
+            adapter.response_creation_strategy(),
+            ResponseCreationStrategy::NativeResponses
         );
         assert_eq!(body["temperature"], 0.2);
         assert_eq!(body["top_p"], 0.8);

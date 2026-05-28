@@ -610,5 +610,6 @@ async fn wait_for_batch_to_finish(state: AppState, headers: HeaderMap, batch_id:
 
 mod auth_status_messages;
 mod batches_and_replay;
+mod responses_provider_strategy;
 mod responses_resources;
 mod responses_streaming;
