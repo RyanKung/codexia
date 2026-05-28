@@ -326,8 +326,51 @@ fn normalize_responses_input_item(item: &Value) -> Value {
             normalize_responses_message_content(content, &role);
         }
     }
+    if object.get("type").and_then(Value::as_str) == Some("function_call")
+        && let Some(arguments) = object.get_mut("arguments")
+    {
+        *arguments = Value::String(response_arguments_to_string(arguments));
+    }
+    if object.get("type").and_then(Value::as_str) == Some("function_call_output")
+        && let Some(output) = object.get_mut("output")
+    {
+        *output = Value::String(response_tool_output_to_string(output));
+    }
 
     item
+}
+
+fn response_arguments_to_string(arguments: &Value) -> String {
+    match arguments {
+        Value::String(value) if !value.trim().is_empty() => value.clone(),
+        Value::String(_) | Value::Null => "{}".to_owned(),
+        other => other.to_string(),
+    }
+}
+
+fn response_tool_output_to_string(output: &Value) -> String {
+    match output {
+        Value::String(value) => value.clone(),
+        Value::Null => String::new(),
+        Value::Array(parts) => {
+            response_text_parts_to_string(parts).unwrap_or_else(|| output.to_string())
+        }
+        other => other.to_string(),
+    }
+}
+
+fn response_text_parts_to_string(parts: &[Value]) -> Option<String> {
+    let mut text = Vec::new();
+    for part in parts {
+        let kind = part.get("type").and_then(Value::as_str);
+        match kind {
+            Some("text" | "input_text" | "output_text") => {
+                text.push(part.get("text").and_then(Value::as_str).unwrap_or_default());
+            }
+            _ => return None,
+        }
+    }
+    Some(text.join("\n"))
 }
 
 fn normalize_responses_message_content(content: &mut Value, role: &str) {
@@ -667,6 +710,42 @@ mod tests {
         assert_eq!(body["input"][0]["content"][0]["text"], "hello");
         assert_eq!(body["input"][1]["content"][0]["type"], "output_text");
         assert_eq!(body["input"][2]["type"], "function_call");
+    }
+
+    #[test]
+    fn normalizes_raw_responses_tool_payloads_for_codex() {
+        let request: ResponsesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "input": []
+        }))
+        .unwrap();
+        let input = vec![
+            json!({
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "lookup",
+                "arguments": {"q": "x"}
+            }),
+            json!({
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": [
+                    {"type": "text", "text": "one"},
+                    {"type": "output_text", "text": "two"}
+                ]
+            }),
+            json!({
+                "type": "function_call_output",
+                "call_id": "call_2",
+                "output": {"ok": true}
+            }),
+        ];
+
+        let body = responses_to_codex_request(&request, &input).unwrap();
+
+        assert_eq!(body["input"][0]["arguments"], "{\"q\":\"x\"}");
+        assert_eq!(body["input"][1]["output"], "one\ntwo");
+        assert_eq!(body["input"][2]["output"], "{\"ok\":true}");
     }
 
     #[test]
