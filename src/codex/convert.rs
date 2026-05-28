@@ -235,8 +235,11 @@ pub fn convert_tool_choice(tool_choice: Option<&Value>) -> Option<Value> {
 ///
 /// Returns an error when a function tool omits its function metadata.
 pub fn responses_to_codex_request(request: &ResponsesRequest, input: &[Value]) -> Result<Value> {
-    let input = normalize_responses_input_items(input);
+    let normalized = normalize_responses_input_items(input);
+    let input = normalized.items;
     let store = request.should_store() && !input_requires_stateless_replay(&input);
+    let instructions =
+        combined_responses_instructions(request.instructions.as_deref(), &normalized.instructions);
     let text = request.extra.get("text").cloned().unwrap_or_else(|| {
         json!({ "verbosity": request.extra.get("text_verbosity").and_then(Value::as_str).unwrap_or("medium") })
     });
@@ -252,7 +255,7 @@ pub fn responses_to_codex_request(request: &ResponsesRequest, input: &[Value]) -
         // requested a one-shot JSON response.
         "stream": true,
         "input": input,
-        "instructions": request.instructions.as_deref().unwrap_or(""),
+        "instructions": instructions,
         "text": text,
         "include": include,
         "tool_choice": convert_tool_choice(request.tool_choice.as_ref()).unwrap_or_else(|| json!("auto")),
@@ -297,8 +300,70 @@ fn input_requires_stateless_replay(input: &[Value]) -> bool {
     })
 }
 
-fn normalize_responses_input_items(input: &[Value]) -> Vec<Value> {
-    input.iter().map(normalize_responses_input_item).collect()
+struct NormalizedResponsesInput {
+    items: Vec<Value>,
+    instructions: Vec<String>,
+}
+
+fn normalize_responses_input_items(input: &[Value]) -> NormalizedResponsesInput {
+    let mut normalized = NormalizedResponsesInput {
+        items: Vec::new(),
+        instructions: Vec::new(),
+    };
+
+    for item in input {
+        if let Some(instruction) = response_instruction_from_input_item(item) {
+            normalized.instructions.push(instruction);
+        } else {
+            normalized.items.push(normalize_responses_input_item(item));
+        }
+    }
+
+    normalized
+}
+
+fn combined_responses_instructions(
+    request_instructions: Option<&str>,
+    input_instructions: &[String],
+) -> String {
+    let mut parts = Vec::new();
+    if let Some(instructions) = request_instructions.filter(|value| !value.trim().is_empty()) {
+        parts.push(instructions);
+    }
+    parts.extend(
+        input_instructions
+            .iter()
+            .map(String::as_str)
+            .filter(|value| !value.trim().is_empty()),
+    );
+    parts.join("\n\n")
+}
+
+fn response_instruction_from_input_item(item: &Value) -> Option<String> {
+    let object = item.as_object()?;
+    let kind = object.get("type").and_then(Value::as_str);
+    let type_is_message = kind.is_none_or(str::is_empty) || kind == Some("message");
+    if !type_is_message {
+        return None;
+    }
+    if object.get("role").and_then(Value::as_str) != Some("system") {
+        return None;
+    }
+
+    Some(
+        object
+            .get("content")
+            .and_then(response_instruction_content_to_string)
+            .unwrap_or_default(),
+    )
+}
+
+fn response_instruction_content_to_string(content: &Value) -> Option<String> {
+    match content {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(parts) => response_text_parts_to_string(parts),
+        _ => None,
+    }
 }
 
 fn normalize_responses_input_item(item: &Value) -> Value {
@@ -746,6 +811,51 @@ mod tests {
         assert_eq!(body["input"][0]["arguments"], "{\"q\":\"x\"}");
         assert_eq!(body["input"][1]["output"], "one\ntwo");
         assert_eq!(body["input"][2]["output"], "{\"ok\":true}");
+    }
+
+    #[test]
+    fn lifts_raw_responses_system_items_into_instructions() {
+        let request: ResponsesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "instructions": "base"
+        }))
+        .unwrap();
+        let input = vec![
+            json!({
+                "type": "message",
+                "role": "system",
+                "content": [{"type": "input_text", "text": "system prompt"}]
+            }),
+            json!({
+                "role": "developer",
+                "content": "developer prompt"
+            }),
+            json!({
+                "role": "user",
+                "content": [{"type": "input_text", "text": "hello"}]
+            }),
+            json!({
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "done"
+            }),
+        ];
+
+        let body = responses_to_codex_request(&request, &input).unwrap();
+
+        assert_eq!(body["instructions"], "base\n\nsystem prompt");
+        assert_eq!(body["input"].as_array().unwrap().len(), 3);
+        assert_eq!(body["input"][0]["role"], "developer");
+        assert_eq!(body["input"][0]["content"][0]["text"], "developer prompt");
+        assert_eq!(body["input"][1]["role"], "user");
+        assert_eq!(body["input"][2]["type"], "function_call_output");
+        assert!(
+            !body["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| matches!(item.get("role").and_then(Value::as_str), Some("system")))
+        );
     }
 
     #[test]
