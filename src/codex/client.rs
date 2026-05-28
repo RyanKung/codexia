@@ -29,6 +29,59 @@ const CODEX_PRIORITY_SERVICE_TIER: &str = "priority";
 /// Default upstream base URL for `Codex` response requests.
 pub const DEFAULT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api";
 
+const CODEX_UPSTREAM: CodexUpstream = CodexUpstream;
+const GROK_UPSTREAM: GrokUpstream = GrokUpstream;
+
+trait UpstreamProvider: Sync {
+    fn provider(&self) -> Provider;
+
+    fn responses_url(&self, base_url: &str) -> String;
+
+    fn headers(&self, credentials: &Credentials) -> Result<HeaderMap>;
+
+    fn prepare_request(&self, body: &mut Value);
+}
+
+struct CodexUpstream;
+
+impl UpstreamProvider for CodexUpstream {
+    fn provider(&self) -> Provider {
+        Provider::Codex
+    }
+
+    fn responses_url(&self, base_url: &str) -> String {
+        resolve_codex_url(base_url)
+    }
+
+    fn headers(&self, credentials: &Credentials) -> Result<HeaderMap> {
+        codex_headers(credentials)
+    }
+
+    fn prepare_request(&self, body: &mut Value) {
+        remove_codex_unsupported_keys(body);
+    }
+}
+
+struct GrokUpstream;
+
+impl UpstreamProvider for GrokUpstream {
+    fn provider(&self) -> Provider {
+        Provider::Grok
+    }
+
+    fn responses_url(&self, base_url: &str) -> String {
+        resolve_grok_responses_url(base_url)
+    }
+
+    fn headers(&self, credentials: &Credentials) -> Result<HeaderMap> {
+        grok_headers(credentials)
+    }
+
+    fn prepare_request(&self, body: &mut Value) {
+        remove_grok_unsupported_keys(body);
+    }
+}
+
 #[derive(Clone)]
 /// HTTP client wrapper for the `ChatGPT` `Codex` responses backend.
 pub struct CodexClient {
@@ -241,16 +294,14 @@ impl CodexClient {
 
     async fn send_body(&self, body: &Value, credentials: &Credentials) -> Result<Response> {
         let mut upstream_body = body.clone();
-        match self.provider {
-            Provider::Codex => remove_codex_unsupported_keys(&mut upstream_body),
-            Provider::Grok => remove_grok_unsupported_keys(&mut upstream_body),
-        }
+        let upstream = self.upstream_provider();
+        upstream.prepare_request(&mut upstream_body);
         crate::logging::trace_json("upstream.request", &upstream_body);
-        let url = self.responses_url();
+        let url = upstream.responses_url(&self.base_url);
         let response = self
             .http
             .post(&url)
-            .headers(self.headers(credentials)?)
+            .headers(upstream.headers(credentials)?)
             .json(&upstream_body)
             .send()
             .await?;
@@ -262,21 +313,14 @@ impl CodexClient {
         if response.status().is_success() {
             Ok(response)
         } else {
-            Err(parse_error_response(response, self.provider).await)
+            Err(parse_error_response(response, upstream.provider()).await)
         }
     }
 
-    fn responses_url(&self) -> String {
+    fn upstream_provider(&self) -> &'static dyn UpstreamProvider {
         match self.provider {
-            Provider::Codex => resolve_codex_url(&self.base_url),
-            Provider::Grok => resolve_grok_responses_url(&self.base_url),
-        }
-    }
-
-    fn headers(&self, credentials: &Credentials) -> Result<HeaderMap> {
-        match self.provider {
-            Provider::Codex => codex_headers(credentials),
-            Provider::Grok => grok_headers(credentials),
+            Provider::Codex => &CODEX_UPSTREAM,
+            Provider::Grok => &GROK_UPSTREAM,
         }
     }
 }
@@ -541,5 +585,15 @@ mod tests {
         remove_codex_unsupported_keys(&mut body);
 
         assert!(body.get("service_tier").is_none());
+    }
+
+    #[test]
+    fn selects_upstream_provider_adapter() {
+        let http = Client::new();
+        let codex = CodexClient::new_for_provider(http.clone(), Provider::Codex);
+        let grok = CodexClient::new_for_provider(http, Provider::Grok);
+
+        assert_eq!(codex.upstream_provider().provider(), Provider::Codex);
+        assert_eq!(grok.upstream_provider().provider(), Provider::Grok);
     }
 }

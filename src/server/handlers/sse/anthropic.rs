@@ -23,6 +23,14 @@ use std::{
     pin::Pin,
 };
 
+trait StreamEventMapper {
+    fn start_events(&self, stream_id: &str, model: &str) -> Result<Vec<Event>>;
+
+    fn map_event(&mut self, item: &Value) -> Result<AnthropicStreamStep>;
+
+    fn finish_events(&mut self) -> Result<Vec<Event>>;
+}
+
 pub(in crate::server::handlers) fn anthropic_raw_messages_sse_response(
     stream: Pin<Box<dyn Stream<Item = Result<crate::codex::sse::JsonSseEvent>> + Send>>,
     model: String,
@@ -47,7 +55,7 @@ pub(in crate::server::handlers) fn anthropic_raw_messages_sse_response(
 
         while let Some(item) = stream.next().await {
             match item {
-                Ok(item) => match state.handle_item(&item.value) {
+                Ok(item) => match state.map_event(&item.value) {
                     Ok(step) => {
                         for event in step.events {
                             yield Ok(event);
@@ -68,7 +76,7 @@ pub(in crate::server::handlers) fn anthropic_raw_messages_sse_response(
             }
         }
 
-        match state.fallback_stop_events() {
+        match state.finish_events() {
             Ok(events) => {
                 for event in events {
                     yield Ok(event);
@@ -117,7 +125,9 @@ impl AnthropicRawStreamState {
             },
         }
     }
+}
 
+impl StreamEventMapper for AnthropicRawStreamState {
     fn start_events(&self, id: &str, model: &str) -> Result<Vec<Event>> {
         Ok(vec![message_start_event(
             id,
@@ -126,7 +136,7 @@ impl AnthropicRawStreamState {
         )?])
     }
 
-    fn handle_item(&mut self, item: &Value) -> Result<AnthropicStreamStep> {
+    fn map_event(&mut self, item: &Value) -> Result<AnthropicStreamStep> {
         if let Some(message) = event_error(item) {
             return Err(crate::Error::upstream(message));
         }
@@ -146,6 +156,15 @@ impl AnthropicRawStreamState {
         })
     }
 
+    fn finish_events(&mut self) -> Result<Vec<Event>> {
+        let mut events = self.close_open_blocks()?;
+        events.push(message_delta_event("stop", &self.usage)?);
+        events.push(message_stop_event()?);
+        Ok(events)
+    }
+}
+
+impl AnthropicRawStreamState {
     fn lifecycle_events(&mut self, item: &Value) -> Result<Vec<Event>> {
         match item.get("type").and_then(Value::as_str) {
             Some("ping") => Ok(vec![
@@ -375,13 +394,6 @@ impl AnthropicRawStreamState {
         for index in std::mem::take(&mut self.open_thinking_blocks) {
             events.push(content_block_stop(index)?);
         }
-        Ok(events)
-    }
-
-    fn fallback_stop_events(&mut self) -> Result<Vec<Event>> {
-        let mut events = self.close_open_blocks()?;
-        events.push(message_delta_event("stop", &self.usage)?);
-        events.push(message_stop_event()?);
         Ok(events)
     }
 
