@@ -204,6 +204,8 @@ pub struct ImageGenerationResponse {
 /// Response returned by `POST /v1/responses/input_tokens`.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ResponseInputTokens {
+    /// Object kind, always `response.input_tokens`.
+    pub object: &'static str,
     /// Estimated input token count for the submitted request.
     pub input_tokens: u32,
 }
@@ -213,6 +215,32 @@ pub struct ResponseInputTokens {
 pub struct ResponseCompaction {
     /// Compacted input items suitable for later Responses API reuse.
     pub output: Vec<Value>,
+}
+
+/// Response returned by `DELETE /v1/responses/{response_id}`.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ResponseDeleted {
+    /// Deleted response identifier.
+    pub id: String,
+    /// Object kind, always `response`.
+    pub object: &'static str,
+    /// Whether the resource was deleted.
+    pub deleted: bool,
+}
+
+/// List response returned by `GET /v1/responses/{response_id}/input_items`.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ResponseInputItemList {
+    /// Object kind, always `list`.
+    pub object: &'static str,
+    /// Returned input items.
+    pub data: Vec<Value>,
+    /// First returned item identifier, when available.
+    pub first_id: Option<String>,
+    /// Last returned item identifier, when available.
+    pub last_id: Option<String>,
+    /// Whether more items are available after this page.
+    pub has_more: bool,
 }
 
 /// OpenAI-compatible streamed chat completion chunk.
@@ -390,6 +418,34 @@ pub const fn image_generation_response(
     data: Vec<GeneratedImage>,
 ) -> ImageGenerationResponse {
     ImageGenerationResponse { created, data }
+}
+
+/// Builds a local Responses API deletion result.
+#[must_use]
+pub const fn response_deleted(id: String) -> ResponseDeleted {
+    ResponseDeleted {
+        id,
+        object: "response",
+        deleted: true,
+    }
+}
+
+/// Builds a Responses API input item list.
+#[must_use]
+pub fn response_input_item_list(data: Vec<Value>, has_more: bool) -> ResponseInputItemList {
+    let first_id = data.first().and_then(response_item_id);
+    let last_id = data.last().and_then(response_item_id);
+    ResponseInputItemList {
+        object: "list",
+        data,
+        first_id,
+        last_id,
+        has_more,
+    }
+}
+
+fn response_item_id(item: &Value) -> Option<String> {
+    item.get("id").and_then(Value::as_str).map(str::to_owned)
 }
 
 /// Parses a generated image payload from a Responses output item.

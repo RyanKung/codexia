@@ -287,6 +287,10 @@ OpenAI compatibility currently covers:
 - `GET /v1/models`
 - `POST /v1/chat/completions`
 - `POST /v1/responses`
+- `GET /v1/responses/{response_id}`
+- `DELETE /v1/responses/{response_id}`
+- `POST /v1/responses/{response_id}/cancel`
+- `GET /v1/responses/{response_id}/input_items`
 - `POST /v1/images/generations`
 - `POST /v1/responses/compact`
 - `POST /v1/responses/input_tokens`
@@ -300,8 +304,12 @@ effective sampling or output-length controls. Grok Responses requests preserve
 the supported controls that xAI accepts, including `temperature`, `top_p`,
 `max_output_tokens`, `stop`, `text`, `include`, and `parallel_tool_calls`.
 
-`/v1/responses` supports `previous_response_id` only within the same running
-rotom process. rotom intentionally keeps this local state in memory.
+`/v1/responses` keeps the historical local replay behavior for existing
+OpenClaw and agent clients. Local response ids can be retrieved, deleted, and
+listed for input items while the same rotom process remains alive. Grok
+response retrieve/delete is forwarded to xAI only for unknown ids when Grok is
+the unambiguous configured upstream. Codex resource lifecycle calls are not
+claimed as upstream-supported unless the ChatGPT Codex backend adds that API.
 
 Image generation is exposed in two compatibility shapes:
 

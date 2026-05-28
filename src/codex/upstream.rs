@@ -15,12 +15,40 @@ const GROK_UPSTREAM: GrokUpstream = GrokUpstream;
 /// Default upstream base URL for `Codex` response requests.
 pub const DEFAULT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api";
 
+/// Upstream support level for one Responses API resource operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseResourceCapability {
+    /// The upstream provider documents and serves this operation.
+    UpstreamSupported,
+    /// rotom implements this operation locally for client compatibility.
+    LocalCompat,
+    /// Neither the upstream nor rotom should claim support for this operation.
+    Unsupported,
+}
+
+/// Provider support matrix for Responses API resource lifecycle operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResponseResourceCapabilities {
+    /// `GET /v1/responses/{response_id}` support.
+    pub retrieve: ResponseResourceCapability,
+    /// `DELETE /v1/responses/{response_id}` support.
+    pub delete: ResponseResourceCapability,
+    /// `POST /v1/responses/{response_id}/cancel` support.
+    pub cancel: ResponseResourceCapability,
+    /// `GET /v1/responses/{response_id}/input_items` support.
+    pub list_input_items: ResponseResourceCapability,
+}
+
 pub(super) trait UpstreamProvider: Sync {
     fn provider(&self) -> Provider;
 
     fn default_base_url(&self) -> &'static str;
 
     fn responses_url(&self, base_url: &str) -> String;
+
+    fn response_resource_url(&self, base_url: &str, response_id: &str) -> Option<String>;
+
+    fn resource_capabilities(&self) -> ResponseResourceCapabilities;
 
     fn headers(&self, credentials: &Credentials) -> Result<HeaderMap>;
 
@@ -40,6 +68,19 @@ impl UpstreamProvider for CodexUpstream {
 
     fn responses_url(&self, base_url: &str) -> String {
         resolve_codex_url(base_url)
+    }
+
+    fn response_resource_url(&self, _base_url: &str, _response_id: &str) -> Option<String> {
+        None
+    }
+
+    fn resource_capabilities(&self) -> ResponseResourceCapabilities {
+        ResponseResourceCapabilities {
+            retrieve: ResponseResourceCapability::LocalCompat,
+            delete: ResponseResourceCapability::LocalCompat,
+            cancel: ResponseResourceCapability::Unsupported,
+            list_input_items: ResponseResourceCapability::LocalCompat,
+        }
     }
 
     fn headers(&self, credentials: &Credentials) -> Result<HeaderMap> {
@@ -64,6 +105,22 @@ impl UpstreamProvider for GrokUpstream {
 
     fn responses_url(&self, base_url: &str) -> String {
         resolve_grok_responses_url(base_url)
+    }
+
+    fn response_resource_url(&self, base_url: &str, response_id: &str) -> Option<String> {
+        Some(resolve_response_resource_url(
+            &resolve_grok_responses_url(base_url),
+            response_id,
+        ))
+    }
+
+    fn resource_capabilities(&self) -> ResponseResourceCapabilities {
+        ResponseResourceCapabilities {
+            retrieve: ResponseResourceCapability::UpstreamSupported,
+            delete: ResponseResourceCapability::UpstreamSupported,
+            cancel: ResponseResourceCapability::Unsupported,
+            list_input_items: ResponseResourceCapability::LocalCompat,
+        }
     }
 
     fn headers(&self, credentials: &Credentials) -> Result<HeaderMap> {
@@ -104,6 +161,12 @@ pub fn resolve_grok_responses_url(base_url: &str) -> String {
     } else {
         format!("{normalized}/responses")
     }
+}
+
+/// Appends an opaque response id to a provider Responses collection URL.
+#[must_use]
+pub fn resolve_response_resource_url(responses_url: &str, response_id: &str) -> String {
+    format!("{}/{response_id}", responses_url.trim_end_matches('/'))
 }
 
 /// Builds the required HTTP headers for authenticated Codex backend requests.
@@ -268,6 +331,15 @@ mod tests {
             adapter.responses_url("https://chatgpt.com/backend-api"),
             "https://chatgpt.com/backend-api/codex/responses"
         );
+        assert_eq!(
+            adapter.resource_capabilities(),
+            ResponseResourceCapabilities {
+                retrieve: ResponseResourceCapability::LocalCompat,
+                delete: ResponseResourceCapability::LocalCompat,
+                cancel: ResponseResourceCapability::Unsupported,
+                list_input_items: ResponseResourceCapability::LocalCompat,
+            }
+        );
         assert!(body.get("temperature").is_none());
         assert!(body.get("top_p").is_none());
         assert!(body.get("max_output_tokens").is_none());
@@ -306,6 +378,19 @@ mod tests {
         assert_eq!(
             adapter.responses_url("https://api.x.ai/v1"),
             "https://api.x.ai/v1/responses"
+        );
+        assert_eq!(
+            adapter.response_resource_url("https://api.x.ai/v1", "resp_1"),
+            Some("https://api.x.ai/v1/responses/resp_1".to_owned())
+        );
+        assert_eq!(
+            adapter.resource_capabilities(),
+            ResponseResourceCapabilities {
+                retrieve: ResponseResourceCapability::UpstreamSupported,
+                delete: ResponseResourceCapability::UpstreamSupported,
+                cancel: ResponseResourceCapability::Unsupported,
+                list_input_items: ResponseResourceCapability::LocalCompat,
+            }
         );
         assert_eq!(body["temperature"], 0.2);
         assert_eq!(body["top_p"], 0.8);

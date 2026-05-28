@@ -1,5 +1,6 @@
 //! Route handlers and streaming response helpers for the HTTP server.
 
+mod response_resources;
 mod responses;
 mod sse;
 
@@ -10,16 +11,17 @@ use crate::{
         MessageBatchListResponse, MessageBatchRequestCounts, MessagesRequest, error_body,
         estimate_input_tokens, from_openai_response_value, message_batch_list_response,
     },
-    codex::convert::responses_to_codex_request,
+    codex::{client::ResponseResourceCapability, convert::responses_to_codex_request},
+    config::{Credentials, Provider},
     openai::{
         response::{
-            ImageGenerationResponse, ResponseCompaction, ResponseInputTokens,
+            ImageGenerationResponse, ResponseCompaction, ResponseInputTokens, ResponseObject,
             generated_images_from_output, image_generation_response,
         },
         types::{ChatCompletionRequest, ImageGenerationRequest, ResponsesRequest},
     },
     server::{
-        AppState,
+        AppState, UpstreamState,
         auth::authorize,
         status_response::{build_status_response, build_unsupported_provider_status_response},
     },
@@ -42,6 +44,10 @@ use serde_json::{Value, json};
 use sse::{
     anthropic_error_response, anthropic_raw_messages_sse_response, openai_raw_responses_sse,
     openai_responses_sse, sse_response,
+};
+
+pub use response_resources::{
+    cancel_response, delete_response, get_response, list_response_input_items,
 };
 
 /// Lightweight healthcheck for the local service.
@@ -100,6 +106,80 @@ fn upstream_tool_names(body: &Value) -> Vec<String> {
         })
 }
 
+fn upstream_response_resource_supported(upstream: &UpstreamState) -> bool {
+    upstream.client.response_resource_capabilities().retrieve
+        == ResponseResourceCapability::UpstreamSupported
+}
+
+async fn store_response_if_requested(
+    state: &AppState,
+    request: &ResponsesRequest,
+    response: ResponseObject,
+    input_items: Vec<Value>,
+    provider: Provider,
+    upstream_resource: bool,
+) {
+    maybe_store_response(
+        state,
+        request,
+        response,
+        input_items,
+        provider,
+        upstream_resource,
+    )
+    .await;
+}
+
+async fn run_raw_response(
+    state: &AppState,
+    upstream: &UpstreamState,
+    credentials: &Credentials,
+    request: ResponsesRequest,
+    previous: Option<&crate::server::store::StoredResponse>,
+) -> Response {
+    let input_items = match collect_response_input_items(&request, previous) {
+        Ok(items) => items,
+        Err(error) => return error.into_response(),
+    };
+    let body = match responses_to_codex_request(&request, &input_items) {
+        Ok(body) => body,
+        Err(error) => return error.into_response(),
+    };
+    trace_named_tools("responses_tools_upstream", &upstream_tool_names(&body));
+    if request.wants_stream() {
+        return match upstream.client.stream_response(body, credentials).await {
+            Ok(stream) => openai_raw_responses_sse(
+                stream,
+                request,
+                input_items,
+                state.responses.clone(),
+                upstream.provider,
+                upstream_response_resource_supported(upstream),
+            )
+            .into_response(),
+            Err(error) => error.into_response(),
+        };
+    }
+
+    match upstream.client.complete_response(body, credentials).await {
+        Ok(value) => {
+            let response_object = response_object_from_upstream(&request, &value);
+            store_response_if_requested(
+                state,
+                &request,
+                response_object.clone(),
+                input_items,
+                upstream.provider,
+                upstream_response_resource_supported(upstream),
+            )
+            .await;
+            trace_response("responses", &response_object);
+            Json(response_object).into_response()
+        }
+        Err(error) => error.into_response(),
+    }
+}
+
 /// Returns the configured model list after optional local API key validation.
 pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response {
     match authorize(&headers, state.api_key.as_deref()) {
@@ -150,33 +230,7 @@ pub async fn responses(
         };
 
     if response_request_requires_raw_mode(&request, previous.as_ref()) {
-        let input_items = match collect_response_input_items(&request, previous.as_ref()) {
-            Ok(items) => items,
-            Err(error) => return error.into_response(),
-        };
-        let body = match responses_to_codex_request(&request, &input_items) {
-            Ok(body) => body,
-            Err(error) => return error.into_response(),
-        };
-        trace_named_tools("responses_tools_upstream", &upstream_tool_names(&body));
-        if request.wants_stream() {
-            return match upstream.client.stream_response(body, &credentials).await {
-                Ok(stream) => {
-                    openai_raw_responses_sse(stream, request, input_items, state.responses)
-                        .into_response()
-                }
-                Err(error) => error.into_response(),
-            };
-        }
-        return match upstream.client.complete_response(body, &credentials).await {
-            Ok(value) => {
-                let response_object = response_object_from_upstream(&request, &value);
-                maybe_store_response(&state, &request, response_object.clone(), input_items).await;
-                trace_response("responses", &response_object);
-                Json(response_object).into_response()
-            }
-            Err(error) => error.into_response(),
-        };
+        return run_raw_response(&state, upstream, &credentials, request, previous.as_ref()).await;
     }
 
     let (chat_request, input_items) = match responses_to_chat_request(&request, previous.as_ref()) {
@@ -195,7 +249,8 @@ pub async fn responses(
                 responses::build_response_id(),
                 request,
                 input_items,
-                state.responses,
+                state.responses.clone(),
+                upstream.provider,
             )
             .into_response(),
             Err(error) => error.into_response(),
@@ -208,7 +263,15 @@ pub async fn responses(
         {
             Ok(response) => {
                 let response_object = response_object_from_chat(&request, response);
-                maybe_store_response(&state, &request, response_object.clone(), input_items).await;
+                store_response_if_requested(
+                    &state,
+                    &request,
+                    response_object.clone(),
+                    input_items,
+                    upstream.provider,
+                    false,
+                )
+                .await;
                 trace_response("responses", &response_object);
                 Json(response_object).into_response()
             }
@@ -244,6 +307,7 @@ pub async fn count_response_input_tokens(
     };
 
     let response = ResponseInputTokens {
+        object: "response.input_tokens",
         input_tokens: estimate_response_input_tokens(&request, &input_items),
     };
     trace_response("responses.input_tokens", &response);

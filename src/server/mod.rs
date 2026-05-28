@@ -199,6 +199,18 @@ pub fn router(state: AppState) -> Router {
             "/v1/responses/input_tokens",
             post(handlers::count_response_input_tokens),
         )
+        .route(
+            "/v1/responses/{response_id}",
+            get(handlers::get_response).delete(handlers::delete_response),
+        )
+        .route(
+            "/v1/responses/{response_id}/cancel",
+            post(handlers::cancel_response),
+        )
+        .route(
+            "/v1/responses/{response_id}/input_items",
+            get(handlers::list_response_input_items),
+        )
         .route("/v1/messages", post(handlers::messages))
         .route(
             "/v1/messages/count_tokens",

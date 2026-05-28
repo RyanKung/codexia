@@ -17,14 +17,18 @@ use crate::{
     },
 };
 use futures_util::{Stream, StreamExt};
-use reqwest::{Client, Response};
+use reqwest::{
+    Client, Method, Response,
+    header::{ACCEPT, HeaderValue},
+};
 use serde_json::Value;
 use std::pin::Pin;
 
 /// Default upstream base URL for `Codex` response requests.
 pub use crate::codex::upstream::DEFAULT_CODEX_BASE_URL;
 pub use crate::codex::upstream::{
-    codex_headers, grok_headers, resolve_codex_url, resolve_grok_responses_url,
+    ResponseResourceCapabilities, ResponseResourceCapability, codex_headers, grok_headers,
+    resolve_codex_url, resolve_grok_responses_url,
 };
 
 #[derive(Clone)]
@@ -50,9 +54,19 @@ impl CodexClient {
     #[must_use]
     pub fn new_for_provider(http: Client, provider: Provider) -> Self {
         let base_url = adapter_for_provider(provider).default_base_url();
+        Self::new_for_provider_base_url(http, provider, base_url)
+    }
+
+    /// Creates an upstream client for the selected provider and base URL.
+    #[must_use]
+    pub fn new_for_provider_base_url(
+        http: Client,
+        provider: Provider,
+        base_url: impl Into<String>,
+    ) -> Self {
         Self {
             http,
-            base_url: base_url.to_owned(),
+            base_url: base_url.into(),
             provider,
         }
     }
@@ -73,6 +87,12 @@ impl CodexClient {
     #[must_use]
     pub const fn provider(&self) -> Provider {
         self.provider
+    }
+
+    /// Returns the provider's Responses resource lifecycle support matrix.
+    #[must_use]
+    pub fn response_resource_capabilities(&self) -> ResponseResourceCapabilities {
+        self.upstream_provider().resource_capabilities()
     }
 
     /// Sends a non-streaming chat completion request and collects the full response body.
@@ -225,6 +245,50 @@ impl CodexClient {
         ))))
     }
 
+    /// Retrieves an upstream-stored Responses API object when the provider supports it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the provider does not expose retrieval or the
+    /// upstream request fails.
+    pub async fn retrieve_response(
+        &self,
+        response_id: &str,
+        credentials: &Credentials,
+    ) -> Result<Value> {
+        let response = self
+            .send_response_resource(Method::GET, response_id, credentials)
+            .await?;
+        response.json::<Value>().await.map_err(Into::into)
+    }
+
+    /// Deletes an upstream-stored Responses API object when the provider supports it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the provider does not expose deletion or the
+    /// upstream request fails.
+    pub async fn delete_response(
+        &self,
+        response_id: &str,
+        credentials: &Credentials,
+    ) -> Result<Value> {
+        let response = self
+            .send_response_resource(Method::DELETE, response_id, credentials)
+            .await?;
+        let status = response.status();
+        let text = response.text().await?;
+        if text.trim().is_empty() {
+            Ok(serde_json::json!({
+                "id": response_id,
+                "object": "response",
+                "deleted": status.is_success()
+            }))
+        } else {
+            serde_json::from_str(&text).map_err(Into::into)
+        }
+    }
+
     async fn send_chat(
         &self,
         request: &crate::openai::types::ChatCompletionRequest,
@@ -259,9 +323,52 @@ impl CodexClient {
         }
     }
 
+    async fn send_response_resource(
+        &self,
+        method: Method,
+        response_id: &str,
+        credentials: &Credentials,
+    ) -> Result<Response> {
+        let upstream = self.upstream_provider();
+        let Some(url) = upstream.response_resource_url(&self.base_url, response_id) else {
+            return Err(unsupported_response_resource(
+                upstream.provider(),
+                method.as_str(),
+            ));
+        };
+        let mut headers = upstream.headers(credentials)?;
+        headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+        let response = self
+            .http
+            .request(method, &url)
+            .headers(headers)
+            .send()
+            .await?;
+        tracing::trace!(
+            event = "upstream.response_resource_started",
+            url = %url,
+            status = response.status().as_u16()
+        );
+        if response.status().is_success() {
+            Ok(response)
+        } else {
+            Err(parse_error_response(response, upstream.provider()).await)
+        }
+    }
+
     fn upstream_provider(&self) -> &'static dyn UpstreamProvider {
         adapter_for_provider(self.provider)
     }
+}
+
+fn unsupported_response_resource(provider: Provider, operation: &str) -> Error {
+    Error::upstream_with_status(
+        reqwest::StatusCode::NOT_IMPLEMENTED,
+        format!(
+            "{} upstream does not support Responses resource {operation}",
+            provider.display_name()
+        ),
+    )
 }
 
 async fn parse_error_response(response: Response, provider: Provider) -> Error {

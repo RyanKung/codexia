@@ -147,7 +147,7 @@ enum Command {
     },
     #[command(
         about = "Serve the OpenAI- and Anthropic-compatible HTTP API",
-        long_about = "Serve OpenAI- and Anthropic-compatible endpoints backed by the selected provider, including /v1/models, /v1/chat/completions, /v1/responses, /v1/responses/compact, /v1/messages, /v1/messages/count_tokens, /v1/messages/batches, and /v1/auth/refresh."
+        long_about = "Serve OpenAI- and Anthropic-compatible endpoints backed by the selected provider, including /v1/models, /v1/chat/completions, /v1/responses, Responses resource compatibility routes, /v1/messages, /v1/messages/count_tokens, /v1/messages/batches, and /v1/auth/refresh."
     )]
     Serve {
         #[arg(long, value_name = "ADDR", help = "Socket address to listen on")]
@@ -853,13 +853,16 @@ async fn running_daemon_base_url(http: &Client) -> Option<String> {
 }
 
 fn daemon_endpoint_lines(base_url: &str) -> Vec<String> {
-    const ENDPOINTS: [(&str, &str); 15] = [
+    const ENDPOINTS: [(&str, &str); 18] = [
         ("GET", "/health"),
         ("GET", "/v1/status"),
         ("GET", "/v1/models"),
         ("POST", "/v1/auth/refresh"),
         ("POST", "/v1/chat/completions"),
         ("POST", "/v1/responses"),
+        ("GET,DELETE", "/v1/responses/{response_id}"),
+        ("POST", "/v1/responses/{response_id}/cancel"),
+        ("GET", "/v1/responses/{response_id}/input_items"),
         ("POST", "/v1/responses/compact"),
         ("POST", "/v1/responses/input_tokens"),
         ("POST", "/v1/messages"),

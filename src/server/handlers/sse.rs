@@ -4,6 +4,7 @@ use super::responses::{
 };
 use crate::{
     codex::events::{is_done_event, normalize_incomplete_result_response},
+    config::Provider,
     error::Result,
     openai::response::{GeneratedImage, ResponseObject},
 };
@@ -485,6 +486,7 @@ pub(super) fn openai_responses_sse(
     request: crate::openai::types::ResponsesRequest,
     input_items: Vec<Value>,
     store: crate::server::store::ResponseStore,
+    provider: Provider,
 ) -> Sse<impl Stream<Item = std::result::Result<Event, Infallible>>> {
     let mapped = async_stream::stream! {
         let created_at = crate::config::now_unix();
@@ -549,6 +551,8 @@ pub(super) fn openai_responses_sse(
                             store.insert(crate::server::store::StoredResponse {
                                 response: completed.clone(),
                                 input_items: stored_items,
+                                provider,
+                                upstream_resource: false,
                             }).await;
                         }
                         for event in stream_state.text_done_events() {
@@ -574,6 +578,8 @@ pub(super) fn openai_raw_responses_sse(
     request: crate::openai::types::ResponsesRequest,
     input_items: Vec<Value>,
     store: crate::server::store::ResponseStore,
+    provider: Provider,
+    upstream_resource: bool,
 ) -> Sse<impl Stream<Item = std::result::Result<Event, Infallible>>> {
     let mapped = async_stream::stream! {
         let mut stream = stream;
@@ -592,6 +598,8 @@ pub(super) fn openai_raw_responses_sse(
                                 store.insert(crate::server::store::StoredResponse {
                                     response: completed,
                                     input_items: stored_items,
+                                    provider,
+                                    upstream_resource,
                                 }).await;
                             }
                         }

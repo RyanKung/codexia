@@ -9,7 +9,7 @@ use crate::{
 use axum::{
     Json,
     body::to_bytes,
-    extract::{Form, State},
+    extract::{Form, Path, State},
     http::{HeaderMap, HeaderValue, StatusCode, header::HOST},
     response::IntoResponse,
     routing::{get, post},
@@ -484,6 +484,48 @@ async fn spawn_stream_required_codex_server(captured: Arc<Mutex<Vec<Value>>>) ->
     url
 }
 
+async fn spawn_grok_response_resource_server(captured: Arc<Mutex<Vec<String>>>) -> String {
+    async fn retrieve_handler(
+        State(captured): State<Arc<Mutex<Vec<String>>>>,
+        Path(response_id): Path<String>,
+    ) -> Json<Value> {
+        captured.lock().await.push(format!("GET {response_id}"));
+        Json(json!({
+            "id": response_id,
+            "object": "response",
+            "status": "completed",
+            "model": "grok-4.3",
+            "output": [{"type": "message", "content": [{"type": "output_text", "text": "upstream"}]}]
+        }))
+    }
+
+    async fn delete_handler(
+        State(captured): State<Arc<Mutex<Vec<String>>>>,
+        Path(response_id): Path<String>,
+    ) -> Json<Value> {
+        captured.lock().await.push(format!("DELETE {response_id}"));
+        Json(json!({
+            "id": response_id,
+            "object": "response",
+            "deleted": true
+        }))
+    }
+
+    let app = Router::new()
+        .route(
+            "/responses/{response_id}",
+            get(retrieve_handler).delete(delete_handler),
+        )
+        .with_state(captured);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    url
+}
+
 fn assert_stream_events_in_order(stream: &str, events: &[&str]) {
     let mut cursor = 0;
     for event in events {
@@ -568,4 +610,5 @@ async fn wait_for_batch_to_finish(state: AppState, headers: HeaderMap, batch_id:
 
 mod auth_status_messages;
 mod batches_and_replay;
+mod responses_resources;
 mod responses_streaming;

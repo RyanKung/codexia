@@ -2,6 +2,7 @@
 
 use crate::{
     anthropic::{MessageBatch, MessageBatchResult},
+    config::Provider,
     openai::response::ResponseObject,
 };
 use serde_json::Value;
@@ -15,6 +16,10 @@ pub struct StoredResponse {
     pub response: ResponseObject,
     /// Input items recorded for local `previous_response_id` continuation.
     pub input_items: Vec<Value>,
+    /// Upstream provider that created or backed this response.
+    pub provider: Provider,
+    /// Whether the response id is known to be an upstream retrievable resource.
+    pub upstream_resource: bool,
 }
 
 /// In-memory store for local `previous_response_id` continuation state.
@@ -36,6 +41,11 @@ impl ResponseStore {
     #[must_use]
     pub async fn get(&self, id: &str) -> Option<StoredResponse> {
         self.inner.read().await.get(id).cloned()
+    }
+
+    /// Removes previously stored response continuation state.
+    pub async fn remove(&self, id: &str) -> Option<StoredResponse> {
+        self.inner.write().await.remove(id)
     }
 }
 

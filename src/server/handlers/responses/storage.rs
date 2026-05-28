@@ -1,4 +1,5 @@
 use crate::{
+    config::Provider,
     openai::response::{
         GeneratedImage, ResponseObject, Usage, response_function_call_item,
         response_image_generation_item, response_message_item, response_reasoning_item,
@@ -166,6 +167,8 @@ pub(in crate::server::handlers) async fn maybe_store_response(
     request: &ResponsesRequest,
     response: ResponseObject,
     input_items: Vec<Value>,
+    provider: Provider,
+    upstream_resource: bool,
 ) {
     if request.should_store() {
         state
@@ -173,6 +176,8 @@ pub(in crate::server::handlers) async fn maybe_store_response(
             .insert(crate::server::store::StoredResponse {
                 input_items: stored_response_input_items(input_items, &response),
                 response,
+                provider,
+                upstream_resource,
             })
             .await;
     }
