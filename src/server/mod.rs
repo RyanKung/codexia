@@ -455,6 +455,20 @@ mod tests {
         )
     }
 
+    async fn codex_incomplete_result_stream_handler() -> impl axum::response::IntoResponse {
+        (
+            [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+            concat!(
+                "event: response.output_text.delta\n",
+                "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"item_id\":\"msg_1\",\"content_index\":0,\"delta\":\"OK\"}\n\n",
+                "event: response.output_text.done\n",
+                "data: {\"type\":\"response.output_text.done\",\"output_index\":0,\"item_id\":\"msg_1\",\"content_index\":0,\"text\":\"OK\"}\n\n",
+                "event: response.incomplete\n",
+                "data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_incomplete_result\",\"model\":\"gpt-5.5\",\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"incomplete_result\"},\"output\":null,\"usage\":{\"input_tokens\":12,\"output_tokens\":5,\"total_tokens\":17}}}\n\n"
+            ),
+        )
+    }
+
     async fn codex_bad_request_handler() -> impl axum::response::IntoResponse {
         (
             StatusCode::BAD_REQUEST,
@@ -503,6 +517,20 @@ mod tests {
 
     async fn spawn_incomplete_codex_server() -> String {
         let app = Router::new().route("/codex/responses", post(codex_incomplete_handler));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        url
+    }
+
+    async fn spawn_incomplete_result_stream_codex_server() -> String {
+        let app = Router::new().route(
+            "/codex/responses",
+            post(codex_incomplete_result_stream_handler),
+        );
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move {
@@ -1421,6 +1449,59 @@ mod tests {
         assert!(text.contains("\"output\":["));
         assert!(text.contains("\"type\":\"message\""));
         assert!(text.contains("\"id\":\"msg_1\""));
+        assert!(text.contains("\"text\":\"OK\""));
+    }
+
+    #[tokio::test]
+    async fn responses_raw_stream_completes_incomplete_result_with_output() {
+        let dir = TempDir::new().unwrap();
+        let store = AuthStore::new(dir.path().join("auth.json"));
+        store
+            .save(&Credentials {
+                provider: crate::config::Provider::Codex,
+                access_token: "access".into(),
+                refresh_token: "refresh".into(),
+                expires_at: now_unix() + 600,
+                account_id: "acc_old".into(),
+            })
+            .unwrap();
+        let http = Client::new();
+        let state = AppState::new(
+            TokenManager::new(
+                store,
+                CodexOAuthClient::new_with_token_url(http.clone(), spawn_refresh_server().await),
+            ),
+            CodexClient::new(http, spawn_incomplete_result_stream_codex_server().await),
+            Some("secret".into()),
+            ModelList::from_ids(["gpt-5.5"]),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("secret"));
+
+        let response = handlers::responses(
+            axum::extract::State(state),
+            headers,
+            Json(
+                serde_json::from_value(json!({
+                    "model": "gpt-5.5",
+                    "stream": true,
+                    "input": "hello",
+                    "tools": [{"type":"image_generation","size":"1024x1024"}],
+                    "tool_choice": {"type":"image_generation"}
+                }))
+                .unwrap(),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("event: response.completed"));
+        assert!(!text.contains("event: response.incomplete"));
+        assert!(!text.contains("\"type\":\"response.incomplete\""));
+        assert!(text.contains("\"status\":\"completed\""));
+        assert!(!text.contains("\"incomplete_result\""));
         assert!(text.contains("\"text\":\"OK\""));
     }
 

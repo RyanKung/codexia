@@ -8,7 +8,9 @@ use crate::{
         message_start_event, message_stop_event, signature_delta, text_block_start, text_delta,
         thinking_block_start, thinking_delta, tool_block_start, tool_json_delta,
     },
-    codex::events::{event_error, finish_reason, is_done_event},
+    codex::events::{
+        event_error, finish_reason, is_done_event, normalize_incomplete_result_response,
+    },
     error::Result,
     openai::response::{GeneratedImage, ResponseObject, generated_images_from_output},
 };
@@ -384,9 +386,11 @@ pub(super) fn openai_raw_responses_sse(
                     }
 
                     let event_name = item
-                        .event
-                        .clone()
-                        .or_else(|| item.value.get("type").and_then(Value::as_str).map(str::to_owned))
+                        .value
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                        .or(item.event)
                         .unwrap_or_else(|| "message".to_owned());
                     yield Ok(Event::default()
                         .event(event_name)
@@ -445,13 +449,24 @@ fn sanitize_raw_responses_event(event: &mut Value, state: &mut RawResponsesStrea
         _ => {}
     }
 
-    let Some(response) = event.get_mut("response").and_then(Value::as_object_mut) else {
-        return;
-    };
-    if is_terminal && response_output_needs_backfill(response.get("output")) {
-        response.insert("output".to_owned(), Value::Array(state.recovered_output()));
-    } else if response_output_needs_array(response.get("output")) {
-        response.insert("output".to_owned(), Value::Array(Vec::new()));
+    {
+        let Some(response) = event.get_mut("response").and_then(Value::as_object_mut) else {
+            return;
+        };
+        if is_terminal && response_output_needs_backfill(response.get("output")) {
+            response.insert("output".to_owned(), Value::Array(state.recovered_output()));
+        } else if response_output_needs_array(response.get("output")) {
+            response.insert("output".to_owned(), Value::Array(Vec::new()));
+        }
+    }
+
+    if is_terminal
+        && event.get("type").and_then(Value::as_str) == Some("response.incomplete")
+        && event
+            .get_mut("response")
+            .is_some_and(normalize_incomplete_result_response)
+    {
+        event["type"] = Value::String("response.completed".to_owned());
     }
 }
 

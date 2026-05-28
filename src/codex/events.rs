@@ -73,6 +73,7 @@ pub async fn collect_response_value(response: Response) -> Result<Value> {
                 Error::upstream("Codex response completed without a response payload")
             })?;
             backfill_response_output(&mut response, &output);
+            normalize_incomplete_result_response(&mut response);
             return Ok(response);
         }
     }
@@ -95,6 +96,77 @@ fn backfill_response_output(response: &mut Value, output: &ChatOutput) {
         "output".to_owned(),
         Value::Array(recovered_response_output_items(&response_id, output)),
     );
+}
+
+/// Treats upstream `incomplete_result` terminals as completed only when a
+/// downstream-compatible output item is already available.
+pub(crate) fn normalize_incomplete_result_response(response: &mut Value) -> bool {
+    if response.get("status").and_then(Value::as_str) != Some("incomplete")
+        || incomplete_details_code(response) != Some("incomplete_result")
+        || !response_output_has_usable_result(response.get("output"))
+    {
+        return false;
+    }
+
+    let Some(object) = response.as_object_mut() else {
+        return false;
+    };
+    object.insert("status".to_owned(), Value::String("completed".to_owned()));
+    object.insert("incomplete_details".to_owned(), Value::Null);
+    true
+}
+
+fn incomplete_details_code(response: &Value) -> Option<&str> {
+    response
+        .pointer("/incomplete_details/reason")
+        .or_else(|| response.pointer("/incomplete_details/code"))
+        .and_then(Value::as_str)
+}
+
+fn response_output_has_usable_result(output: Option<&Value>) -> bool {
+    output
+        .and_then(Value::as_array)
+        .is_some_and(|items| items.iter().any(output_item_has_usable_result))
+}
+
+fn output_item_has_usable_result(item: &Value) -> bool {
+    match item.get("type").and_then(Value::as_str) {
+        Some("message") => item
+            .get("content")
+            .and_then(Value::as_array)
+            .is_some_and(|parts| parts.iter().any(output_part_has_text)),
+        Some("function_call") => {
+            item.get("call_id")
+                .or_else(|| item.get("id"))
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty())
+                && item
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.is_empty())
+                && item.get("arguments").and_then(Value::as_str).is_some()
+        }
+        Some("image_generation_call") => item
+            .get("result")
+            .or_else(|| item.get("b64_json"))
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty()),
+        _ => false,
+    }
+}
+
+fn output_part_has_text(part: &Value) -> bool {
+    match part.get("type").and_then(Value::as_str) {
+        Some("output_text") => part
+            .get("text")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty()),
+        Some("refusal") => part
+            .get("refusal")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty()),
+        _ => false,
+    }
 }
 
 fn response_id(response: &Value) -> &str {
@@ -481,5 +553,101 @@ mod tests {
 
         assert_eq!(response["output"][0]["type"], "message");
         assert_eq!(response["output"][0]["content"][0]["text"], "ok");
+    }
+
+    #[test]
+    fn normalizes_incomplete_result_when_output_is_usable() {
+        let mut response = json!({
+            "id": "resp_1",
+            "status": "incomplete",
+            "incomplete_details": {"reason": "incomplete_result"},
+            "output": [{
+                "type": "message",
+                "content": [{"type": "output_text", "text": "ok"}]
+            }]
+        });
+
+        assert!(normalize_incomplete_result_response(&mut response));
+
+        assert_eq!(response["status"], "completed");
+        assert!(response["incomplete_details"].is_null());
+    }
+
+    #[test]
+    fn normalizes_incomplete_result_for_complete_function_call() {
+        let mut response = json!({
+            "id": "resp_1",
+            "status": "incomplete",
+            "incomplete_details": {"reason": "incomplete_result"},
+            "output": [{
+                "type": "function_call",
+                "id": "fc_1",
+                "call_id": "call_1",
+                "name": "lookup",
+                "arguments": "{\"q\":\"x\"}"
+            }]
+        });
+
+        assert!(normalize_incomplete_result_response(&mut response));
+
+        assert_eq!(response["status"], "completed");
+    }
+
+    #[test]
+    fn preserves_incomplete_result_without_usable_output() {
+        let mut response = json!({
+            "id": "resp_1",
+            "status": "incomplete",
+            "incomplete_details": {"reason": "incomplete_result"},
+            "output": []
+        });
+
+        assert!(!normalize_incomplete_result_response(&mut response));
+
+        assert_eq!(response["status"], "incomplete");
+        assert_eq!(
+            response["incomplete_details"]["reason"],
+            "incomplete_result"
+        );
+    }
+
+    #[test]
+    fn preserves_incomplete_result_for_reasoning_only_output() {
+        let mut response = json!({
+            "id": "resp_1",
+            "status": "incomplete",
+            "incomplete_details": {"reason": "incomplete_result"},
+            "output": [{
+                "type": "reasoning",
+                "id": "rs_1",
+                "summary": [{"type": "summary_text", "text": "thinking"}],
+                "encrypted_content": "sig"
+            }]
+        });
+
+        assert!(!normalize_incomplete_result_response(&mut response));
+
+        assert_eq!(response["status"], "incomplete");
+    }
+
+    #[test]
+    fn preserves_incomplete_for_true_truncation_even_with_output() {
+        let mut response = json!({
+            "id": "resp_1",
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [{
+                "type": "message",
+                "content": [{"type": "output_text", "text": "partial"}]
+            }]
+        });
+
+        assert!(!normalize_incomplete_result_response(&mut response));
+
+        assert_eq!(response["status"], "incomplete");
+        assert_eq!(
+            response["incomplete_details"]["reason"],
+            "max_output_tokens"
+        );
     }
 }
