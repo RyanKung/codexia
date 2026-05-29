@@ -1,4 +1,5 @@
 mod callback;
+mod cursor;
 mod grok;
 mod kiro;
 mod pkce;
@@ -16,6 +17,7 @@ use serde_json::Value;
 use url::Url;
 
 pub use callback::{CallbackOutcome, CallbackServer};
+pub use cursor::{CURSOR_API_BASE_URL, CURSOR_WEBSITE_URL, CursorOAuthClient};
 pub use grok::{GrokOAuthClient, XAI_API_BASE_URL};
 pub use kiro::{
     KIRO_CLI_DATABASE_RELATIVE_PATH, KIRO_DESKTOP_TOKEN_RELATIVE_PATH, KiroAuthorizationCallback,

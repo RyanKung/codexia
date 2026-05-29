@@ -35,6 +35,15 @@ pub const KIRO_MODELS: &[&str] = &[
     "qwen3-coder-next",
 ];
 
+/// Default Cursor Agent model identifiers exposed by rotom.
+pub const CURSOR_MODELS: &[&str] = &[
+    "cursor/auto",
+    "cursor/gpt-5",
+    "cursor/sonnet-4",
+    "cursor/sonnet-4-thinking",
+    "cursor/opus",
+];
+
 /// Resolves the default model identifiers into a trimmed, de-duplicated list.
 #[must_use]
 pub fn resolve_model_ids() -> Vec<String> {
@@ -48,6 +57,7 @@ pub fn resolve_model_ids_for_provider(provider: Provider) -> Vec<String> {
         Provider::Codex => OPENCLAW_CODEX_MODELS,
         Provider::Grok => GROK_MODELS,
         Provider::Kiro => KIRO_MODELS,
+        Provider::Cursor => CURSOR_MODELS,
     };
     normalize_model_ids(ids.iter().map(ToString::to_string))
 }
@@ -81,6 +91,9 @@ pub fn resolve_model_list_for_provider(provider: Provider) -> Result<ModelList> 
 #[must_use]
 pub fn provider_for_model(model: &str) -> Provider {
     let normalized = model.strip_prefix("openai-codex/").unwrap_or(model);
+    if normalized.starts_with("cursor/") {
+        return Provider::Cursor;
+    }
     let normalized = normalized
         .strip_prefix("xai/")
         .or_else(|| normalized.strip_prefix("grok/"))
@@ -96,6 +109,8 @@ pub fn provider_for_model(model: &str) -> Provider {
         || normalized.starts_with("qwen")
     {
         Provider::Kiro
+    } else if normalized.starts_with("sonnet-") || normalized == "opus" {
+        Provider::Cursor
     } else {
         Provider::Codex
     }
@@ -128,6 +143,7 @@ const fn model_owner(provider: Provider) -> &'static str {
         Provider::Codex => "openai-codex",
         Provider::Grok => "xai",
         Provider::Kiro => "kiro",
+        Provider::Cursor => "cursor",
     }
 }
 
@@ -181,6 +197,15 @@ mod tests {
     }
 
     #[test]
+    fn cursor_defaults_use_provider_prefixes() {
+        let ids = resolve_model_ids_for_provider(Provider::Cursor);
+
+        assert!(ids.iter().any(|id| id == "cursor/auto"));
+        assert!(ids.iter().any(|id| id == "cursor/gpt-5"));
+        assert!(ids.iter().any(|id| id == "cursor/sonnet-4"));
+    }
+
+    #[test]
     fn provider_detection_handles_prefixed_grok_models() {
         assert_eq!(provider_for_model("grok-4.3"), Provider::Grok);
         assert_eq!(provider_for_model("xai/grok-4.3"), Provider::Grok);
@@ -188,14 +213,20 @@ mod tests {
         assert_eq!(provider_for_model("openai-codex/grok-4.3"), Provider::Grok);
         assert_eq!(provider_for_model("openai-codex/gpt-5.5"), Provider::Codex);
         assert_eq!(provider_for_model("kiro/auto"), Provider::Kiro);
+        assert_eq!(provider_for_model("cursor/gpt-5"), Provider::Cursor);
+        assert_eq!(provider_for_model("sonnet-4"), Provider::Cursor);
         assert_eq!(provider_for_model("claude-sonnet-4.5"), Provider::Kiro);
     }
 
     #[test]
     fn model_list_owners_match_provider() {
-        let models =
-            resolve_model_list_for_providers(&[Provider::Codex, Provider::Grok, Provider::Kiro])
-                .unwrap();
+        let models = resolve_model_list_for_providers(&[
+            Provider::Codex,
+            Provider::Grok,
+            Provider::Kiro,
+            Provider::Cursor,
+        ])
+        .unwrap();
 
         let owner_for = |id: &str| {
             models
@@ -208,5 +239,6 @@ mod tests {
         assert_eq!(owner_for("gpt-5.5"), Some("openai-codex"));
         assert_eq!(owner_for("grok-4.3"), Some("xai"));
         assert_eq!(owner_for("auto"), Some("kiro"));
+        assert_eq!(owner_for("cursor/gpt-5"), Some("cursor"));
     }
 }

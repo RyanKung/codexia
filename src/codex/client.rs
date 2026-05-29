@@ -116,6 +116,9 @@ impl CodexClient {
         if self.provider == Provider::Kiro {
             return self.complete_kiro_chat(request, credentials).await;
         }
+        if self.provider == Provider::Cursor {
+            return Err(cursor_runtime_not_implemented());
+        }
 
         let id = chat_completion_id();
         let created = now_unix();
@@ -158,6 +161,9 @@ impl CodexClient {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk>> + Send>>> {
         if self.provider == Provider::Kiro {
             return self.stream_kiro_chat(request, credentials).await;
+        }
+        if self.provider == Provider::Cursor {
+            return Err(cursor_runtime_not_implemented());
         }
 
         let id = chat_completion_id();
@@ -244,6 +250,9 @@ impl CodexClient {
             let response = self.send_kiro_body(&request, credentials).await?;
             return kiro::collect_response_value(response, request).await;
         }
+        if self.provider == Provider::Cursor {
+            return Err(cursor_runtime_not_implemented());
+        }
 
         let response = self.send_body(&request, credentials).await?;
         if response_is_json(&response) {
@@ -268,6 +277,9 @@ impl CodexClient {
         if self.provider == Provider::Kiro {
             let response = self.send_kiro_body(&request, credentials).await?;
             return Ok(kiro::response_event_stream(response, request));
+        }
+        if self.provider == Provider::Cursor {
+            return Err(cursor_runtime_not_implemented());
         }
 
         let response = self.send_body(&request, credentials).await?;
@@ -529,6 +541,13 @@ fn unsupported_response_resource(provider: Provider, operation: &str) -> Error {
             "{} upstream does not support Responses resource {operation}",
             provider.display_name()
         ),
+    )
+}
+
+fn cursor_runtime_not_implemented() -> Error {
+    Error::upstream_with_status(
+        reqwest::StatusCode::NOT_IMPLEMENTED,
+        "Cursor runtime support requires the Cursor Agent ConnectRPC protocol and is not wired yet",
     )
 }
 

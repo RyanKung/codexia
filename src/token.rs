@@ -1,7 +1,7 @@
 use crate::{
     Error, Result,
     config::{AuthStore, Credentials, Provider},
-    oauth::{CodexOAuthClient, GrokOAuthClient, KiroOAuthClient},
+    oauth::{CodexOAuthClient, CursorOAuthClient, GrokOAuthClient, KiroOAuthClient},
 };
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -34,6 +34,7 @@ impl TokenManager {
             Provider::Codex => OAuthClient::Codex(CodexOAuthClient::new(http)),
             Provider::Grok => OAuthClient::Grok(GrokOAuthClient::new(http)),
             Provider::Kiro => OAuthClient::Kiro(KiroOAuthClient::new(http)),
+            Provider::Cursor => OAuthClient::Cursor(CursorOAuthClient::new(http)),
         };
         Self::new_with_oauth(store, oauth)
     }
@@ -129,6 +130,8 @@ pub enum OAuthClient {
     Grok(GrokOAuthClient),
     /// Kiro imported credential refresh client.
     Kiro(KiroOAuthClient),
+    /// Cursor Agent credential refresh client.
+    Cursor(CursorOAuthClient),
 }
 
 impl OAuthClient {
@@ -137,6 +140,7 @@ impl OAuthClient {
             Self::Codex(_) => Provider::Codex,
             Self::Grok(_) => Provider::Grok,
             Self::Kiro(_) => Provider::Kiro,
+            Self::Cursor(_) => Provider::Cursor,
         }
     }
 
@@ -145,6 +149,7 @@ impl OAuthClient {
             Self::Codex(client) => client.refresh_token(refresh_token).await,
             Self::Grok(client) => client.refresh_token(refresh_token).await,
             Self::Kiro(client) => client.refresh_token(refresh_token).await,
+            Self::Cursor(client) => client.refresh_token(refresh_token).await,
         }
     }
 }

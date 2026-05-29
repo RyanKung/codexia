@@ -21,6 +21,8 @@ pub enum Provider {
     Grok,
     /// Kiro credentials imported from the official local IDE or CLI stores.
     Kiro,
+    /// Cursor Agent browser login or API-key-derived credentials.
+    Cursor,
 }
 
 impl Provider {
@@ -31,6 +33,7 @@ impl Provider {
             Self::Codex => "codex",
             Self::Grok => "grok",
             Self::Kiro => "kiro",
+            Self::Cursor => "cursor",
         }
     }
 
@@ -41,6 +44,7 @@ impl Provider {
             Self::Codex => "Codex",
             Self::Grok => "Grok",
             Self::Kiro => "Kiro",
+            Self::Cursor => "Cursor",
         }
     }
 }
@@ -59,6 +63,7 @@ impl FromStr for Provider {
             "codex" | "openai-codex" | "openai" => Ok(Self::Codex),
             "grok" | "xai" | "xai-oauth" | "grok-oauth" => Ok(Self::Grok),
             "kiro" | "kiro-cli" | "kiro-desktop" => Ok(Self::Kiro),
+            "cursor" | "cursor-agent" | "cursor-cli" => Ok(Self::Cursor),
             other => Err(Error::config(format!("unknown provider: {other}"))),
         }
     }
