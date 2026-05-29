@@ -314,6 +314,22 @@ impl ModelList {
                 .collect(),
         }
     }
+
+    /// Builds a model list from model identifiers paired with owner labels.
+    #[must_use]
+    pub fn from_id_owners(ids: impl IntoIterator<Item = (String, &'static str)>) -> Self {
+        Self {
+            object: "list",
+            data: ids
+                .into_iter()
+                .map(|(id, owned_by)| ModelObject {
+                    id,
+                    object: "model",
+                    owned_by,
+                })
+                .collect(),
+        }
+    }
 }
 
 /// Builds a message output item for the Responses API.

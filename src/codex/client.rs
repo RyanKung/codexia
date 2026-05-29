@@ -8,7 +8,7 @@ use crate::{
             normalize_incomplete_result_response, response_has_usable_output, response_tool_calls,
             text_delta,
         },
-        sse,
+        kiro, sse,
         upstream::{UpstreamProvider, adapter_for_provider},
     },
     config::{Credentials, Provider, now_unix},
@@ -113,6 +113,10 @@ impl CodexClient {
         request: crate::openai::types::ChatCompletionRequest,
         credentials: &Credentials,
     ) -> Result<ChatCompletionResponse> {
+        if self.provider == Provider::Kiro {
+            return self.complete_kiro_chat(request, credentials).await;
+        }
+
         let id = chat_completion_id();
         let created = now_unix();
         let model = request.model.clone();
@@ -152,6 +156,10 @@ impl CodexClient {
         request: crate::openai::types::ChatCompletionRequest,
         credentials: &Credentials,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk>> + Send>>> {
+        if self.provider == Provider::Kiro {
+            return self.stream_kiro_chat(request, credentials).await;
+        }
+
         let id = chat_completion_id();
         let created = now_unix();
         let model = request.model.clone();
@@ -232,6 +240,11 @@ impl CodexClient {
         request: Value,
         credentials: &Credentials,
     ) -> Result<Value> {
+        if self.provider == Provider::Kiro {
+            let response = self.send_kiro_body(&request, credentials).await?;
+            return kiro::collect_response_value(response, request).await;
+        }
+
         let response = self.send_body(&request, credentials).await?;
         if response_is_json(&response) {
             let mut value = response.json::<Value>().await?;
@@ -252,6 +265,11 @@ impl CodexClient {
         request: Value,
         credentials: &Credentials,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<crate::codex::sse::JsonSseEvent>> + Send>>> {
+        if self.provider == Provider::Kiro {
+            let response = self.send_kiro_body(&request, credentials).await?;
+            return Ok(kiro::response_event_stream(response, request));
+        }
+
         let response = self.send_body(&request, credentials).await?;
         Ok(Box::pin(sse::json_named_events(Box::pin(
             response.bytes_stream(),
@@ -311,6 +329,113 @@ impl CodexClient {
             .await
     }
 
+    async fn complete_kiro_chat(
+        &self,
+        request: crate::openai::types::ChatCompletionRequest,
+        credentials: &Credentials,
+    ) -> Result<ChatCompletionResponse> {
+        let id = chat_completion_id();
+        let created = now_unix();
+        let model = request.model.clone();
+        let body = to_codex_request(&request)?;
+        let response = self.send_kiro_body(&body, credentials).await?;
+        let output = kiro::collect_chat_output(response, body).await?;
+
+        let usage = output.usage;
+        let message = AssistantMessage {
+            role: "assistant",
+            content: output.text,
+            tool_calls: (!output.tool_calls.is_empty()).then_some(output.tool_calls),
+            images: (!output.images.is_empty()).then_some(output.images),
+        };
+
+        Ok(ChatCompletionResponse {
+            id,
+            object: "chat.completion",
+            created,
+            model,
+            choices: vec![ChatChoice {
+                index: 0,
+                message,
+                finish_reason: output.finish_reason,
+            }],
+            usage,
+        })
+    }
+
+    async fn stream_kiro_chat(
+        &self,
+        request: crate::openai::types::ChatCompletionRequest,
+        credentials: &Credentials,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk>> + Send>>> {
+        let id = chat_completion_id();
+        let created = now_unix();
+        let model = request.model.clone();
+        let body = to_codex_request(&request)?;
+        let response = self.send_kiro_body(&body, credentials).await?;
+        let mut events = kiro::response_event_stream(response, body);
+
+        let stream = async_stream::try_stream! {
+            yield chunk_with_role(&id, created, &model);
+            let mut finished = false;
+            let mut tool_call_count = 0_u32;
+            let mut seen_tool_call_ids = std::collections::HashSet::<String>::new();
+            let mut saw_usable_output = false;
+
+            while let Some(event) = events.next().await {
+                let event = event?.value;
+                if let Some(message) = event_error(&event) {
+                    Err(Error::upstream(message))?;
+                }
+                if let Some(delta) = text_delta(&event) {
+                    if !delta.is_empty() {
+                        saw_usable_output = true;
+                        yield chunk_with_content(&id, created, &model, delta);
+                    }
+                }
+                if let Some(tool_call) = event_tool_call(&event) {
+                    if seen_tool_call_ids.insert(tool_call.id.clone()) {
+                        yield chunk_with_tool_call(&id, created, &model, tool_call_count, tool_call);
+                        tool_call_count += 1;
+                        saw_usable_output = true;
+                    }
+                }
+                if is_done_event(&event) {
+                    for tool_call in response_tool_calls(&event) {
+                        if seen_tool_call_ids.insert(tool_call.id.clone()) {
+                            yield chunk_with_tool_call(&id, created, &model, tool_call_count, tool_call);
+                            tool_call_count += 1;
+                            saw_usable_output = true;
+                        }
+                    }
+                    if event
+                        .get("response")
+                        .is_some_and(response_has_usable_output)
+                    {
+                        saw_usable_output = true;
+                    }
+                    finished = true;
+                    let reason = if tool_call_count > 0 {
+                        "tool_calls".to_owned()
+                    } else {
+                        normalize_incomplete_result_finish_reason(
+                            finish_reason(&event),
+                            saw_usable_output,
+                        )
+                    };
+                    yield chunk_finished(&id, created, &model, &reason);
+                    break;
+                }
+            }
+
+            if !finished {
+                yield chunk_finished(&id, created, &model, "stop");
+            }
+        };
+
+        Ok(Box::pin(stream))
+    }
+
     async fn send_body(&self, body: &Value, credentials: &Credentials) -> Result<Response> {
         let mut upstream_body = body.clone();
         let upstream = self.upstream_provider();
@@ -333,6 +458,29 @@ impl CodexClient {
             Ok(response)
         } else {
             Err(parse_error_response(response, upstream.provider()).await)
+        }
+    }
+
+    async fn send_kiro_body(&self, body: &Value, credentials: &Credentials) -> Result<Response> {
+        let upstream_body = kiro::to_kiro_payload(body, credentials)?;
+        crate::logging::trace_json("upstream.kiro.request", &upstream_body);
+        let url = kiro::kiro_endpoint_url(&self.base_url, credentials)?;
+        let response = self
+            .http
+            .post(&url)
+            .headers(kiro::kiro_headers(credentials)?)
+            .json(&upstream_body)
+            .send()
+            .await?;
+        tracing::trace!(
+            event = "upstream.kiro.response_started",
+            url = %url,
+            status = response.status().as_u16()
+        );
+        if response.status().is_success() {
+            Ok(response)
+        } else {
+            Err(parse_error_response(response, Provider::Kiro).await)
         }
     }
 

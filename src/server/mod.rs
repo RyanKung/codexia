@@ -141,10 +141,11 @@ impl AppState {
     }
 
     fn supports_model(&self, candidate: &str) -> bool {
+        let candidate = normalize_model_for_support(candidate);
         self.models
             .data
             .iter()
-            .any(|model| normalize_model(&model.id) == candidate)
+            .any(|model| normalize_model_for_support(&model.id) == candidate)
     }
 
     pub(crate) fn upstream_for_model(&self, model: &str) -> Option<&UpstreamState> {
@@ -172,6 +173,16 @@ fn looks_like_anthropic_model(model: &str) -> bool {
         || model.contains("sonnet")
         || model.contains("opus")
         || model.contains("haiku")
+}
+
+fn normalize_model_for_support(model: &str) -> String {
+    let normalized = normalize_model(model);
+    normalized
+        .strip_prefix("xai/")
+        .or_else(|| normalized.strip_prefix("grok/"))
+        .or_else(|| normalized.strip_prefix("kiro/"))
+        .unwrap_or(&normalized)
+        .to_owned()
 }
 
 /// Binds the local listener and serves the Axum router until shutdown.

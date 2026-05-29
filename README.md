@@ -47,9 +47,9 @@ claude
 ```
 
 `login` lists the available OAuth providers and starts the selected flow. Use
-`rotom login --provider openai` or `rotom login --provider grok` to skip the
-prompt. Complete the login in a browser, then paste the full redirected URL
-from the browser address bar, for example
+`rotom login --provider openai`, `rotom login --provider grok`, or
+`rotom login --kiro` to skip the prompt. Complete the login in a browser, then
+paste the full redirected URL from the browser address bar, for example
 `http://localhost:1455/auth/callback?code=...&state=...`. This matches
 OpenClaw's remote/headless fallback and does not require your gateway host to
 be reachable from the public internet.
@@ -95,7 +95,52 @@ List the model registry grouped by provider:
 rotom models
 rotom models --provider openai
 rotom models --provider grok
+rotom models --provider kiro
 ```
+
+Kiro login uses Kiro's own portal-style callback format and stores the result
+in rotom's auth file without scanning local Kiro credential stores:
+
+```bash
+rotom login --kiro
+```
+
+The Kiro portal callback looks like
+`http://localhost:3128/oauth/callback?login_option=google&code=...&state=...`.
+rotom exchanges it with Kiro's desktop auth service using PKCE and saves a
+normal rotom provider entry. The stored `refresh_token` value is rotom metadata
+containing the Kiro refresh token, auth region, API region, profile ARN, and
+User-Agent needed for refresh; raw tokens are never printed. The browser flow
+currently supports Kiro social callbacks (`google` and `github`).
+
+Explicit import from an existing official Kiro login remains available when
+you intentionally want to reuse local Kiro CLI or IDE credentials:
+
+```bash
+# Prefer the Kiro CLI SQLite store when it exists:
+rotom kiro import --from cli
+
+# Or import the Kiro IDE desktop token JSON:
+rotom kiro import --from desktop
+```
+
+`rotom kiro import --from auto` is opt-in. It checks the CLI store first at
+`~/Library/Application Support/kiro-cli/data.sqlite3` on macOS or
+`~/.local/share/kiro-cli/data.sqlite3` on Linux, then the desktop token at
+`~/.aws/sso/cache/kiro-auth-token.json`. Raw Kiro tokens, client secrets, and
+AWS SSO fields are never printed. Kiro credentials support import, refresh,
+status, model listing, and API serving through Kiro's native event-stream
+runtime.
+
+Kiro's runtime protocol is not OpenAI or Anthropic upstream-compatible. rotom
+maps compatible request shapes into Kiro's `GenerateAssistantResponse` schema:
+text turns, system/developer instructions, function tools, tool results,
+conversation history, inline base64 images, and inline base64 documents. Kiro
+does not expose upstream fields for `temperature`, `top_p`, `max_tokens`,
+`stop`, `reasoning` effort, `service_tier`, or forced `tool_choice`; rotom does
+not pass those fields to Kiro. `tool_choice: "none"` is handled locally by not
+sending tools. Remote image or document URLs are rejected instead of fetched by
+the gateway.
 
 ## Use With SDKs
 
@@ -182,13 +227,16 @@ curl -X POST http://127.0.0.1:14550/v1/auth/refresh \
 ```
 
 From the CLI, `rotom refresh` refreshes all saved providers. Use
-`rotom refresh --provider grok` to refresh only one provider.
+`rotom refresh --provider grok` or `rotom refresh --provider kiro` to refresh
+only one provider.
 
-Check token expiry, authentication status, and daemon endpoints:
+Check the rotom version, token expiry, authentication status, available models,
+and daemon endpoints:
 
 ```bash
 rotom status
 rotom status --provider grok
+rotom status --provider kiro
 ```
 
 By default, `rotom status` reports every saved provider. Use `--provider` to
@@ -273,6 +321,24 @@ and the Grok registry:
 grok-4.3
 grok-4.3-fast
 grok-4
+```
+
+Kiro exposes the validated Kiro model registry:
+
+```text
+auto
+claude-opus-4.7
+claude-opus-4.6
+claude-sonnet-4.6
+claude-opus-4.5
+claude-sonnet-4.5
+claude-sonnet-4
+claude-haiku-4.5
+deepseek-3.2
+minimax-m2.5
+minimax-m2.1
+glm-5
+qwen3-coder-next
 ```
 
 Credentials are stored at `~/.rotom/auth.json` by default. Override with
@@ -363,12 +429,14 @@ paste of the `http://localhost:1455/auth/callback?...` redirect URL, token
 exchange at `https://auth.openai.com/oauth/token`, and Codex requests to
 `https://chatgpt.com/backend-api/codex/responses`. Grok OAuth uses xAI OIDC
 discovery, PKCE, manual callback paste, and xAI Responses requests under
-`https://api.x.ai/v1`.
+`https://api.x.ai/v1`. Kiro OAuth uses PKCE with `https://app.kiro.dev/signin`
+and exchanges social callbacks at
+`https://prod.us-east-1.auth.desktop.kiro.dev/oauth/token`.
 
 ## Disclaimer
 
 rotom is an unofficial compatibility tool. It is not affiliated with,
-endorsed by, or supported by OpenAI, Anthropic, or xAI.
+endorsed by, or supported by OpenAI, Anthropic, xAI, or Kiro.
 
 You are responsible for making sure your usage complies with the terms,
 policies, account restrictions, and data-handling obligations that apply to

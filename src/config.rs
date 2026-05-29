@@ -19,6 +19,8 @@ pub enum Provider {
     Codex,
     /// xAI Grok OAuth backed by the xAI API.
     Grok,
+    /// Kiro credentials imported from the official local IDE or CLI stores.
+    Kiro,
 }
 
 impl Provider {
@@ -28,6 +30,7 @@ impl Provider {
         match self {
             Self::Codex => "codex",
             Self::Grok => "grok",
+            Self::Kiro => "kiro",
         }
     }
 
@@ -37,6 +40,7 @@ impl Provider {
         match self {
             Self::Codex => "Codex",
             Self::Grok => "Grok",
+            Self::Kiro => "Kiro",
         }
     }
 }
@@ -54,6 +58,7 @@ impl FromStr for Provider {
         match value.trim().to_ascii_lowercase().as_str() {
             "codex" | "openai-codex" | "openai" => Ok(Self::Codex),
             "grok" | "xai" | "xai-oauth" | "grok-oauth" => Ok(Self::Grok),
+            "kiro" | "kiro-cli" | "kiro-desktop" => Ok(Self::Kiro),
             other => Err(Error::config(format!("unknown provider: {other}"))),
         }
     }

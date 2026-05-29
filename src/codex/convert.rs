@@ -321,7 +321,7 @@ fn upstream_stream_value(provider: Provider, request: &ResponsesRequest) -> bool
         // Codex currently expects SSE upstream even when the downstream API
         // requested a one-shot JSON response.
         Provider::Codex => true,
-        Provider::Grok => request.wants_stream(),
+        Provider::Grok | Provider::Kiro => request.wants_stream(),
     }
 }
 
@@ -329,6 +329,7 @@ fn upstream_store_value(provider: Provider, request: &ResponsesRequest, input: &
     match provider {
         Provider::Codex => request.should_store() && !input_requires_stateless_replay(input),
         Provider::Grok => request.should_store(),
+        Provider::Kiro => false,
     }
 }
 
@@ -340,6 +341,7 @@ const fn should_include_instructions(
     match provider {
         Provider::Codex => true,
         Provider::Grok => !instructions.is_empty() && request.previous_response_id.is_none(),
+        Provider::Kiro => !instructions.is_empty(),
     }
 }
 

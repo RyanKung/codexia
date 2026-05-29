@@ -1,5 +1,6 @@
 use crate::{
     Error, Result,
+    codex::kiro::{DEFAULT_KIRO_BASE_URL, kiro_headers},
     config::{Credentials, Provider},
     oauth::XAI_API_BASE_URL,
 };
@@ -11,6 +12,7 @@ use serde_json::Value;
 const CODEX_PRIORITY_SERVICE_TIER: &str = "priority";
 const CODEX_UPSTREAM: CodexUpstream = CodexUpstream;
 const GROK_UPSTREAM: GrokUpstream = GrokUpstream;
+const KIRO_UPSTREAM: KiroUpstream = KiroUpstream;
 
 /// Default upstream base URL for `Codex` response requests.
 pub const DEFAULT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api";
@@ -151,10 +153,50 @@ impl UpstreamProvider for GrokUpstream {
     }
 }
 
+struct KiroUpstream;
+
+impl UpstreamProvider for KiroUpstream {
+    fn provider(&self) -> Provider {
+        Provider::Kiro
+    }
+
+    fn default_base_url(&self) -> &'static str {
+        DEFAULT_KIRO_BASE_URL
+    }
+
+    fn responses_url(&self, base_url: &str) -> String {
+        base_url.trim_end_matches('/').to_owned()
+    }
+
+    fn response_resource_url(&self, _base_url: &str, _response_id: &str) -> Option<String> {
+        None
+    }
+
+    fn resource_capabilities(&self) -> ResponseResourceCapabilities {
+        ResponseResourceCapabilities {
+            retrieve: ResponseResourceCapability::LocalCompat,
+            delete: ResponseResourceCapability::LocalCompat,
+            cancel: ResponseResourceCapability::Unsupported,
+            list_input_items: ResponseResourceCapability::LocalCompat,
+        }
+    }
+
+    fn response_creation_strategy(&self) -> ResponseCreationStrategy {
+        ResponseCreationStrategy::NativeResponses
+    }
+
+    fn headers(&self, credentials: &Credentials) -> Result<HeaderMap> {
+        kiro_headers(credentials)
+    }
+
+    fn prepare_request(&self, _body: &mut Value) {}
+}
+
 pub(super) fn adapter_for_provider(provider: Provider) -> &'static dyn UpstreamProvider {
     match provider {
         Provider::Codex => &CODEX_UPSTREAM,
         Provider::Grok => &GROK_UPSTREAM,
+        Provider::Kiro => &KIRO_UPSTREAM,
     }
 }
 

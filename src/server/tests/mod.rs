@@ -32,6 +32,19 @@ fn jwt_with_account_id(account_id: &str) -> String {
     format!("header.{encoded}.sig")
 }
 
+#[test]
+fn model_support_normalization_accepts_provider_prefixes() {
+    assert_eq!(
+        normalize_model_for_support("kiro/claude-sonnet-4.5"),
+        "claude-sonnet-4.5"
+    );
+    assert_eq!(normalize_model_for_support("grok/grok-4.3"), "grok-4.3");
+    assert_eq!(
+        normalize_model_for_support("openai-codex/gpt-5.5"),
+        "gpt-5.5"
+    );
+}
+
 async fn refresh_handler(Form(form): Form<HashMap<String, String>>) -> Json<Value> {
     assert_eq!(form.get("refresh_token").unwrap(), "old_refresh");
     Json(json!({

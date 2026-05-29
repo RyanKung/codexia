@@ -18,6 +18,23 @@ pub const OPENCLAW_CODEX_MODELS: &[&str] = &[
 /// Default Grok model identifiers exposed by the project.
 pub const GROK_MODELS: &[&str] = &["grok-4.3", "grok-4.3-fast", "grok-4"];
 
+/// Default Kiro model identifiers exposed by the local Kiro CLI model list.
+pub const KIRO_MODELS: &[&str] = &[
+    "auto",
+    "claude-opus-4.7",
+    "claude-opus-4.6",
+    "claude-sonnet-4.6",
+    "claude-opus-4.5",
+    "claude-sonnet-4.5",
+    "claude-sonnet-4",
+    "claude-haiku-4.5",
+    "deepseek-3.2",
+    "minimax-m2.5",
+    "minimax-m2.1",
+    "glm-5",
+    "qwen3-coder-next",
+];
+
 /// Resolves the default model identifiers into a trimmed, de-duplicated list.
 #[must_use]
 pub fn resolve_model_ids() -> Vec<String> {
@@ -30,6 +47,7 @@ pub fn resolve_model_ids_for_provider(provider: Provider) -> Vec<String> {
     let ids = match provider {
         Provider::Codex => OPENCLAW_CODEX_MODELS,
         Provider::Grok => GROK_MODELS,
+        Provider::Kiro => KIRO_MODELS,
     };
     normalize_model_ids(ids.iter().map(ToString::to_string))
 }
@@ -51,9 +69,12 @@ pub fn resolve_model_list() -> Result<ModelList> {
 /// This currently forwards construction through [`ModelList::from_ids`] and is
 /// fallible only to preserve the crate-wide result-based call sites.
 pub fn resolve_model_list_for_provider(provider: Provider) -> Result<ModelList> {
-    Ok(ModelList::from_ids(resolve_model_ids_for_provider(
-        provider,
-    )))
+    let owner = model_owner(provider);
+    Ok(ModelList::from_id_owners(
+        resolve_model_ids_for_provider(provider)
+            .into_iter()
+            .map(|id| (id, owner)),
+    ))
 }
 
 /// Returns the provider implied by a model identifier.
@@ -63,9 +84,18 @@ pub fn provider_for_model(model: &str) -> Provider {
     let normalized = normalized
         .strip_prefix("xai/")
         .or_else(|| normalized.strip_prefix("grok/"))
+        .or_else(|| normalized.strip_prefix("kiro/"))
         .unwrap_or(normalized);
     if normalized.starts_with("grok-") {
         Provider::Grok
+    } else if normalized == "auto"
+        || normalized.starts_with("claude-")
+        || normalized.starts_with("deepseek-")
+        || normalized.starts_with("minimax-")
+        || normalized.starts_with("glm-")
+        || normalized.starts_with("qwen")
+    {
+        Provider::Kiro
     } else {
         Provider::Codex
     }
@@ -78,12 +108,27 @@ pub fn provider_for_model(model: &str) -> Provider {
 /// This currently forwards construction through [`ModelList::from_ids`] and is
 /// fallible only to preserve the crate-wide result-based call sites.
 pub fn resolve_model_list_for_providers(providers: &[Provider]) -> Result<ModelList> {
+    let mut seen = HashSet::new();
     let ids = providers
         .iter()
         .copied()
-        .flat_map(resolve_model_ids_for_provider)
+        .flat_map(|provider| {
+            let owner = model_owner(provider);
+            resolve_model_ids_for_provider(provider)
+                .into_iter()
+                .map(move |id| (id, owner))
+        })
+        .filter(|(id, _)| seen.insert(id.clone()))
         .collect::<Vec<_>>();
-    Ok(ModelList::from_ids(normalize_model_ids(ids)))
+    Ok(ModelList::from_id_owners(ids))
+}
+
+const fn model_owner(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Codex => "openai-codex",
+        Provider::Grok => "xai",
+        Provider::Kiro => "kiro",
+    }
 }
 
 fn normalize_model_ids(ids: impl IntoIterator<Item = String>) -> Vec<String> {
@@ -127,11 +172,41 @@ mod tests {
     }
 
     #[test]
+    fn kiro_defaults_match_cli_models() {
+        let ids = resolve_model_ids_for_provider(Provider::Kiro);
+
+        assert!(ids.iter().any(|id| id == "auto"));
+        assert!(ids.iter().any(|id| id == "claude-sonnet-4.5"));
+        assert!(ids.iter().any(|id| id == "qwen3-coder-next"));
+    }
+
+    #[test]
     fn provider_detection_handles_prefixed_grok_models() {
         assert_eq!(provider_for_model("grok-4.3"), Provider::Grok);
         assert_eq!(provider_for_model("xai/grok-4.3"), Provider::Grok);
         assert_eq!(provider_for_model("grok/grok-4.3"), Provider::Grok);
         assert_eq!(provider_for_model("openai-codex/grok-4.3"), Provider::Grok);
         assert_eq!(provider_for_model("openai-codex/gpt-5.5"), Provider::Codex);
+        assert_eq!(provider_for_model("kiro/auto"), Provider::Kiro);
+        assert_eq!(provider_for_model("claude-sonnet-4.5"), Provider::Kiro);
+    }
+
+    #[test]
+    fn model_list_owners_match_provider() {
+        let models =
+            resolve_model_list_for_providers(&[Provider::Codex, Provider::Grok, Provider::Kiro])
+                .unwrap();
+
+        let owner_for = |id: &str| {
+            models
+                .data
+                .iter()
+                .find(|model| model.id == id)
+                .map(|model| model.owned_by)
+        };
+
+        assert_eq!(owner_for("gpt-5.5"), Some("openai-codex"));
+        assert_eq!(owner_for("grok-4.3"), Some("xai"));
+        assert_eq!(owner_for("auto"), Some("kiro"));
     }
 }

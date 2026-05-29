@@ -18,7 +18,11 @@ use rotom::{
     daemon::{self, DaemonInstallOptions},
     logging::{self, LogLevel},
     models::{resolve_model_ids_for_provider, resolve_model_list_for_providers},
-    oauth::{CodexOAuthClient, GrokOAuthClient, create_authorization_flow},
+    oauth::{
+        CodexOAuthClient, GrokOAuthClient, KiroAuthorizationCallback, KiroOAuthClient,
+        create_authorization_flow, default_cli_database_path, default_desktop_token_path,
+        parse_kiro_authorization_callback,
+    },
     server::{AppState, UpstreamState, serve},
     timefmt::format_duration,
     token::TokenManager,
@@ -43,7 +47,7 @@ const LOG_TOKEN_STATUS_INTERVAL: Duration = Duration::from_secs(60);
 const DEFAULT_MODEL_FALLBACK: &str = "gpt-5.5";
 const CLI_LONG_ABOUT: &str = "\
 rotom is a local OpenAI- and Anthropic-compatible API gateway backed by Codex
-or Grok OAuth.
+Grok, or Kiro OAuth.
 
 It helps clients that speak either the OpenAI Chat Completions API or the
 Anthropic Messages API call the selected upstream after you complete the OAuth
@@ -53,6 +57,7 @@ const CLI_AFTER_LONG_HELP: &str = "\
 Examples:
   rotom login
   rotom login --provider grok
+  rotom login --kiro
   rotom config
   rotom config show
   rotom serve
@@ -63,6 +68,7 @@ Examples:
   rotom daemon status
   rotom models
   rotom models --provider grok
+  rotom kiro import --from cli
   rotom refresh
   rotom status
   rotom update
@@ -71,7 +77,7 @@ Examples:
 
 Environment:
   ROTOM_API_KEY          Optional local API key for server endpoints
-  ROTOM_PROVIDER         Upstream provider: codex or grok
+  ROTOM_PROVIDER         Upstream provider: codex, grok, or kiro
   ROTOM_MODEL_FALLBACK   Fallback for unsupported Anthropic model ids
   ROTOM_AUTH_FILE        Override the credential file path
   ROTOM_HOME             Override the default config home
@@ -126,9 +132,16 @@ enum Command {
             long,
             env = "ROTOM_PROVIDER",
             value_name = "PROVIDER",
-            help = "OAuth provider to authenticate: codex or grok"
+            help = "OAuth provider to authenticate: codex, grok, or kiro"
         )]
         provider: Option<String>,
+        #[arg(
+            long,
+            action = ArgAction::SetTrue,
+            conflicts_with = "provider",
+            help = "Authenticate with Kiro without scanning local Kiro credential stores"
+        )]
+        kiro: bool,
         #[arg(
             long,
             default_value = "pi",
@@ -165,7 +178,7 @@ enum Command {
             long,
             env = "ROTOM_PROVIDER",
             value_name = "PROVIDER",
-            help = "Upstream provider to serve: codex or grok"
+            help = "Upstream provider to serve: codex, grok, or kiro"
         )]
         provider: Option<String>,
         #[arg(
@@ -187,7 +200,7 @@ enum Command {
             long,
             env = "ROTOM_PROVIDER",
             value_name = "PROVIDER",
-            help = "OAuth provider to refresh: codex or grok. When omitted, refreshes all saved providers."
+            help = "OAuth provider to refresh: codex, grok, or kiro. When omitted, refreshes all saved providers."
         )]
         provider: Option<String>,
     },
@@ -201,7 +214,7 @@ enum Command {
         #[arg(
             long,
             value_name = "PROVIDER",
-            help = "Provider to inspect: codex/openai or grok/xai"
+            help = "Provider to inspect: codex/openai, grok/xai, or kiro"
         )]
         provider: Option<String>,
     },
@@ -213,9 +226,17 @@ enum Command {
         #[arg(
             long,
             value_name = "PROVIDER",
-            help = "Provider to list: codex/openai or grok/xai"
+            help = "Provider to list: codex/openai, grok/xai, or kiro"
         )]
         provider: Option<String>,
+    },
+    #[command(
+        about = "Import local Kiro credentials",
+        long_about = "Import credentials from the official Kiro CLI SQLite store or Kiro IDE desktop JSON token file. This is separate from `rotom login --kiro` and never prints raw tokens."
+    )]
+    Kiro {
+        #[command(subcommand)]
+        command: KiroCommand,
     },
     #[command(
         about = "Install the latest rotom release with cargo",
@@ -273,6 +294,32 @@ enum ConfigCommand {
     Reset,
 }
 
+/// Kiro credential management subcommands.
+#[derive(Debug, Subcommand)]
+enum KiroCommand {
+    #[command(
+        about = "Import credentials from an existing Kiro CLI or IDE login",
+        long_about = "Read a local Kiro credential store, save a rotom Kiro provider entry, and keep token values out of stdout. Use --from cli for ~/.local/share/kiro-cli/data.sqlite3 or --from desktop for ~/.aws/sso/cache/kiro-auth-token.json."
+    )]
+    Import {
+        #[arg(long, value_name = "PATH", help = "rotom credential file to write")]
+        auth_file: Option<PathBuf>,
+        #[arg(
+            long = "from",
+            value_name = "SOURCE",
+            required = true,
+            help = "Credential source: cli, desktop, or explicit auto"
+        )]
+        source: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "Explicit Kiro SQLite database or desktop token JSON path"
+        )]
+        path: Option<PathBuf>,
+    },
+}
+
 /// Shared CLI options used by `daemon install` and `daemon reinstall`.
 #[derive(Debug, Clone, Args)]
 struct DaemonInstallCliOptions {
@@ -301,7 +348,7 @@ struct DaemonInstallCliOptions {
         long,
         env = "ROTOM_PROVIDER",
         value_name = "PROVIDER",
-        help = "Upstream provider to serve: codex or grok"
+        help = "Upstream provider to serve: codex, grok, or kiro"
     )]
     provider: Option<String>,
     #[arg(
@@ -327,10 +374,11 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Login {
             auth_file,
             provider,
+            kiro,
             originator,
         } => {
             let store = auth_store(auth_file)?;
-            let provider = resolve_login_provider(&store, provider)?;
+            let provider = resolve_login_provider(&store, provider, kiro)?;
             login(store, provider, &originator).await
         }
         Command::Config { command } => config_command(command.as_ref()),
@@ -389,6 +437,7 @@ async fn run(cli: Cli) -> Result<()> {
             provider,
         } => status(auth_store(auth_file)?, provider).await,
         Command::Models { provider } => models(provider),
+        Command::Kiro { command } => kiro_command(command),
         Command::Update { version } => update(version.as_deref()),
         Command::Daemon { command } => daemon_command(command, cli.verbose),
     }
@@ -397,7 +446,7 @@ async fn run(cli: Cli) -> Result<()> {
 fn models(provider: Option<String>) -> Result<()> {
     let providers = match provider {
         Some(provider) => vec![provider.parse()?],
-        None => vec![Provider::Codex, Provider::Grok],
+        None => vec![Provider::Codex, Provider::Grok, Provider::Kiro],
     };
     print!("{}", format_models(&providers));
     Ok(())
@@ -425,6 +474,7 @@ const fn model_provider_label(provider: Provider) -> &'static str {
     match provider {
         Provider::Codex => "OpenAI",
         Provider::Grok => "Grok",
+        Provider::Kiro => "Kiro",
     }
 }
 
@@ -586,7 +636,14 @@ fn resolve_model_fallback(
         .or_else(|| Some(DEFAULT_MODEL_FALLBACK.to_owned()))
 }
 
-fn resolve_login_provider(store: &AuthStore, provider: Option<String>) -> Result<Provider> {
+fn resolve_login_provider(
+    store: &AuthStore,
+    provider: Option<String>,
+    kiro: bool,
+) -> Result<Provider> {
+    if kiro {
+        return Ok(Provider::Kiro);
+    }
     provider.map_or_else(|| prompt_login_provider(store), |value| value.parse())
 }
 
@@ -608,12 +665,13 @@ fn prompt_login_provider(store: &AuthStore) -> Result<Provider> {
     parse_login_provider_choice(input.trim())
 }
 
-const LOGIN_PROVIDERS: [Provider; 2] = [Provider::Codex, Provider::Grok];
+const LOGIN_PROVIDERS: [Provider; 3] = [Provider::Codex, Provider::Grok, Provider::Kiro];
 
 fn parse_login_provider_choice(value: &str) -> Result<Provider> {
     match value {
         "" | "1" => Ok(Provider::Codex),
         "2" => Ok(Provider::Grok),
+        "3" => Ok(Provider::Kiro),
         other => other.parse(),
     }
 }
@@ -633,6 +691,7 @@ const fn login_provider_label(provider: Provider) -> &'static str {
     match provider {
         Provider::Codex => "openai",
         Provider::Grok => "grok",
+        Provider::Kiro => "kiro",
     }
 }
 
@@ -682,6 +741,10 @@ async fn login(store: AuthStore, provider: Provider, originator: &str) -> Result
         .map(|credentials| credentials.provider)
         .collect::<Vec<_>>();
     let is_new_provider = !existing_providers.contains(&provider);
+    let show_daemon_restart_hint = is_new_provider && !existing_providers.is_empty();
+    if provider == Provider::Kiro {
+        return login_kiro(store, http, show_daemon_restart_hint).await;
+    }
     let flow = match provider {
         Provider::Codex => create_authorization_flow(originator)?,
         Provider::Grok => {
@@ -689,6 +752,7 @@ async fn login(store: AuthStore, provider: Provider, originator: &str) -> Result
                 .create_authorization_flow()
                 .await?
         }
+        Provider::Kiro => unreachable!("Kiro login is handled before generic OAuth flow"),
     };
     println!(
         "Open this URL to authenticate with {}:\n{}\n",
@@ -711,6 +775,7 @@ async fn login(store: AuthStore, provider: Provider, originator: &str) -> Result
                 .exchange_authorization_code(&code, &flow.verifier)
                 .await?
         }
+        Provider::Kiro => unreachable!("Kiro login is handled before generic OAuth flow"),
     };
     store.save(&credentials)?;
     let subject = credential_subject(&credentials);
@@ -718,10 +783,53 @@ async fn login(store: AuthStore, provider: Provider, originator: &str) -> Result
         "logged in {subject} and saved credentials to {}",
         store.path().display()
     );
-    if is_new_provider && !existing_providers.is_empty() {
+    if show_daemon_restart_hint {
         println!("{}", new_provider_daemon_restart_hint(provider));
     }
     Ok(())
+}
+
+async fn login_kiro(store: AuthStore, http: Client, show_daemon_restart_hint: bool) -> Result<()> {
+    let flow = KiroOAuthClient::create_authorization_flow()?;
+    println!(
+        "Open this URL to authenticate with Kiro:\n{}\n",
+        flow.authorize_url
+    );
+    println!(
+        "After login, paste the full Kiro callback URL from the browser address bar, including login_option and code."
+    );
+
+    let callback = prompt_kiro_authorization_callback(&flow.state)?;
+    let credentials = KiroOAuthClient::new(http)
+        .exchange_authorization_callback(&callback, &flow.verifier)
+        .await?;
+    store.save(&credentials)?;
+    let subject = credential_subject(&credentials);
+    println!(
+        "logged in {subject} and saved credentials to {}",
+        store.path().display()
+    );
+    if show_daemon_restart_hint {
+        println!("{}", new_provider_daemon_restart_hint(Provider::Kiro));
+    }
+    Ok(())
+}
+
+fn prompt_kiro_authorization_callback(expected_state: &str) -> Result<KiroAuthorizationCallback> {
+    print!("Paste the full Kiro callback URL: ");
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let callback = parse_kiro_authorization_callback(&input)?;
+    if callback
+        .state
+        .as_deref()
+        .is_some_and(|state| state != expected_state)
+    {
+        return Err(Error::oauth("state mismatch"));
+    }
+    Ok(callback)
 }
 
 fn new_provider_daemon_restart_hint(provider: Provider) -> String {
@@ -771,6 +879,98 @@ async fn refresh_credentials(credentials: &Credentials) -> Result<Credentials> {
                 .refresh_token(&credentials.refresh_token)
                 .await
         }
+        Provider::Kiro => {
+            KiroOAuthClient::default()
+                .refresh_token(&credentials.refresh_token)
+                .await
+        }
+    }
+}
+
+fn kiro_command(command: KiroCommand) -> Result<()> {
+    match command {
+        KiroCommand::Import {
+            auth_file,
+            source,
+            path,
+        } => import_kiro(auth_file, &source, path.as_deref()),
+    }
+}
+
+fn import_kiro(
+    auth_file: Option<PathBuf>,
+    source: &str,
+    path: Option<&std::path::Path>,
+) -> Result<()> {
+    let store = auth_store(auth_file)?;
+    let (credentials, imported_from) = import_kiro_credentials(source, path)?;
+    store.save(&credentials)?;
+    println!(
+        "imported Kiro credentials from {imported_from} and saved them to {}",
+        store.path().display()
+    );
+    println!("Kiro credentials are ready for refresh, status, model listing, and API serving.");
+    Ok(())
+}
+
+fn import_kiro_credentials(
+    source: &str,
+    path: Option<&std::path::Path>,
+) -> Result<(Credentials, String)> {
+    match source.trim().to_ascii_lowercase().as_str() {
+        "auto" => {
+            if path.is_some() {
+                return Err(Error::config(
+                    "use --from cli or --from desktop when passing an explicit Kiro credential path",
+                ));
+            }
+            let cli_path = default_cli_database_path()?;
+            if cli_path.exists() {
+                return Ok((
+                    KiroOAuthClient::import_cli_database(&cli_path)?,
+                    cli_path.display().to_string(),
+                ));
+            }
+            let desktop_path = default_desktop_token_path()?;
+            if desktop_path.exists() {
+                return Ok((
+                    KiroOAuthClient::import_desktop_file(&desktop_path)?,
+                    desktop_path.display().to_string(),
+                ));
+            }
+            Err(Error::config(
+                "no Kiro CLI or desktop credential store found; pass --from cli --path ... or --from desktop --path ...",
+            ))
+        }
+        "cli" => {
+            let owned;
+            let path = if let Some(path) = path {
+                path
+            } else {
+                owned = default_cli_database_path()?;
+                &owned
+            };
+            Ok((
+                KiroOAuthClient::import_cli_database(path)?,
+                path.display().to_string(),
+            ))
+        }
+        "desktop" | "ide" => {
+            let owned;
+            let path = if let Some(path) = path {
+                path
+            } else {
+                owned = default_desktop_token_path()?;
+                &owned
+            };
+            Ok((
+                KiroOAuthClient::import_desktop_file(path)?,
+                path.display().to_string(),
+            ))
+        }
+        other => Err(Error::config(format!(
+            "unknown Kiro credential source: {other}; expected auto, cli, or desktop"
+        ))),
     }
 }
 
@@ -782,10 +982,9 @@ async fn status(store: AuthStore, provider: Option<String>) -> Result<()> {
         .transpose()?;
     let providers = resolve_status_providers(store.load_all()?, requested_provider)?;
 
-    for (index, provider) in providers.into_iter().enumerate() {
-        if index > 0 {
-            println!();
-        }
+    println!("{}", rotom_version_line());
+    for provider in providers {
+        println!();
         render_provider_status(&store, provider, http.clone()).await?;
     }
 
@@ -801,13 +1000,28 @@ async fn status(store: AuthStore, provider: Option<String>) -> Result<()> {
     Ok(())
 }
 
+fn rotom_version_line() -> String {
+    format!("rotom: {}", env!("CARGO_PKG_VERSION"))
+}
+
 async fn render_provider_status(store: &AuthStore, provider: Provider, http: Client) -> Result<()> {
     let token_manager = TokenManager::new_for_provider(store.clone(), provider, http);
     let credentials = token_manager.credentials().await?;
     println!("provider: {}", credentials.provider);
     println!("token: {}", token_expiry_message(&credentials));
     println!("status: authenticated");
+    println!("models:");
+    for line in provider_model_lines(provider) {
+        println!("{line}");
+    }
     Ok(())
+}
+
+fn provider_model_lines(provider: Provider) -> Vec<String> {
+    resolve_model_ids_for_provider(provider)
+        .into_iter()
+        .map(|model| format!("  {model}"))
+        .collect()
 }
 
 fn resolve_status_providers(
