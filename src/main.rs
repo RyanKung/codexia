@@ -26,13 +26,13 @@ use rotom::{
         KiroOAuthClient, create_authorization_flow, default_cli_database_path,
         default_desktop_token_path, parse_kiro_authorization_callback,
     },
-    server::{AppState, UpstreamState, serve},
+    server::{AppState, UpstreamState, serve_all},
     timefmt::format_duration,
     token::TokenManager,
 };
 use std::{
     io::{self, IsTerminal, Write},
-    net::SocketAddr,
+    net::{Ipv4Addr, SocketAddr, ToSocketAddrs},
     path::PathBuf,
     process::Command as ProcessCommand,
     time::Duration,
@@ -66,6 +66,7 @@ Examples:
   rotom config show
   rotom serve
   rotom serve --bind 127.0.0.1:14550 --api-key local-secret
+  rotom serve --bind 127.0.0.1:14550,192.168.1.0/24:14550 --api-key local-secret
   rotom daemon install
   rotom daemon reinstall
   rotom daemon start
@@ -177,8 +178,12 @@ enum Command {
         long_about = "Serve OpenAI- and Anthropic-compatible endpoints backed by the selected provider, including /v1/models, /v1/chat/completions, /v1/responses, Responses resource compatibility routes, /v1/messages, /v1/messages/count_tokens, /v1/messages/batches, and /v1/auth/refresh."
     )]
     Serve {
-        #[arg(long, value_name = "ADDR", help = "Socket address to listen on")]
-        bind: Option<SocketAddr>,
+        #[arg(
+            long,
+            value_name = "ADDR[,ADDR...]",
+            help = "Socket address or comma-separated socket addresses to listen on"
+        )]
+        bind: Option<BindAddresses>,
         #[arg(long, value_name = "PATH", help = "Credential file to read/write")]
         auth_file: Option<PathBuf>,
         #[arg(
@@ -336,6 +341,26 @@ enum KiroCommand {
     },
 }
 
+/// One or more socket addresses accepted by `--bind`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BindAddresses(Vec<SocketAddr>);
+
+impl BindAddresses {
+    fn into_vec(self) -> Vec<SocketAddr> {
+        self.0
+    }
+}
+
+impl std::str::FromStr for BindAddresses {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        parse_bind_addresses(value)
+            .map(Self)
+            .map_err(|error| error.to_string())
+    }
+}
+
 /// Shared CLI options used by `daemon install` and `daemon reinstall`.
 #[derive(Debug, Clone, Args)]
 struct DaemonInstallCliOptions {
@@ -347,10 +372,10 @@ struct DaemonInstallCliOptions {
     executable: Option<PathBuf>,
     #[arg(
         long,
-        value_name = "ADDR",
-        help = "Socket address the daemon should listen on"
+        value_name = "ADDR[,ADDR...]",
+        help = "Socket address or comma-separated socket addresses the daemon should listen on"
     )]
-    bind: Option<SocketAddr>,
+    bind: Option<BindAddresses>,
     #[arg(long, value_name = "PATH", help = "Credential file to read/write")]
     auth_file: Option<PathBuf>,
     #[arg(
@@ -408,9 +433,11 @@ async fn run(cli: Cli) -> Result<()> {
         } => {
             logging::init(log_level)?;
             let config = load_app_config()?;
-            let effective_bind = bind
-                .or_else(|| bind_from_config(config.as_ref()))
-                .unwrap_or_else(default_bind);
+            let effective_bind = if let Some(bind) = bind {
+                bind.into_vec()
+            } else {
+                bind_from_config(config.as_ref())?.unwrap_or_else(default_binds)
+            };
             let effective_auth_file = auth_file.or_else(|| config_auth_file(config.as_ref()));
             let effective_api_key =
                 api_key.or_else(|| config_string(config.as_ref(), |item| item.api_key.clone()));
@@ -430,12 +457,12 @@ async fn run(cli: Cli) -> Result<()> {
                 });
             }
             let model_list = resolve_model_list_for_providers(&providers)?;
-            println!("listening on http://{effective_bind}");
+            println!("listening on {}", format_bind_urls(&effective_bind));
             for upstream in &upstreams {
                 spawn_token_expiry_display(upstream.token_manager.clone());
             }
-            serve(
-                effective_bind,
+            serve_all(
+                &effective_bind,
                 AppState::new_multi_with_model_fallback(
                     upstreams,
                     effective_api_key,
@@ -675,17 +702,27 @@ fn resolve_status_providers(
 
 async fn running_daemon_base_url(http: &Client) -> Option<String> {
     let config = load_app_config().ok().flatten();
-    let bind = bind_from_config(config.as_ref()).unwrap_or_else(default_bind);
-    let base_url = format!("http://{bind}");
-    let health_url = format!("{base_url}/health");
-    let response = http
-        .get(health_url)
-        .timeout(Duration::from_millis(500))
-        .send()
-        .await
-        .ok()?;
-
-    response.status().is_success().then_some(base_url)
+    let binds = bind_from_config(config.as_ref())
+        .ok()
+        .flatten()
+        .unwrap_or_else(default_binds);
+    for bind in binds {
+        let base_url = format!("http://{bind}");
+        let health_url = format!("{base_url}/health");
+        let Some(response) = http
+            .get(health_url)
+            .timeout(Duration::from_millis(500))
+            .send()
+            .await
+            .ok()
+        else {
+            continue;
+        };
+        if response.status().is_success() {
+            return Some(base_url);
+        }
+    }
+    None
 }
 
 fn daemon_endpoint_lines(base_url: &str) -> Vec<String> {
@@ -728,11 +765,212 @@ fn default_bind() -> SocketAddr {
         .expect("hardcoded default bind address should parse")
 }
 
-fn bind_from_config(config: Option<&AppConfig>) -> Option<SocketAddr> {
-    let config = config?;
-    let host = config.bind_host.as_deref()?;
-    let port = config.bind_port?;
-    format!("{host}:{port}").parse().ok()
+fn default_binds() -> Vec<SocketAddr> {
+    vec![default_bind()]
+}
+
+fn bind_from_config(config: Option<&AppConfig>) -> Result<Option<Vec<SocketAddr>>> {
+    let Some(config) = config else {
+        return Ok(None);
+    };
+    let Some(hosts) = config.bind_host.as_deref() else {
+        return Ok(None);
+    };
+    let Some(port) = config.bind_port else {
+        return Ok(None);
+    };
+    parse_bind_hosts(hosts, port).map(Some)
+}
+
+fn parse_bind_addresses(value: &str) -> Result<Vec<SocketAddr>> {
+    let mut addrs = Vec::new();
+    for item in split_bind_items(value) {
+        push_unique_addrs(&mut addrs, parse_bind_address_item(item)?);
+    }
+    non_empty_bind_addrs(addrs, "bind address")
+}
+
+fn parse_bind_address_item(item: &str) -> Result<Vec<SocketAddr>> {
+    if item.contains('/') {
+        let (host, port) = parse_cidr_bind_address(item)?;
+        return parse_bind_host_selector(host, port);
+    }
+
+    item.to_socket_addrs()
+        .map(Iterator::collect)
+        .map_err(|error| Error::config(format!("invalid bind address `{item}`: {error}")))
+}
+
+fn parse_cidr_bind_address(item: &str) -> Result<(&str, u16)> {
+    let Some((host, port)) = item.rsplit_once(':') else {
+        return Err(Error::config(format!(
+            "CIDR bind address `{item}` must include a port, for example `192.168.1.0/24:14550`"
+        )));
+    };
+    let port = port
+        .parse::<u16>()
+        .map_err(|error| Error::config(format!("invalid bind port `{port}`: {error}")))?;
+    Ok((host, port))
+}
+
+fn parse_bind_hosts(hosts: &str, port: u16) -> Result<Vec<SocketAddr>> {
+    let mut addrs = Vec::new();
+    for host in split_bind_items(hosts) {
+        push_unique_addrs(&mut addrs, parse_bind_host_selector(host, port)?);
+    }
+    non_empty_bind_addrs(addrs, "bind host")
+}
+
+fn parse_bind_host_selector(host: &str, port: u16) -> Result<Vec<SocketAddr>> {
+    if host.contains('/') {
+        return expand_ipv4_cidr_bind_host(host, port);
+    }
+
+    (host, port)
+        .to_socket_addrs()
+        .map(Iterator::collect)
+        .map_err(|error| Error::config(format!("invalid bind host `{host}`: {error}")))
+}
+
+fn expand_ipv4_cidr_bind_host(host: &str, port: u16) -> Result<Vec<SocketAddr>> {
+    let cidr = Ipv4Cidr::parse(host)?;
+    let addrs = local_ipv4_addrs()?
+        .into_iter()
+        .filter(|addr| cidr.contains(*addr))
+        .map(|addr| SocketAddr::from((addr, port)))
+        .collect::<Vec<_>>();
+
+    if addrs.is_empty() {
+        Err(Error::config(format!(
+            "bind CIDR `{host}` did not match any local IPv4 interface"
+        )))
+    } else {
+        Ok(addrs)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Ipv4Cidr {
+    network: u32,
+    mask: u32,
+}
+
+impl Ipv4Cidr {
+    fn parse(value: &str) -> Result<Self> {
+        let Some((addr, prefix)) = value.split_once('/') else {
+            return Err(Error::config(format!("invalid IPv4 CIDR `{value}`")));
+        };
+        let addr = addr.parse::<Ipv4Addr>().map_err(|error| {
+            Error::config(format!("invalid IPv4 CIDR address `{addr}`: {error}"))
+        })?;
+        let prefix = prefix.parse::<u8>().map_err(|error| {
+            Error::config(format!("invalid IPv4 CIDR prefix `{prefix}`: {error}"))
+        })?;
+        if prefix > 32 {
+            return Err(Error::config(format!(
+                "invalid IPv4 CIDR prefix `{prefix}`: must be between 0 and 32"
+            )));
+        }
+        let mask = if prefix == 0 {
+            0
+        } else {
+            u32::MAX << (32 - u32::from(prefix))
+        };
+        Ok(Self {
+            network: u32::from(addr) & mask,
+            mask,
+        })
+    }
+
+    fn contains(self, addr: Ipv4Addr) -> bool {
+        (u32::from(addr) & self.mask) == self.network
+    }
+}
+
+#[cfg(unix)]
+fn local_ipv4_addrs() -> Result<Vec<Ipv4Addr>> {
+    let mut ifaddrs = std::ptr::null_mut();
+    // SAFETY: `getifaddrs` initializes `ifaddrs` on success. We walk the linked
+    // list only while pointers are non-null and free it exactly once afterward.
+    if unsafe { libc::getifaddrs(&raw mut ifaddrs) } != 0 {
+        return Err(Error::Io(std::io::Error::last_os_error()));
+    }
+
+    let mut addrs = Vec::new();
+    let mut cursor = ifaddrs;
+    while !cursor.is_null() {
+        // SAFETY: `cursor` points to a valid node in the `getifaddrs` list until
+        // `freeifaddrs` is called after traversal.
+        let item = unsafe { &*cursor };
+        if !item.ifa_addr.is_null() {
+            // SAFETY: `ifa_addr` is non-null and the family check precedes the
+            // cast to `sockaddr_in`.
+            let sockaddr = unsafe { &*item.ifa_addr };
+            if i32::from(sockaddr.sa_family) == libc::AF_INET {
+                // SAFETY: AF_INET entries are represented as `sockaddr_in`.
+                // `read_unaligned` avoids assuming platform alignment for the
+                // generic `sockaddr` pointer.
+                let addr =
+                    unsafe { std::ptr::read_unaligned(item.ifa_addr.cast::<libc::sockaddr_in>()) };
+                let ip = Ipv4Addr::from(addr.sin_addr.s_addr.to_ne_bytes());
+                if !addrs.contains(&ip) {
+                    addrs.push(ip);
+                }
+            }
+        }
+        cursor = item.ifa_next;
+    }
+
+    // SAFETY: `ifaddrs` was initialized by a successful `getifaddrs` call and
+    // has not been freed yet.
+    unsafe { libc::freeifaddrs(ifaddrs) };
+    Ok(addrs)
+}
+
+#[cfg(not(unix))]
+fn local_ipv4_addrs() -> Result<Vec<Ipv4Addr>> {
+    Err(Error::config(
+        "CIDR bind selectors require Unix local interface enumeration",
+    ))
+}
+
+fn split_bind_items(value: &str) -> impl Iterator<Item = &str> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+}
+
+fn push_unique_addrs(addrs: &mut Vec<SocketAddr>, resolved: impl IntoIterator<Item = SocketAddr>) {
+    for addr in resolved {
+        if !addrs.contains(&addr) {
+            addrs.push(addr);
+        }
+    }
+}
+
+fn non_empty_bind_addrs(addrs: Vec<SocketAddr>, label: &str) -> Result<Vec<SocketAddr>> {
+    if addrs.is_empty() {
+        Err(Error::config(format!("{label} list must not be empty")))
+    } else {
+        Ok(addrs)
+    }
+}
+
+fn format_bind_addresses(addrs: &[SocketAddr]) -> String {
+    addrs
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn format_bind_urls(addrs: &[SocketAddr]) -> String {
+    addrs
+        .iter()
+        .map(|addr| format!("http://{addr}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn config_auth_file(config: Option<&AppConfig>) -> Option<PathBuf> {

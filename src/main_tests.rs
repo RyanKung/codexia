@@ -1,7 +1,8 @@
 use super::{
-    AppConfig, Cli, Command, DEFAULT_MODEL_FALLBACK, bind_from_config, build_update_command,
-    credential_subject, daemon_endpoint_lines, format_login_provider_choice, format_models,
-    new_provider_daemon_restart_hint, parse_login_provider_choice, resolve_model_fallback,
+    AppConfig, Cli, Command, DEFAULT_MODEL_FALLBACK, Ipv4Cidr, bind_from_config,
+    build_update_command, credential_subject, daemon_endpoint_lines, format_bind_addresses,
+    format_login_provider_choice, format_models, new_provider_daemon_restart_hint,
+    parse_bind_addresses, parse_bind_hosts, parse_login_provider_choice, resolve_model_fallback,
     resolve_status_providers, rotom_version_line, token_expiry_message,
 };
 use clap::Parser;
@@ -22,9 +23,68 @@ fn builds_bind_address_from_config() {
         ..AppConfig::default()
     };
 
+    let addrs = bind_from_config(Some(&config)).unwrap().unwrap();
+    assert_eq!(format_bind_addresses(&addrs), "127.0.0.1:14550");
+}
+
+#[test]
+fn builds_multiple_bind_addresses_from_config() {
+    let config = AppConfig {
+        bind_host: Some("127.0.0.1,0.0.0.0".into()),
+        bind_port: Some(14550),
+        model_fallback: None,
+        ..AppConfig::default()
+    };
+
+    let addrs = bind_from_config(Some(&config)).unwrap().unwrap();
     assert_eq!(
-        bind_from_config(Some(&config)).map(|item| item.to_string()),
-        Some("127.0.0.1:14550".to_owned())
+        format_bind_addresses(&addrs),
+        "127.0.0.1:14550,0.0.0.0:14550"
+    );
+}
+
+#[test]
+fn parses_comma_separated_cli_bind_addresses() {
+    let cli =
+        Cli::try_parse_from(["rotom", "serve", "--bind", "127.0.0.1:14550,0.0.0.0:14550"]).unwrap();
+
+    let Command::Serve { bind, .. } = cli.command else {
+        panic!("expected serve command");
+    };
+    assert_eq!(
+        format_bind_addresses(&bind.unwrap().into_vec()),
+        "127.0.0.1:14550,0.0.0.0:14550"
+    );
+}
+
+#[test]
+fn parses_bind_cidr_membership() {
+    let cidr = Ipv4Cidr::parse("192.168.1.0/24").unwrap();
+
+    assert!(cidr.contains("192.168.1.1".parse().unwrap()));
+    assert!(cidr.contains("192.168.1.255".parse().unwrap()));
+    assert!(!cidr.contains("192.168.2.1".parse().unwrap()));
+}
+
+#[test]
+fn expands_loopback_cidr_bind_host_to_local_interface() {
+    let addrs = parse_bind_hosts("127.0.0.0/8", 14550).unwrap();
+
+    assert!(
+        addrs
+            .iter()
+            .any(|addr| addr.to_string() == "127.0.0.1:14550")
+    );
+}
+
+#[test]
+fn parses_cidr_cli_bind_address() {
+    let addrs = parse_bind_addresses("127.0.0.0/8:14550").unwrap();
+
+    assert!(
+        addrs
+            .iter()
+            .any(|addr| addr.to_string() == "127.0.0.1:14550")
     );
 }
 

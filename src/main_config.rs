@@ -32,10 +32,11 @@ fn resolve_daemon_install_options(
     let config_store = app_config_store()?;
     let config = config_store.load()?;
     let explicit_api_key = options.api_key.clone();
-    let effective_bind = options
-        .bind
-        .or_else(|| bind_from_config(config.as_ref()))
-        .unwrap_or_else(default_bind);
+    let effective_bind = if let Some(bind) = options.bind {
+        bind.into_vec()
+    } else {
+        bind_from_config(config.as_ref())?.unwrap_or_else(default_binds)
+    };
     let effective_auth_file = options
         .auth_file
         .or_else(|| config_auth_file(config.as_ref()));
@@ -49,7 +50,7 @@ fn resolve_daemon_install_options(
     }
     Ok(DaemonInstallOptions {
         executable: options.executable.map_or_else(std::env::current_exe, Ok)?,
-        bind: effective_bind.to_string(),
+        bind: format_bind_addresses(&effective_bind),
         auth_file: effective_auth_file,
         verbosity,
         provider: effective_provider,
@@ -81,7 +82,7 @@ fn load_app_config() -> Result<Option<AppConfig>> {
 fn configure(store: &AppConfigStore) -> Result<()> {
     let existing = store.load()?.unwrap_or_default();
     let bind_host = prompt_string(
-        "Bind host",
+        "Bind host(s)",
         existing.bind_host.as_deref().unwrap_or("127.0.0.1"),
     )?;
     let bind_port = prompt_port("Bind port", existing.bind_port.unwrap_or(14550))?;

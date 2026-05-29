@@ -3,7 +3,7 @@
 use crate::{
     codex::{client::CodexClient, convert::normalize_model},
     config::Provider,
-    error::Result,
+    error::{Error, Result},
     models::provider_for_model,
     openai::response::ModelList,
     status::StatusClient,
@@ -16,6 +16,7 @@ use axum::{
     response::Response,
     routing::{get, post},
 };
+use futures_util::future::try_join_all;
 use reqwest::Client;
 use std::{net::SocketAddr, sync::Arc};
 use tokio::net::TcpListener;
@@ -191,8 +192,30 @@ fn normalize_model_for_support(model: &str) -> String {
 ///
 /// Returns an error when binding the socket or serving the router fails.
 pub async fn serve(addr: SocketAddr, state: AppState) -> Result<()> {
-    let listener = TcpListener::bind(addr).await?;
-    axum::serve(listener, router(state)).await?;
+    serve_all(&[addr], state).await
+}
+
+/// Binds one local listener per address and serves the Axum router until shutdown.
+///
+/// # Errors
+///
+/// Returns an error when no addresses are provided, binding any socket fails,
+/// or serving any router fails.
+pub async fn serve_all(addrs: &[SocketAddr], state: AppState) -> Result<()> {
+    if addrs.is_empty() {
+        return Err(Error::config("at least one bind address is required"));
+    }
+
+    let mut listeners = Vec::with_capacity(addrs.len());
+    for addr in addrs {
+        listeners.push(TcpListener::bind(addr).await?);
+    }
+
+    let servers = listeners.into_iter().map(|listener| {
+        let state = state.clone();
+        async move { axum::serve(listener, router(state)).await }
+    });
+    try_join_all(servers).await?;
     Ok(())
 }
 

@@ -36,6 +36,13 @@ rotom login
 rotom serve --bind 127.0.0.1:14550 --api-key local-secret
 ```
 
+Use a comma-separated bind list to listen on multiple local interfaces. CIDR
+entries match local IPv4 interfaces in that range:
+
+```bash
+rotom serve --bind 127.0.0.1:14550,192.168.1.0/24:14550 --api-key local-secret
+```
+
 Set Claude Code or any Anthropic-compatible client to use the local gateway:
 
 ```bash
@@ -341,6 +348,9 @@ rotom daemon install \
   --bind 127.0.0.1:14550 \
   --api-key local-secret
 ```
+
+The daemon accepts the same comma-separated bind list and CIDR selectors as
+`rotom serve`, for example `--bind 127.0.0.1:14550,192.168.1.0/24:14550`.
 
 Models returned by `/v1/models` include the OpenAI/Codex registry:
 

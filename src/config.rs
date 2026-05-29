@@ -125,7 +125,7 @@ impl Credentials {
 /// Persisted runtime defaults used by `serve` and `daemon install`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct AppConfig {
-    /// Hostname or IP address the service should bind to.
+    /// Hostname, IP address, comma-separated hosts, or CIDR selector to bind to.
     #[serde(default)]
     pub bind_host: Option<String>,
     /// TCP port the service should bind to.
