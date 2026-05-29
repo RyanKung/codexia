@@ -812,6 +812,13 @@ fn callback_from_parts(path: &str, query: &str) -> Result<KiroAuthorizationCallb
     }
     let query = query.split_once('#').map_or(query, |(query, _)| query);
     let pairs = url::form_urlencoded::parse(query.as_bytes()).collect::<Vec<_>>();
+    if let Some((_, error)) = pairs.iter().find(|(key, _)| key == "error") {
+        let description = pairs
+            .iter()
+            .find(|(key, _)| key == "error_description")
+            .map_or_else(|| error.as_ref(), |(_, value)| value.as_ref());
+        return Err(Error::oauth(format!("Kiro login failed: {description}")));
+    }
     let code = pairs
         .iter()
         .find(|(key, _)| key == "code")
@@ -997,6 +1004,19 @@ mod tests {
         assert_eq!(
             callback.token_exchange_redirect_uri(),
             "http://localhost:3128/oauth/callback?login_option=google"
+        );
+    }
+
+    #[test]
+    fn parses_kiro_portal_callback_error() {
+        let error = parse_kiro_authorization_callback(
+            "http://localhost:3128/oauth/callback?error=access_denied&error_description=user%20cancelled",
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "OAuth error: Kiro login failed: user cancelled"
         );
     }
 
