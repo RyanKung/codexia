@@ -14,11 +14,12 @@ use url::Url;
 
 /// Default Cursor website URL used for browser login.
 pub const CURSOR_WEBSITE_URL: &str = "https://cursor.com";
-/// Default Cursor API base URL used by the official `cursor-agent` CLI.
+/// Default Cursor API base URL used by browser login and `AgentService` calls.
 pub const CURSOR_API_BASE_URL: &str = "https://api2.cursor.sh";
 
 const CURSOR_LOGIN_PATH: &str = "loginDeepControl";
 const CURSOR_AUTH_POLL_PATH: &str = "auth/poll";
+const CURSOR_TOKEN_PATH: &str = "oauth/token";
 const DEFAULT_MAX_POLL_ATTEMPTS: usize = 150;
 const DEFAULT_INITIAL_POLL_DELAY: Duration = Duration::from_secs(1);
 const DEFAULT_MAX_POLL_DELAY: Duration = Duration::from_secs(10);
@@ -30,8 +31,15 @@ struct CursorPollResponse {
     refresh_token: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct CursorRefreshResponse {
+    access_token: String,
+    #[serde(default, rename = "shouldLogout")]
+    should_logout: bool,
+}
+
 #[derive(Clone)]
-/// OAuth-like browser login client for Cursor Agent credentials.
+/// OAuth-like browser login client for Cursor credentials.
 pub struct CursorOAuthClient {
     http: Client,
     website_url: String,
@@ -80,8 +88,8 @@ impl CursorOAuthClient {
 
     /// Creates a browser-ready Cursor login flow.
     ///
-    /// Cursor Agent does not use a localhost callback for this flow. The CLI
-    /// opens `cursor.com/loginDeepControl` and then polls the API with the UUID
+    /// Cursor does not use a localhost callback for this flow. The browser
+    /// opens `cursor.com/loginDeepControl`, and rotom polls the API with the UUID
     /// plus verifier until the browser approval completes.
     ///
     /// # Errors
@@ -125,14 +133,30 @@ impl CursorOAuthClient {
     ///
     /// # Errors
     ///
-    /// Cursor Agent's installed CLI does not expose or call a browser-token
-    /// refresh endpoint. It re-exchanges a User API key when one is available,
-    /// so browser-login credentials must currently be renewed by logging in
-    /// again when the access token expires.
-    pub fn refresh_token(&self, _refresh_token: &str) -> Result<Credentials> {
-        Err(Error::oauth(
-            "Cursor browser-login refresh is not implemented; run `rotom login --provider cursor` again when the token expires",
-        ))
+    /// Returns an error when Cursor rejects the refresh token, requests logout,
+    /// or returns an access token without a usable JWT expiry.
+    pub async fn refresh_token(&self, refresh_token: &str) -> Result<Credentials> {
+        let response = self
+            .http
+            .post(Url::parse(&self.api_base_url)?.join(CURSOR_TOKEN_PATH)?)
+            .header("content-type", "application/json")
+            .json(&serde_json::json!({
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+            }))
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(Error::oauth(format!(
+                "Cursor token refresh failed with status {status}: {text}"
+            )));
+        }
+
+        let token = response.json::<CursorRefreshResponse>().await?;
+        credentials_from_refresh_response(token, refresh_token)
     }
 
     async fn poll_for_token(&self, uuid: &str, verifier: &str) -> Result<CursorPollResponse> {
@@ -210,6 +234,33 @@ fn credentials_from_poll_response(token: CursorPollResponse) -> Result<Credentia
     })
 }
 
+fn credentials_from_refresh_response(
+    token: CursorRefreshResponse,
+    refresh_token: &str,
+) -> Result<Credentials> {
+    if token.should_logout {
+        return Err(Error::oauth(
+            "Cursor token refresh requested logout; run `rotom login --cursor` again",
+        ));
+    }
+
+    let payload = decode_jwt_payload(&token.access_token)?;
+    let expires_at = payload
+        .get("exp")
+        .and_then(Value::as_i64)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| Error::oauth("Cursor access token is missing JWT exp"))?;
+    let account_id = cursor_account_id(&payload).unwrap_or_default();
+
+    Ok(Credentials {
+        provider: Provider::Cursor,
+        access_token: token.access_token,
+        refresh_token: refresh_token.to_owned(),
+        expires_at,
+        account_id,
+    })
+}
+
 fn cursor_poll_url(api_base_url: &str, uuid: &str, verifier: &str) -> Result<Url> {
     let mut url = Url::parse(api_base_url)?.join(CURSOR_AUTH_POLL_PATH)?;
     url.query_pairs_mut()
@@ -265,7 +316,11 @@ fn cursor_account_id(payload: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{Json, Router, extract::Query, routing::get};
+    use axum::{
+        Json, Router,
+        extract::Query,
+        routing::{get, post},
+    };
     use serde_json::{Value, json};
     use std::collections::HashMap;
     use tokio::net::TcpListener;
@@ -290,8 +345,40 @@ mod tests {
         }))
     }
 
+    async fn refresh_handler(Json(body): Json<Value>) -> Json<Value> {
+        assert_eq!(
+            body.get("grant_type").and_then(Value::as_str),
+            Some("refresh_token")
+        );
+        assert_eq!(
+            body.get("refresh_token").and_then(Value::as_str),
+            Some("old-refresh")
+        );
+        Json(json!({
+            "access_token": jwt_with_payload(&json!({
+                "exp": 1_893_456_001_i64,
+                "sub": "cursor-refreshed"
+            })),
+            "id_token": jwt_with_payload(&json!({
+                "exp": 1_893_456_001_i64,
+                "sub": "cursor-refreshed"
+            })),
+            "shouldLogout": false
+        }))
+    }
+
     async fn spawn_poll_server() -> String {
         let app = Router::new().route("/auth/poll", get(poll_handler));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        url
+    }
+
+    async fn spawn_refresh_server() -> String {
+        let app = Router::new().route("/oauth/token", post(refresh_handler));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move {
@@ -347,6 +434,20 @@ mod tests {
         assert_eq!(credentials.refresh_token, "refresh-token");
         assert_eq!(credentials.expires_at, 1_893_456_000);
         assert_eq!(credentials.account_id, "cursor-user");
+    }
+
+    #[tokio::test]
+    async fn refreshes_cursor_browser_token() {
+        let base_url = spawn_refresh_server().await;
+        let client =
+            CursorOAuthClient::new_with_endpoints(Client::new(), "https://cursor.com", base_url, 1);
+
+        let credentials = client.refresh_token("old-refresh").await.unwrap();
+
+        assert_eq!(credentials.provider, Provider::Cursor);
+        assert_eq!(credentials.refresh_token, "old-refresh");
+        assert_eq!(credentials.expires_at, 1_893_456_001);
+        assert_eq!(credentials.account_id, "cursor-refreshed");
     }
 
     #[test]

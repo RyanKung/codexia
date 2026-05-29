@@ -22,8 +22,6 @@ pub struct DaemonInstallOptions {
     pub auth_file: Option<PathBuf>,
     /// Repeated `-v` count passed through to `rotom serve`.
     pub verbosity: u8,
-    /// Optional API key injected into the daemon process arguments.
-    pub api_key: Option<String>,
     /// Upstream provider passed through to `rotom serve`.
     pub provider: Option<Provider>,
     /// Optional fallback model passed through to `rotom serve`.
@@ -264,10 +262,6 @@ fn serve_args(options: &DaemonInstallOptions) -> Vec<String> {
     }
     for _ in 0..options.verbosity {
         args.push("-v".to_owned());
-    }
-    if let Some(api_key) = &options.api_key {
-        args.push("--api-key".to_owned());
-        args.push(api_key.clone());
     }
     if let Some(provider) = options.provider {
         args.push("--provider".to_owned());
@@ -626,7 +620,6 @@ mod tests {
             bind: "127.0.0.1:14550".into(),
             auth_file: Some("/tmp/auth file.json".into()),
             verbosity: 2,
-            api_key: Some("local secret".into()),
             provider: None,
             model_fallback: Some("gpt-5.5".into()),
         }
@@ -645,8 +638,6 @@ mod tests {
                 "/tmp/auth file.json",
                 "-v",
                 "-v",
-                "--api-key",
-                "local secret",
                 "--model-fallback",
                 "gpt-5.5",
             ]
@@ -659,7 +650,7 @@ mod tests {
 
         assert!(plist.contains("<key>ProgramArguments</key>"));
         assert!(plist.contains("<string>/usr/local/bin/rotom</string>"));
-        assert!(plist.contains("<string>local secret</string>"));
+        assert!(!plist.contains("local secret"));
         assert!(plist.contains("<key>KeepAlive</key>"));
     }
 
@@ -668,7 +659,7 @@ mod tests {
         let unit = systemd_unit(&options());
 
         assert!(unit.contains("ExecStart='/usr/local/bin/rotom' 'serve'"));
-        assert!(unit.contains("'local secret'"));
+        assert!(!unit.contains("local secret"));
         assert!(unit.contains("Restart=always"));
         assert!(unit.contains("WantedBy=default.target"));
     }

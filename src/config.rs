@@ -21,7 +21,7 @@ pub enum Provider {
     Grok,
     /// Kiro credentials imported from the official local IDE or CLI stores.
     Kiro,
-    /// Cursor Agent browser login or API-key-derived credentials.
+    /// Cursor browser login and `AgentService` credentials.
     Cursor,
 }
 
@@ -63,7 +63,7 @@ impl FromStr for Provider {
             "codex" | "openai-codex" | "openai" => Ok(Self::Codex),
             "grok" | "xai" | "xai-oauth" | "grok-oauth" => Ok(Self::Grok),
             "kiro" | "kiro-cli" | "kiro-desktop" => Ok(Self::Kiro),
-            "cursor" | "cursor-agent" | "cursor-cli" => Ok(Self::Cursor),
+            "cursor" => Ok(Self::Cursor),
             other => Err(Error::config(format!("unknown provider: {other}"))),
         }
     }
@@ -437,6 +437,15 @@ mod tests {
 
         assert!(credentials.is_expired_at(95, 10));
         assert!(!credentials.is_expired_at(80, 10));
+    }
+
+    #[test]
+    fn cursor_provider_does_not_accept_local_cli_aliases() {
+        assert_eq!(Provider::from_str("cursor").unwrap(), Provider::Cursor);
+        let local_agent_alias = ["cursor", "agent"].join("-");
+        let local_cli_alias = ["cursor", "cli"].join("-");
+        assert!(Provider::from_str(&local_agent_alias).is_err());
+        assert!(Provider::from_str(&local_cli_alias).is_err());
     }
 
     #[test]

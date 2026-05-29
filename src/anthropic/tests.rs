@@ -33,6 +33,29 @@ fn converts_anthropic_request_to_openai_shape() {
 }
 
 #[test]
+fn accepts_system_role_messages_from_tolerant_clients() {
+    let request: MessagesRequest = serde_json::from_value(json!({
+        "model": "cursor/claude-opus-4-8-medium",
+        "messages": [
+            {
+                "role": "system",
+                "content": "x-anthropic-billing-header: cc_version=2.1.156;\n\nbe terse"
+            },
+            {"role": "user", "content": "hello"}
+        ]
+    }))
+    .unwrap();
+
+    let converted = to_openai_request(&request).unwrap();
+    assert_eq!(converted.messages[0].role, "system");
+    assert_eq!(
+        converted.messages[0].content,
+        Some(ChatContent::Text("be terse".to_owned()))
+    );
+    assert_eq!(converted.messages[1].role, "user");
+}
+
+#[test]
 fn explicit_tool_choice_disables_parallel_tool_calls() {
     let request: MessagesRequest = serde_json::from_value(json!({
         "model": "gpt-5.5",

@@ -21,6 +21,7 @@ pub const GROK_MODELS: &[&str] = &["grok-4.3", "grok-4.3-fast", "grok-4"];
 /// Default Kiro model identifiers exposed by the local Kiro CLI model list.
 pub const KIRO_MODELS: &[&str] = &[
     "auto",
+    "claude-opus-4.8",
     "claude-opus-4.7",
     "claude-opus-4.6",
     "claude-sonnet-4.6",
@@ -35,13 +36,15 @@ pub const KIRO_MODELS: &[&str] = &[
     "qwen3-coder-next",
 ];
 
-/// Default Cursor Agent model identifiers exposed by rotom.
+/// Default Cursor model identifiers exposed by rotom.
 pub const CURSOR_MODELS: &[&str] = &[
     "cursor/auto",
     "cursor/gpt-5",
     "cursor/sonnet-4",
     "cursor/sonnet-4-thinking",
 ];
+
+const HIGHLIGHT_MODEL_LIMIT: usize = 4;
 
 /// Resolves the default model identifiers into a trimmed, de-duplicated list.
 #[must_use]
@@ -59,6 +62,43 @@ pub fn resolve_model_ids_for_provider(provider: Provider) -> Vec<String> {
         Provider::Cursor => CURSOR_MODELS,
     };
     normalize_model_ids(ids.iter().map(ToString::to_string))
+}
+
+/// Selects the strongest model identifiers for a provider from an available model list.
+#[must_use]
+pub fn highlight_model_ids_for_provider(provider: Provider, available: &[String]) -> Vec<String> {
+    let normalized = normalize_model_ids(available.iter().cloned());
+    let mut ranked = normalized
+        .iter()
+        .filter_map(|id| highlight_model_rank(provider, id).map(|rank| (id.clone(), rank)))
+        .collect::<Vec<_>>();
+
+    ranked.sort_by(|(left_id, left_rank), (right_id, right_rank)| {
+        right_rank
+            .cmp(left_rank)
+            .then_with(|| left_id.cmp(right_id))
+    });
+
+    let mut seen_groups = HashSet::new();
+    let mut highlights = Vec::new();
+    for (id, _) in ranked {
+        if seen_groups.insert(highlight_group_key(provider, &id)) {
+            highlights.push(id);
+        }
+        if highlights.len() >= HIGHLIGHT_MODEL_LIMIT {
+            break;
+        }
+    }
+
+    if highlights.is_empty() {
+        normalized
+            .into_iter()
+            .filter(|id| !id.trim().is_empty())
+            .take(HIGHLIGHT_MODEL_LIMIT)
+            .collect()
+    } else {
+        highlights
+    }
 }
 
 /// Builds a [`ModelList`] from the default model identifiers.
@@ -155,6 +195,202 @@ fn normalize_model_ids(ids: impl IntoIterator<Item = String>) -> Vec<String> {
         .collect()
 }
 
+fn highlight_model_rank(provider: Provider, id: &str) -> Option<ModelRank> {
+    let normalized = id
+        .strip_prefix("cursor/")
+        .or_else(|| id.strip_prefix("openai-codex/"))
+        .or_else(|| id.strip_prefix("xai/"))
+        .or_else(|| id.strip_prefix("grok/"))
+        .or_else(|| id.strip_prefix("kiro/"))
+        .unwrap_or(id);
+
+    if is_lightweight_highlight_variant(normalized) {
+        return None;
+    }
+
+    let (major, minor) = strongest_version(normalized)?;
+    let family = match provider {
+        Provider::Codex => {
+            if normalized.starts_with("gpt-") {
+                80
+            } else {
+                return None;
+            }
+        }
+        Provider::Grok => {
+            if normalized.starts_with("grok-") {
+                80
+            } else {
+                return None;
+            }
+        }
+        Provider::Kiro => kiro_family_rank(normalized)?,
+        Provider::Cursor => cursor_family_rank(normalized)?,
+    };
+    let effort = effort_rank(normalized);
+
+    Some(ModelRank {
+        score: highlight_score(provider, major, minor, family, effort),
+        major,
+        minor,
+        family,
+        effort,
+    })
+}
+
+fn strongest_version(id: &str) -> Option<(u16, u16)> {
+    let bytes = id.as_bytes();
+    let mut best = None;
+    let mut index = 0;
+    while index < bytes.len() {
+        if !bytes[index].is_ascii_digit() {
+            index += 1;
+            continue;
+        }
+
+        let start = index;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            index += 1;
+        }
+        let major = id[start..index].parse::<u16>().ok()?;
+        let mut minor = 0;
+        if index < bytes.len()
+            && (bytes[index] == b'.'
+                || (bytes[index] == b'-'
+                    && index + 1 < bytes.len()
+                    && bytes[index + 1].is_ascii_digit()))
+        {
+            let minor_start = index + 1;
+            let mut minor_end = minor_start;
+            while minor_end < bytes.len() && bytes[minor_end].is_ascii_digit() {
+                minor_end += 1;
+            }
+            if minor_end > minor_start {
+                minor = id[minor_start..minor_end].parse::<u16>().ok()?;
+                index = minor_end;
+            }
+        }
+
+        best = Some(best.map_or((major, minor), |current| (major, minor).max(current)));
+    }
+    best
+}
+
+fn is_lightweight_highlight_variant(id: &str) -> bool {
+    id == "auto"
+        || id.contains("-mini")
+        || id.contains("-haiku")
+        || id.contains("-fast")
+        || id.contains("-flash")
+        || id.contains("-nano")
+        || id.contains("-spark")
+}
+
+fn kiro_family_rank(id: &str) -> Option<u16> {
+    if id.starts_with("claude-opus-") || id == "opus" {
+        Some(95)
+    } else if id.starts_with("claude-sonnet-") {
+        Some(85)
+    } else if id.starts_with("qwen") && id.contains("coder") {
+        Some(70)
+    } else if id.starts_with("deepseek-") || id.starts_with("glm-") || id.starts_with("minimax-") {
+        Some(60)
+    } else {
+        None
+    }
+}
+
+fn cursor_family_rank(id: &str) -> Option<u16> {
+    if id.contains("claude") && id.contains("opus") {
+        Some(110)
+    } else if id.starts_with("gpt-") {
+        Some(105)
+    } else if id.contains("claude") && id.contains("sonnet") {
+        Some(95)
+    } else if id.starts_with("sonnet-") {
+        Some(92)
+    } else if id.starts_with("composer-") {
+        Some(85)
+    } else {
+        None
+    }
+}
+
+fn effort_rank(id: &str) -> u16 {
+    let mut rank: u16 = 10;
+    if id.contains("medium") {
+        rank = rank.max(20);
+    }
+    if id.contains("high") {
+        rank = rank.max(40);
+    }
+    if id.contains("xhigh") {
+        rank = rank.max(50);
+    }
+    if id.contains("pro") {
+        rank = rank.max(55);
+    }
+    if id.contains("max") {
+        rank = rank.max(60);
+    }
+    if id.contains("thinking") {
+        rank += 5;
+    }
+    if id.contains("codex") {
+        rank += 3;
+    }
+    rank
+}
+
+fn highlight_score(provider: Provider, major: u16, minor: u16, family: u16, effort: u16) -> u32 {
+    let version_score = u32::from(major) * 100_000 + u32::from(minor) * 1_000;
+    match provider {
+        Provider::Kiro if family >= 85 => {
+            10_000_000 + version_score + u32::from(family) * 10 + u32::from(effort)
+        }
+        Provider::Kiro => u32::from(family) * 1_000 + u32::from(major) * 10 + u32::from(minor),
+        Provider::Cursor => {
+            u32::from(family) * 1_000_000
+                + u32::from(major) * 10_000
+                + u32::from(minor) * 100
+                + u32::from(effort)
+        }
+        Provider::Codex | Provider::Grok => {
+            version_score + u32::from(family) * 10 + u32::from(effort)
+        }
+    }
+}
+
+fn highlight_group_key(provider: Provider, id: &str) -> String {
+    if provider != Provider::Cursor {
+        return id.to_owned();
+    }
+
+    let normalized = id.strip_prefix("cursor/").unwrap_or(id);
+    if normalized.starts_with("gpt-") {
+        "cursor:gpt".to_owned()
+    } else if normalized.contains("claude") && normalized.contains("opus") {
+        "cursor:claude-opus".to_owned()
+    } else if normalized.contains("claude") && normalized.contains("sonnet")
+        || normalized.starts_with("sonnet-")
+    {
+        "cursor:claude-sonnet".to_owned()
+    } else if normalized.starts_with("composer-") {
+        "cursor:composer".to_owned()
+    } else {
+        normalized.to_owned()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ModelRank {
+    score: u32,
+    major: u16,
+    minor: u16,
+    family: u16,
+    effort: u16,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,6 +427,7 @@ mod tests {
         let ids = resolve_model_ids_for_provider(Provider::Kiro);
 
         assert!(ids.iter().any(|id| id == "auto"));
+        assert!(ids.iter().any(|id| id == "claude-opus-4.8"));
         assert!(ids.iter().any(|id| id == "claude-sonnet-4.5"));
         assert!(ids.iter().any(|id| id == "qwen3-coder-next"));
     }
@@ -202,6 +439,89 @@ mod tests {
         assert!(ids.iter().any(|id| id == "cursor/auto"));
         assert!(ids.iter().any(|id| id == "cursor/gpt-5"));
         assert!(ids.iter().any(|id| id == "cursor/sonnet-4"));
+    }
+
+    #[test]
+    fn highlights_codex_models_by_version_and_filters_light_variants() {
+        let ids = resolve_model_ids_for_provider(Provider::Codex);
+
+        assert_eq!(
+            highlight_model_ids_for_provider(Provider::Codex, &ids),
+            vec![
+                "gpt-5.5".to_owned(),
+                "gpt-5.4".to_owned(),
+                "gpt-5.3-codex".to_owned(),
+                "gpt-5.2-codex".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn highlights_kiro_models_by_version_and_family() {
+        let ids = resolve_model_ids_for_provider(Provider::Kiro);
+
+        assert_eq!(
+            highlight_model_ids_for_provider(Provider::Kiro, &ids),
+            vec![
+                "claude-opus-4.8".to_owned(),
+                "claude-opus-4.7".to_owned(),
+                "claude-opus-4.6".to_owned(),
+                "claude-sonnet-4.6".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn highlights_cursor_live_like_models_by_version_family_and_effort() {
+        let ids = [
+            "cursor/auto",
+            "cursor/gpt-5.2",
+            "cursor/gpt-5.3-codex",
+            "cursor/gpt-5.3-codex-high",
+            "cursor/gpt-5.3-codex-xhigh",
+            "cursor/claude-4-opus",
+            "cursor/claude-opus-4-8-thinking-max",
+            "cursor/claude-4.6-sonnet-medium-thinking",
+            "cursor/composer-2.5",
+            "cursor/sonnet-4-thinking",
+        ]
+        .into_iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+
+        assert_eq!(
+            highlight_model_ids_for_provider(Provider::Cursor, &ids),
+            vec![
+                "cursor/claude-opus-4-8-thinking-max".to_owned(),
+                "cursor/gpt-5.3-codex-xhigh".to_owned(),
+                "cursor/claude-4.6-sonnet-medium-thinking".to_owned(),
+                "cursor/composer-2.5".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_decimal_and_dash_separated_model_versions() {
+        assert_eq!(
+            strongest_version("cursor/gpt-5.3-codex-xhigh"),
+            Some((5, 3))
+        );
+        assert_eq!(
+            strongest_version("cursor/claude-opus-4-8-thinking-max"),
+            Some((4, 8))
+        );
+    }
+
+    #[test]
+    fn effort_rank_prefers_max_then_xhigh_then_high() {
+        assert!(
+            effort_rank("claude-opus-4-8-thinking-max")
+                > effort_rank("claude-opus-4-8-thinking-xhigh")
+        );
+        assert!(
+            effort_rank("claude-opus-4-8-thinking-xhigh")
+                > effort_rank("claude-opus-4-8-thinking-high")
+        );
     }
 
     #[test]

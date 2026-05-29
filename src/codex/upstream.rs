@@ -317,7 +317,7 @@ pub fn grok_headers(credentials: &Credentials) -> Result<HeaderMap> {
     Ok(headers)
 }
 
-/// Builds HTTP headers for authenticated Cursor Agent API requests.
+/// Builds HTTP headers for authenticated Cursor API requests.
 ///
 /// Cursor runtime support is not OpenAI-compatible yet, but keeping this
 /// header builder provider-scoped avoids reusing Codex or Grok header shapes

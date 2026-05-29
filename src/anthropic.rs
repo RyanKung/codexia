@@ -448,12 +448,29 @@ fn anthropic_display_name(id: &str) -> String {
 
 fn append_message(messages: &mut Vec<ChatMessage>, message: &Message) -> Result<()> {
     match message.role.as_str() {
+        "system" => {
+            append_system_message(messages, message);
+            Ok(())
+        }
         "user" => {
             append_user_message(messages, message);
             Ok(())
         }
         "assistant" => append_assistant_message(messages, message),
         role => Err(Error::config(format!("unsupported Anthropic role: {role}"))),
+    }
+}
+
+fn append_system_message(messages: &mut Vec<ChatMessage>, message: &Message) {
+    let text = message_content_text(&message.content);
+    if let Some(text) = sanitize_system_text(&text) {
+        messages.push(ChatMessage {
+            role: "system".to_owned(),
+            content: Some(ChatContent::Text(text)),
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        });
     }
 }
 
@@ -553,6 +570,19 @@ fn append_assistant_message(messages: &mut Vec<ChatMessage>, message: &Message) 
         }
     }
     Ok(())
+}
+
+fn message_content_text(content: &MessageContent) -> String {
+    match content {
+        MessageContent::Text(text) => text.clone(),
+        MessageContent::Blocks(blocks) => {
+            let mut text = String::new();
+            for block in blocks {
+                append_block_text(&mut text, block);
+            }
+            text
+        }
+    }
 }
 
 fn tool_call_from_block(block: &ContentBlock) -> Result<ToolCall> {

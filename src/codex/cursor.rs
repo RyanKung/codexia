@@ -10,23 +10,42 @@ use crate::{
         types::ChatCompletionRequest,
     },
 };
-use futures_util::Stream;
+use futures_util::{Stream, StreamExt};
+use prost::Message;
 use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
-    path::{Path, PathBuf},
     pin::Pin,
-    process::Stdio,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::{io::AsyncWriteExt, process::Command, time::timeout};
+use tokio::time::timeout;
 
-const CURSOR_AGENT_ENV: &str = "ROTOM_CURSOR_AGENT";
-const CURSOR_AGENT_WORKSPACE_ENV: &str = "ROTOM_CURSOR_WORKSPACE";
-const CURSOR_AGENT_TIMEOUT: Duration = Duration::from_secs(180);
+const CURSOR_API_BASE_URL: &str = "https://api2.cursor.sh";
+const CURSOR_CLIENT_VERSION: &str = "cli-2026.05.07-42ddaca";
+const CURSOR_API_TIMEOUT: Duration = Duration::from_secs(180);
+const CONNECT_DATA_FLAG_END_STREAM: u8 = 0x02;
+const CURSOR_AGENT_MODE_ASK: i32 = 2;
 
-/// Sends a text-only chat completion through the installed Cursor Agent CLI.
+/// Fetches the authenticated Cursor account's usable `AgentService` models.
+///
+/// # Errors
+///
+/// Returns an error when credentials are invalid, Cursor rejects the request,
+/// or the `AgentService` model registry response cannot be decoded.
+pub async fn list_model_ids(credentials: &Credentials) -> Result<Vec<String>> {
+    let client = CursorApiClient::new(credentials);
+    let models = client.get_usable_models().await?;
+    Ok(cursor_model_ids(&models))
+}
+
+/// Sends a text-only chat completion through Cursor's `AgentService` protocol.
+///
+/// # Errors
+///
+/// Returns an error when the `OpenAI` request cannot be adapted to text-only
+/// ask mode, Cursor rejects the request, or the `AgentService` response cannot
+/// be decoded.
 pub async fn complete_chat(
     request: ChatCompletionRequest,
     credentials: &Credentials,
@@ -35,7 +54,7 @@ pub async fn complete_chat(
     let created = now_unix();
     let model = request.model.clone();
     let body = to_codex_request(&request)?;
-    let output = run_cursor_agent(&body, credentials).await?;
+    let output = run_cursor_api(&body, credentials).await?;
 
     Ok(ChatCompletionResponse {
         id,
@@ -57,6 +76,7 @@ pub async fn complete_chat(
 }
 
 /// Sends a text-only chat completion and adapts the final answer into chunks.
+#[must_use]
 pub fn stream_chat(
     request: ChatCompletionRequest,
     credentials: Credentials,
@@ -68,7 +88,7 @@ pub fn stream_chat(
         yield chunk_with_role(&id, created, &model);
 
         let body = to_codex_request(&request)?;
-        let output = run_cursor_agent(&body, &credentials).await?;
+        let output = run_cursor_api(&body, &credentials).await?;
         if !output.text.is_empty() {
             yield chunk_with_content(&id, created, &model, output.text);
         }
@@ -76,80 +96,47 @@ pub fn stream_chat(
     })
 }
 
-/// Sends a text-only Responses request through the installed Cursor Agent CLI.
+/// Sends a text-only Responses request through Cursor's `AgentService` protocol.
+///
+/// # Errors
+///
+/// Returns an error when the Responses payload cannot be adapted to text-only
+/// ask mode, Cursor rejects the request, or the `AgentService` response cannot
+/// be decoded.
 pub async fn complete_response(body: &Value, credentials: &Credentials) -> Result<Value> {
-    let output = run_cursor_agent(body, credentials).await?;
+    let output = run_cursor_api(body, credentials).await?;
     Ok(response_value(body, &output))
 }
 
 /// Sends a text-only Responses request and adapts the final answer into raw SSE events.
+#[must_use]
 pub fn response_event_stream(
     body: Value,
     credentials: Credentials,
 ) -> Pin<Box<dyn Stream<Item = Result<JsonSseEvent>> + Send>> {
     Box::pin(async_stream::try_stream! {
-        let output = run_cursor_agent(&body, &credentials).await?;
+        let output = run_cursor_api(&body, &credentials).await?;
         for event in response_events(&body, &output) {
             yield event;
         }
     })
 }
 
-async fn run_cursor_agent(body: &Value, credentials: &Credentials) -> Result<CursorAgentOutput> {
-    let request = CursorAgentRequest::from_body(body)?;
-    let executable = cursor_agent_executable();
-    let workspace = cursor_agent_workspace()?;
-    let args = cursor_agent_args(&request, &workspace, "json");
-    crate::logging::trace_json(
-        "upstream.cursor.request",
-        &json!({
-            "executable": executable.display().to_string(),
-            "args": redacted_cursor_agent_args(&args),
-            "prompt_chars": request.prompt.len(),
-        }),
-    );
-
-    let mut command = Command::new(&executable);
-    command
-        .args(&args)
-        .env("CURSOR_AUTH_TOKEN", &credentials.access_token)
-        .env("NO_OPEN_BROWSER", "1")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-
-    let mut child = command.spawn()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        match write_cursor_agent_prompt(&mut stdin, &request.prompt).await {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-
-    let output = timeout(CURSOR_AGENT_TIMEOUT, child.wait_with_output())
+async fn run_cursor_api(body: &Value, credentials: &Credentials) -> Result<CursorOutput> {
+    let request = CursorRequest::from_body(body)?;
+    let client = CursorApiClient::new(credentials);
+    timeout(CURSOR_API_TIMEOUT, client.run_prompt(&request))
         .await
-        .map_err(|_| Error::upstream("Cursor Agent timed out"))??;
-    parse_cursor_agent_output(output.status, &output.stdout, &output.stderr)
-}
-
-async fn write_cursor_agent_prompt(
-    stdin: &mut tokio::process::ChildStdin,
-    prompt: &str,
-) -> std::io::Result<()> {
-    stdin.write_all(prompt.as_bytes()).await?;
-    stdin.write_all(b"\n").await?;
-    stdin.shutdown().await
+        .map_err(|_| Error::upstream("Cursor provider timed out"))?
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct CursorAgentRequest {
+struct CursorRequest {
     model: String,
     prompt: String,
 }
 
-impl CursorAgentRequest {
+impl CursorRequest {
     fn from_body(body: &Value) -> Result<Self> {
         reject_client_tools(body)?;
         let model = body
@@ -190,414 +177,690 @@ impl CursorAgentRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct CursorAgentOutput {
+struct CursorOutput {
     text: String,
     usage: Option<Usage>,
     request_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct CursorAgentJsonLine {
-    #[serde(rename = "type")]
-    kind: Option<String>,
-    subtype: Option<String>,
-    #[serde(default)]
-    is_error: bool,
-    result: Option<String>,
-    usage: Option<CursorAgentUsage>,
-    request_id: Option<String>,
+#[derive(Clone)]
+struct CursorApiClient {
+    http: reqwest::Client,
+    access_token: String,
+    base_url: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct CursorAgentUsage {
-    #[serde(default, rename = "inputTokens", alias = "input_tokens")]
-    input: u32,
-    #[serde(default, rename = "outputTokens", alias = "output_tokens")]
-    output: u32,
-    #[serde(default, rename = "cacheReadTokens", alias = "cache_read_tokens")]
-    cache_read: u32,
-    #[serde(default, rename = "cacheWriteTokens", alias = "cache_write_tokens")]
-    cache_write: u32,
-}
-
-impl CursorAgentUsage {
-    const fn into_openai_usage(self) -> Usage {
-        let prompt_tokens = self
-            .input
-            .saturating_add(self.cache_read)
-            .saturating_add(self.cache_write);
-        Usage {
-            prompt_tokens,
-            completion_tokens: self.output,
-            total_tokens: prompt_tokens.saturating_add(self.output),
+impl CursorApiClient {
+    fn new(credentials: &Credentials) -> Self {
+        let base_url = std::env::var("ROTOM_CURSOR_BASE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| CURSOR_API_BASE_URL.to_owned());
+        Self {
+            http: reqwest::Client::new(),
+            access_token: credentials.access_token.clone(),
+            base_url: base_url.trim_end_matches('/').to_owned(),
         }
+    }
+
+    async fn run_prompt(&self, request: &CursorRequest) -> Result<CursorOutput> {
+        let models = self.get_usable_models().await?;
+        let model = select_cursor_model(&request.model, &models)?;
+        let request_id = cursor_uuid();
+        let conversation_id = cursor_uuid();
+        let message_id = cursor_uuid();
+        let run_request =
+            build_agent_client_message(request, &model, &conversation_id, &message_id);
+
+        crate::logging::trace_json(
+            "upstream.cursor.request",
+            &json!({
+                "endpoint": "AgentService/Run",
+                "request_id": request_id,
+                "conversation_id": conversation_id,
+                "model": model.model_id,
+                "prompt_chars": request.prompt.len(),
+            }),
+        );
+
+        let response = self.post_run(&request_id, run_request).await?;
+        collect_cursor_output(response, request_id).await
+    }
+
+    async fn get_usable_models(&self) -> Result<Vec<CursorModel>> {
+        let response = self
+            .post_json(
+                "agent.v1.AgentService/GetUsableModels",
+                None,
+                &json!({ "customModelIds": [] }),
+            )
+            .await?;
+        let value = response.json::<CursorModelsResponse>().await?;
+        Ok(value.models)
+    }
+
+    async fn post_run(
+        &self,
+        request_id: &str,
+        run_request: AgentClientMessage,
+    ) -> Result<reqwest::Response> {
+        let encoded_request = run_request.encode_to_vec();
+        let initial_frame = connect_proto_envelope(&encoded_request);
+        let response = self
+            .http
+            .post(self.url("agent.v1.AgentService/Run"))
+            .version(reqwest::Version::HTTP_2)
+            .headers(self.headers(Some(request_id), CursorPayloadFormat::Proto)?)
+            .body(initial_frame)
+            .send()
+            .await?;
+        if response.status().is_success() {
+            Ok(response)
+        } else {
+            Err(cursor_response_error("Run", response).await)
+        }
+    }
+
+    async fn post_json(
+        &self,
+        path: &str,
+        request_id: Option<&str>,
+        body: &Value,
+    ) -> Result<reqwest::Response> {
+        let response = self
+            .http
+            .post(self.url(path))
+            .headers(self.headers(request_id, CursorPayloadFormat::Json)?)
+            .json(body)
+            .send()
+            .await?;
+        if response.status().is_success() {
+            Ok(response)
+        } else {
+            Err(cursor_response_error(path, response).await)
+        }
+    }
+
+    fn headers(
+        &self,
+        request_id: Option<&str>,
+        payload_format: CursorPayloadFormat,
+    ) -> Result<reqwest::header::HeaderMap> {
+        let mut headers = reqwest::header::HeaderMap::new();
+        let generated_request_id;
+        let request_id = if let Some(request_id) = request_id {
+            request_id
+        } else {
+            generated_request_id = cursor_uuid();
+            &generated_request_id
+        };
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            header_value(&format!("Bearer {}", self.access_token))?,
+        );
+        headers.insert(
+            "connect-protocol-version",
+            reqwest::header::HeaderValue::from_static("1"),
+        );
+        headers.insert(
+            "x-ghost-mode",
+            reqwest::header::HeaderValue::from_static("true"),
+        );
+        headers.insert(
+            "x-cursor-client-type",
+            reqwest::header::HeaderValue::from_static("cli"),
+        );
+        headers.insert(
+            "x-cursor-client-version",
+            header_value(&cursor_client_version())?,
+        );
+        headers.insert("x-request-id", header_value(request_id)?);
+        headers.insert("x-original-request-id", header_value(request_id)?);
+        match payload_format {
+            CursorPayloadFormat::Json => {}
+            CursorPayloadFormat::Proto => {
+                headers.insert(
+                    reqwest::header::CONTENT_TYPE,
+                    reqwest::header::HeaderValue::from_static("application/connect+proto"),
+                );
+                headers.insert(
+                    reqwest::header::ACCEPT,
+                    reqwest::header::HeaderValue::from_static("application/connect+proto"),
+                );
+            }
+        }
+        Ok(headers)
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}/{path}", self.base_url)
     }
 }
 
-fn reject_client_tools(body: &Value) -> Result<()> {
-    let has_tools = body
-        .get("tools")
-        .and_then(Value::as_array)
-        .is_some_and(|tools| !tools.is_empty());
-    let tool_choice_none = body
-        .get("tool_choice")
-        .and_then(Value::as_str)
-        .is_some_and(|value| value == "none");
+#[derive(Clone, Copy)]
+enum CursorPayloadFormat {
+    Json,
+    Proto,
+}
 
-    if has_tools && !tool_choice_none {
-        return Err(Error::upstream_with_status(
-            StatusCode::NOT_IMPLEMENTED,
-            "Cursor Agent runtime does not support OpenAI-compatible client-supplied tools",
+fn header_value(value: &str) -> Result<reqwest::header::HeaderValue> {
+    reqwest::header::HeaderValue::from_str(value)
+        .map_err(|error| Error::config(format!("invalid Cursor header value: {error}")))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CursorModelsResponse {
+    #[serde(default)]
+    models: Vec<CursorModel>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CursorModel {
+    model_id: String,
+    #[serde(default)]
+    display_model_id: String,
+    #[serde(default)]
+    display_name: String,
+    #[serde(default)]
+    display_name_short: String,
+    #[serde(default)]
+    aliases: Vec<String>,
+    max_mode: Option<bool>,
+}
+
+impl CursorModel {
+    fn matches(&self, requested: &str) -> bool {
+        self.model_id == requested
+            || self.display_model_id == requested
+            || self.aliases.iter().any(|alias| alias == requested)
+    }
+}
+
+fn select_cursor_model(requested_model: &str, models: &[CursorModel]) -> Result<CursorModel> {
+    let requested = cursor_model_name(requested_model);
+    let is_auto = requested.is_empty() || requested == "auto";
+    let canonical = match requested.as_str() {
+        "" | "auto" => "default",
+        "gpt-5" => "gpt",
+        "sonnet-4" => "claude-4-sonnet",
+        "sonnet-4-thinking" => "claude-4-sonnet-thinking",
+        other => other,
+    };
+    let selected = models
+        .iter()
+        .find(|model| model.matches(canonical))
+        .or_else(|| {
+            is_auto
+                .then(|| models.iter().find(|model| model.model_id == "default"))
+                .flatten()
+        })
+        .cloned();
+    selected.ok_or_else(|| {
+        Error::upstream_with_status(
+            StatusCode::BAD_REQUEST,
+            format!("Cursor provider does not support model `{requested_model}`"),
+        )
+    })
+}
+
+fn cursor_model_name(model: &str) -> String {
+    model
+        .strip_prefix("cursor/")
+        .unwrap_or(model)
+        .trim()
+        .to_owned()
+}
+
+fn cursor_model_ids(models: &[CursorModel]) -> Vec<String> {
+    let mut ids = Vec::new();
+    push_cursor_model_id(&mut ids, "auto");
+    for model in models {
+        if model.model_id == "default" {
+            continue;
+        }
+        push_cursor_model_id(&mut ids, &model.model_id);
+    }
+    for alias in ["gpt-5", "sonnet-4", "sonnet-4-thinking"] {
+        push_cursor_model_id(&mut ids, alias);
+    }
+    ids
+}
+
+fn push_cursor_model_id(ids: &mut Vec<String>, id: &str) {
+    let normalized = id.trim();
+    if normalized.is_empty() {
+        return;
+    }
+    let prefixed = if normalized.starts_with("cursor/") {
+        normalized.to_owned()
+    } else {
+        format!("cursor/{normalized}")
+    };
+    if !ids.contains(&prefixed) {
+        ids.push(prefixed);
+    }
+}
+
+fn cursor_client_version() -> String {
+    std::env::var("ROTOM_CURSOR_CLIENT_VERSION")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| CURSOR_CLIENT_VERSION.to_owned())
+}
+
+fn cursor_time_zone() -> String {
+    std::env::var("TZ")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "UTC".to_owned())
+}
+
+fn build_agent_client_message(
+    request: &CursorRequest,
+    model: &CursorModel,
+    conversation_id: &str,
+    message_id: &str,
+) -> AgentClientMessage {
+    let model_details = ModelDetails {
+        model_id: model.model_id.clone(),
+        display_model_id: non_empty_or(model.display_model_id.clone(), model.model_id.clone()),
+        display_name: non_empty_or(model.display_name.clone(), model.model_id.clone()),
+        display_name_short: non_empty_or(model.display_name_short.clone(), model.model_id.clone()),
+        aliases: model.aliases.clone(),
+        max_mode: model.max_mode,
+    };
+    let requested_model = RequestedModel {
+        model_id: model.model_id.clone(),
+        max_mode: model.max_mode.unwrap_or(false),
+        built_in_model: true,
+        is_variant_string_representation: false,
+    };
+    AgentClientMessage {
+        run_request: Some(AgentRunRequest {
+            conversation_state: Some(ConversationStateStructure {
+                mode: Some(CURSOR_AGENT_MODE_ASK),
+                conversation_started_timestamp_ms: Some(now_unix_millis()),
+                conversation_started_time_zone: Some(cursor_time_zone()),
+            }),
+            action: Some(ConversationAction {
+                user_message_action: Some(UserMessageAction {
+                    user_message: Some(UserMessage {
+                        text: request.prompt.clone(),
+                        message_id: message_id.to_owned(),
+                        selected_context: Some(SelectedContext {}),
+                        mode: CURSOR_AGENT_MODE_ASK,
+                        conversation_state_blob_id: Vec::new(),
+                    }),
+                    request_context: Some(minimal_request_context()),
+                }),
+            }),
+            model_details: Some(model_details),
+            requested_model: Some(requested_model),
+            mcp_tools: Some(McpTools {}),
+            conversation_id: Some(conversation_id.to_owned()),
+            exclude_workspace_context: None,
+            conversation_group_id: Some(conversation_id.to_owned()),
+            client_supports_inline_images: Some(false),
+        }),
+        client_heartbeat: None,
+    }
+}
+
+fn non_empty_or(value: String, fallback: String) -> String {
+    if value.is_empty() { fallback } else { value }
+}
+
+fn now_unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn connect_proto_envelope(payload: &[u8]) -> Vec<u8> {
+    let len = u32::try_from(payload.len()).unwrap_or(u32::MAX);
+    let mut output = Vec::with_capacity(payload.len() + 5);
+    output.push(0);
+    output.extend_from_slice(&len.to_be_bytes());
+    output.extend_from_slice(payload);
+    output
+}
+
+async fn collect_cursor_output(
+    response: reqwest::Response,
+    request_id: String,
+) -> Result<CursorOutput> {
+    let mut stream = response.bytes_stream();
+    let mut decoder = ConnectFrameDecoder::default();
+    let mut text = String::new();
+    let mut usage = None;
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        for frame in decoder.push(&chunk)? {
+            match frame {
+                ConnectFrame::Data(payload) => {
+                    let message =
+                        AgentServerMessage::decode(payload.as_slice()).map_err(|error| {
+                            Error::upstream(format!(
+                                "Cursor provider returned an invalid AgentServerMessage: {error}"
+                            ))
+                        })?;
+                    tracing::debug!(
+                        event = "upstream.cursor.frame",
+                        kind = cursor_frame_kind(&message),
+                        exec_kind = cursor_exec_kind(&message).unwrap_or("")
+                    );
+                    crate::logging::trace_json(
+                        "upstream.cursor.frame",
+                        &json!({ "kind": cursor_frame_kind(&message) }),
+                    );
+                    if cursor_frame_requires_interaction(&message) {
+                        return Err(Error::upstream_with_status(
+                            StatusCode::NOT_IMPLEMENTED,
+                            "Cursor provider requested an interactive tool response, which rotom does not support",
+                        ));
+                    }
+                    // Cursor keeps some Run streams open for follow-up heartbeats after
+                    // the ask-mode answer has been emitted.
+                    if !text.trim().is_empty() && cursor_frame_kind(&message) == "heartbeat" {
+                        return cursor_output_from_text(text, request_id, usage);
+                    }
+                    if let Some(delta) = cursor_text_delta(&message) {
+                        text.push_str(delta);
+                    }
+                    if let Some(turn_usage) = cursor_turn_usage(&message) {
+                        usage = Some(turn_usage);
+                        if !text.trim().is_empty() {
+                            return cursor_output_from_text(text, request_id, usage);
+                        }
+                    }
+                }
+                ConnectFrame::End => {
+                    return cursor_output_from_text(text, request_id, usage);
+                }
+            }
+        }
+    }
+    decoder.finish()?;
+    cursor_output_from_text(text, request_id, usage)
+}
+
+fn cursor_output_from_text(
+    text: String,
+    request_id: String,
+    usage: Option<Usage>,
+) -> Result<CursorOutput> {
+    if text.trim().is_empty() {
+        return Err(Error::upstream(
+            "Cursor provider completed without a text response",
         ));
     }
-
-    Ok(())
+    Ok(CursorOutput {
+        text,
+        usage,
+        request_id: Some(request_id),
+    })
 }
 
-fn input_item_prompt_section(item: &Value) -> Result<Option<String>> {
-    match item.get("type").and_then(Value::as_str) {
-        Some("message") | None => message_prompt_section(item),
-        Some("function_call") => Ok(Some(format!(
-            "Assistant tool call:\n{}({})",
-            item.get("name").and_then(Value::as_str).unwrap_or("tool"),
-            item.get("arguments")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-        ))),
-        Some("function_call_output") => Ok(Some(format!(
-            "Tool result{}:\n{}",
-            item.get("call_id")
-                .and_then(Value::as_str)
-                .map(|id| format!(" {id}"))
-                .unwrap_or_default(),
-            item.get("output")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-        ))),
-        Some("reasoning" | "compaction") => Ok(None),
-        Some(kind) => Err(Error::upstream_with_status(
-            StatusCode::NOT_IMPLEMENTED,
-            format!("Cursor Agent runtime does not support Responses input item type `{kind}`"),
-        )),
-    }
+#[derive(Default)]
+struct ConnectFrameDecoder {
+    buffer: Vec<u8>,
 }
 
-fn message_prompt_section(item: &Value) -> Result<Option<String>> {
-    let role = item
-        .get("role")
-        .and_then(Value::as_str)
-        .unwrap_or("user")
-        .to_ascii_titlecase();
-    let text = input_content_text(item.get("content"))?;
-    Ok((!text.is_empty()).then(|| format!("{role}:\n{text}")))
-}
-
-fn input_content_text(content: Option<&Value>) -> Result<String> {
-    match content {
-        Some(Value::String(text)) => Ok(text.clone()),
-        Some(Value::Array(parts)) => parts
-            .iter()
-            .map(input_content_part_text)
-            .collect::<Result<Vec<_>>>()
-            .map(|parts| {
-                parts
-                    .into_iter()
-                    .filter(|part| !part.is_empty())
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            }),
-        Some(Value::Null) | None => Ok(String::new()),
-        Some(other) => Ok(other.to_string()),
-    }
-}
-
-fn input_content_part_text(part: &Value) -> Result<String> {
-    match part.get("type").and_then(Value::as_str) {
-        Some("input_text" | "output_text" | "text") | None => Ok(part
-            .get("text")
-            .or_else(|| part.get("content"))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned()),
-        Some("input_image" | "image_url" | "input_file") => Err(Error::upstream_with_status(
-            StatusCode::NOT_IMPLEMENTED,
-            "Cursor Agent runtime does not support multimodal inputs through rotom",
-        )),
-        Some(kind) => Err(Error::upstream_with_status(
-            StatusCode::NOT_IMPLEMENTED,
-            format!("Cursor Agent runtime does not support content part type `{kind}`"),
-        )),
-    }
-}
-
-fn parse_cursor_agent_output(
-    status: std::process::ExitStatus,
-    stdout: &[u8],
-    stderr: &[u8],
-) -> Result<CursorAgentOutput> {
-    let stdout = String::from_utf8_lossy(stdout);
-    let stderr = String::from_utf8_lossy(stderr);
-    let mut result = None;
-
-    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
-        let Ok(value) = serde_json::from_str::<CursorAgentJsonLine>(line) else {
-            continue;
-        };
-        if value.kind.as_deref() == Some("result") {
-            if value.is_error || value.subtype.as_deref() == Some("error") {
-                return Err(cursor_agent_error(
-                    value
-                        .result
-                        .as_deref()
-                        .unwrap_or("Cursor Agent returned an error"),
-                ));
+impl ConnectFrameDecoder {
+    fn push(&mut self, chunk: &[u8]) -> Result<Vec<ConnectFrame>> {
+        self.buffer.extend_from_slice(chunk);
+        let mut frames = Vec::new();
+        loop {
+            if self.buffer.len() < 5 {
+                break;
             }
-            result = Some(CursorAgentOutput {
-                text: value.result.unwrap_or_default(),
-                usage: value.usage.map(CursorAgentUsage::into_openai_usage),
-                request_id: value.request_id,
-            });
+            let flags = self.buffer[0];
+            let len = u32::from_be_bytes([
+                self.buffer[1],
+                self.buffer[2],
+                self.buffer[3],
+                self.buffer[4],
+            ]) as usize;
+            if self.buffer.len() < len + 5 {
+                break;
+            }
+            let payload = self.buffer[5..len + 5].to_vec();
+            self.buffer.drain(..len + 5);
+            if flags & CONNECT_DATA_FLAG_END_STREAM != 0 {
+                if !payload.is_empty() {
+                    return Err(cursor_connect_error(&payload));
+                }
+                frames.push(ConnectFrame::End);
+            } else {
+                frames.push(ConnectFrame::Data(payload));
+            }
+        }
+        Ok(frames)
+    }
+
+    fn finish(&self) -> Result<()> {
+        if self.buffer.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::upstream(
+                "Cursor provider ended with a truncated Connect frame",
+            ))
         }
     }
-
-    if let Some(result) = result {
-        return Ok(result);
-    }
-
-    let message = [stdout.trim(), stderr.trim()]
-        .into_iter()
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
-    if !message.is_empty() || !status.success() {
-        return Err(cursor_agent_error(&message));
-    }
-
-    Err(Error::upstream(
-        "Cursor Agent completed without a result payload",
-    ))
 }
 
-fn cursor_agent_error(message: &str) -> Error {
-    let message = if message.trim().is_empty() {
-        "Cursor Agent failed without an error message"
-    } else {
-        message.trim()
+enum ConnectFrame {
+    Data(Vec<u8>),
+    End,
+}
+
+fn cursor_text_delta(message: &AgentServerMessage) -> Option<&str> {
+    message
+        .interaction_update
+        .as_ref()
+        .and_then(|update| update.text_delta.as_ref())
+        .map(|delta| delta.text.as_str())
+        .filter(|text| !text.is_empty())
+}
+
+fn cursor_turn_usage(message: &AgentServerMessage) -> Option<Usage> {
+    let turn = message
+        .interaction_update
+        .as_ref()
+        .and_then(|update| update.turn_ended.as_ref())?;
+    let prompt_tokens = u32::try_from(turn.input_tokens.unwrap_or_default()).unwrap_or_default();
+    let completion_tokens =
+        u32::try_from(turn.output_tokens.unwrap_or_default()).unwrap_or_default();
+    let total_tokens = prompt_tokens.saturating_add(completion_tokens);
+    (total_tokens > 0).then_some(Usage {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+    })
+}
+
+const fn cursor_frame_requires_interaction(message: &AgentServerMessage) -> bool {
+    if message.interaction_query.is_some() {
+        return true;
+    }
+    let Some(update) = message.interaction_update.as_ref() else {
+        return false;
     };
-    let lowercase_message = message.to_ascii_lowercase();
-    let status = if lowercase_message.contains("authentication required")
-        || lowercase_message.contains("cursor_auth_token")
-        || lowercase_message.contains("invalid auth")
-        || lowercase_message.contains("authentication is invalid")
-        || lowercase_message.contains("please log in")
-        || lowercase_message.contains("not logged in")
+    update.partial_tool_call.is_some()
+        || update.tool_call_started.is_some()
+        || update.tool_call_completed.is_some()
+        || update.tool_call_delta.is_some()
+        || update.shell_output_delta.is_some()
+}
+
+const fn cursor_frame_kind(message: &AgentServerMessage) -> &'static str {
+    if let Some(update) = message.interaction_update.as_ref() {
+        if update.text_delta.is_some() {
+            return "text_delta";
+        }
+        if update.thinking_delta.is_some() {
+            return "thinking_delta";
+        }
+        if update.user_message_appended.is_some() {
+            return "user_message_appended";
+        }
+        if update.token_delta.is_some() {
+            return "token_delta";
+        }
+        if update.summary.is_some() {
+            return "summary";
+        }
+        if update.summary_started.is_some() {
+            return "summary_started";
+        }
+        if update.summary_completed.is_some() {
+            return "summary_completed";
+        }
+        if update.shell_output_delta.is_some() {
+            return "shell_output_delta";
+        }
+        if update.heartbeat.is_some() {
+            return "heartbeat";
+        }
+        if update.turn_ended.is_some() {
+            return "turn_ended";
+        }
+        if update.step_started.is_some() {
+            return "step_started";
+        }
+        if update.step_completed.is_some() {
+            return "step_completed";
+        }
+        if update.prompt_suggestion.is_some() {
+            return "prompt_suggestion";
+        }
+        if update.post_request_prompt.is_some() {
+            return "post_request_prompt";
+        }
+        if update.active_branch_change.is_some() {
+            return "active_branch_change";
+        }
+        if update.feedback_request.is_some() {
+            return "feedback_request";
+        }
+        if update.partial_tool_call.is_some()
+            || update.tool_call_started.is_some()
+            || update.tool_call_completed.is_some()
+            || update.tool_call_delta.is_some()
+        {
+            return "tool_update";
+        }
+        return "interaction_update";
+    }
+    if message.interaction_query.is_some() {
+        return "interaction_query";
+    }
+    if message.conversation_checkpoint_update.is_some() {
+        return "conversation_checkpoint_update";
+    }
+    if message.exec_server_message.is_some() {
+        return "exec_server_message";
+    }
+    if message.exec_server_control_message.is_some() {
+        return "exec_server_control_message";
+    }
+    if message.kv_server_message.is_some() {
+        return "kv_server_message";
+    }
+    "other"
+}
+
+fn cursor_exec_kind(message: &AgentServerMessage) -> Option<&'static str> {
+    let exec = message.exec_server_message.as_ref()?;
+    if exec.request_context_args.is_some() {
+        return Some("request_context_args");
+    }
+    if exec.shell_args.is_some() {
+        return Some("shell_args");
+    }
+    if exec.shell_stream_args.is_some() {
+        return Some("shell_stream_args");
+    }
+    if exec.read_args.is_some() || exec.redacted_read_args.is_some() {
+        return Some("read_args");
+    }
+    if exec.ls_args.is_some() {
+        return Some("ls_args");
+    }
+    if exec.grep_args.is_some() {
+        return Some("grep_args");
+    }
+    if exec.fetch_args.is_some() {
+        return Some("fetch_args");
+    }
+    if exec.mcp_args.is_some()
+        || exec.list_mcp_resources_exec_args.is_some()
+        || exec.read_mcp_resource_exec_args.is_some()
+        || exec.mcp_state_exec_args.is_some()
     {
+        return Some("mcp_args");
+    }
+    if exec.execute_hook_args.is_some() {
+        return Some("execute_hook_args");
+    }
+    if exec.subagent_args.is_some()
+        || exec.force_background_subagent_args.is_some()
+        || exec.subagent_await_args.is_some()
+    {
+        return Some("subagent_args");
+    }
+    Some("other")
+}
+
+fn cursor_connect_error(payload: &[u8]) -> Error {
+    let value = serde_json::from_slice::<Value>(payload).unwrap_or(Value::Null);
+    let message = value
+        .pointer("/error/message")
+        .or_else(|| value.get("message"))
+        .and_then(Value::as_str)
+        .unwrap_or("Cursor provider returned a Connect stream error");
+    Error::upstream(message)
+}
+
+async fn cursor_response_error(operation: &str, response: reqwest::Response) -> Error {
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    let downstream_status = if status == StatusCode::UNAUTHORIZED {
         StatusCode::UNAUTHORIZED
+    } else if status.is_client_error() {
+        status
     } else {
         StatusCode::BAD_GATEWAY
     };
-    Error::upstream_with_status(status, format!("Cursor Agent failed: {message}"))
+    Error::upstream_with_status(
+        downstream_status,
+        format!("Cursor {operation} failed with status {status}: {text}"),
+    )
 }
 
-fn response_value(body: &Value, output: &CursorAgentOutput) -> Value {
-    let id = response_id(output);
-    let created_at = now_unix();
-    let model = body
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or("cursor/auto");
-    let message_id = format!("msg_{id}");
-    let usage = output.usage.as_ref().map(usage_value);
-    json!({
-        "id": id,
-        "object": "response",
-        "created_at": created_at,
-        "status": "completed",
-        "model": model,
-        "output": [{
-            "id": message_id,
-            "type": "message",
-            "role": "assistant",
-            "status": "completed",
-            "content": [{
-                "type": "output_text",
-                "text": output.text,
-                "annotations": []
-            }]
-        }],
-        "usage": usage,
-    })
-}
-
-fn response_events(body: &Value, output: &CursorAgentOutput) -> Vec<JsonSseEvent> {
-    let response = response_value(body, output);
-    let response_id = response
-        .get("id")
-        .and_then(Value::as_str)
-        .unwrap_or("resp_cursor");
-    let item = response
-        .get("output")
-        .and_then(Value::as_array)
-        .and_then(|items| items.first())
-        .cloned()
-        .unwrap_or_else(|| json!({"id": format!("msg_{response_id}"), "type": "message"}));
-    let item_id = item
-        .get("id")
-        .and_then(Value::as_str)
-        .unwrap_or("msg_cursor");
-
-    vec![
-        named_event(
-            "response.created",
-            json!({
-                "type": "response.created",
-                "response": {
-                    "id": response_id,
-                    "object": "response",
-                    "created_at": response.get("created_at").cloned().unwrap_or_else(|| json!(now_unix())),
-                    "status": "in_progress",
-                    "model": response.get("model").cloned().unwrap_or_else(|| json!("cursor/auto")),
-                    "output": []
-                }
-            }),
-        ),
-        named_event(
-            "response.output_item.added",
-            json!({
-                "type": "response.output_item.added",
-                "output_index": 0,
-                "item": {
-                    "id": item_id,
-                    "type": "message",
-                    "role": "assistant",
-                    "status": "in_progress",
-                    "content": []
-                }
-            }),
-        ),
-        named_event(
-            "response.output_text.delta",
-            json!({
-                "type": "response.output_text.delta",
-                "output_index": 0,
-                "item_id": item_id,
-                "content_index": 0,
-                "delta": output.text,
-            }),
-        ),
-        named_event(
-            "response.output_text.done",
-            json!({
-                "type": "response.output_text.done",
-                "output_index": 0,
-                "item_id": item_id,
-                "content_index": 0,
-                "text": output.text,
-            }),
-        ),
-        named_event(
-            "response.output_item.done",
-            json!({
-                "type": "response.output_item.done",
-                "output_index": 0,
-                "item": item,
-            }),
-        ),
-        named_event(
-            "response.completed",
-            json!({
-                "type": "response.completed",
-                "response": response,
-            }),
-        ),
-    ]
-}
-
-fn named_event(event: &str, value: Value) -> JsonSseEvent {
-    JsonSseEvent {
-        event: Some(event.to_owned()),
-        value,
-    }
-}
-
-fn response_id(output: &CursorAgentOutput) -> String {
-    output
-        .request_id
-        .as_ref()
-        .filter(|id| !id.is_empty())
-        .map_or_else(
-            || format!("resp_cursor_{}_{:08x}", now_unix(), rand::random::<u32>()),
-            |id| format!("resp_cursor_{id}"),
-        )
-}
-
-fn usage_value(usage: &Usage) -> Value {
-    json!({
-        "input_tokens": usage.prompt_tokens,
-        "output_tokens": usage.completion_tokens,
-        "total_tokens": usage.total_tokens,
-    })
-}
-
-fn cursor_agent_args(
-    request: &CursorAgentRequest,
-    workspace: &Path,
-    output_format: &str,
-) -> Vec<String> {
-    let mut args = vec![
-        "--print".to_owned(),
-        "--output-format".to_owned(),
-        output_format.to_owned(),
-        "--mode".to_owned(),
-        "ask".to_owned(),
-        "--sandbox".to_owned(),
-        "enabled".to_owned(),
-        "--trust".to_owned(),
-        "--workspace".to_owned(),
-        workspace.display().to_string(),
-    ];
-    if let Some(model) = cursor_agent_model_arg(&request.model) {
-        args.push("--model".to_owned());
-        args.push(model);
-    }
-    args
-}
-
-fn redacted_cursor_agent_args(args: &[String]) -> Vec<String> {
-    args.to_vec()
-}
-
-fn cursor_agent_model_arg(model: &str) -> Option<String> {
-    let model = model.strip_prefix("cursor/").unwrap_or(model).trim();
-    (!model.is_empty() && model != "auto").then(|| model.to_owned())
-}
-
-fn cursor_agent_executable() -> PathBuf {
-    if let Some(path) = std::env::var_os(CURSOR_AGENT_ENV).filter(|value| !value.is_empty()) {
-        return PathBuf::from(path);
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        let candidate = PathBuf::from(home).join(".local/bin/cursor-agent");
-        if candidate.exists() {
-            return candidate;
-        }
-    }
-    PathBuf::from("cursor-agent")
-}
-
-fn cursor_agent_workspace() -> Result<PathBuf> {
-    let workspace = std::env::var_os(CURSOR_AGENT_WORKSPACE_ENV)
-        .filter(|value| !value.is_empty())
-        .map_or_else(
-            || std::env::temp_dir().join("rotom-cursor-agent-workspace"),
-            PathBuf::from,
-        );
-    std::fs::create_dir_all(&workspace)?;
-    Ok(workspace)
-}
+include!("cursor_adapters.rs");
 
 fn chat_completion_id() -> String {
     format!("chatcmpl-{}-{:08x}", now_unix(), rand::random::<u32>())
+}
+
+fn cursor_uuid() -> String {
+    let high = rand::random::<u64>();
+    let low = rand::random::<u64>();
+    format!(
+        "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+        (high >> 32) as u32,
+        ((high >> 16) & 0xffff) as u16,
+        (high & 0xffff) as u16,
+        (low >> 48) as u16,
+        low & 0x0000_ffff_ffff_ffff
+    )
 }
 
 trait TitleCase {
@@ -614,151 +877,9 @@ impl TitleCase for str {
     }
 }
 
+include!("cursor_proto.rs");
+
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-    #[cfg(unix)]
-    use std::os::unix::process::ExitStatusExt;
-
-    #[test]
-    fn builds_text_prompt_from_responses_body() {
-        let body = json!({
-            "model": "cursor/sonnet-4",
-            "instructions": "Be concise.",
-            "input": [
-                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Hello"}]},
-                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Hi"}]},
-                {"type": "function_call_output", "call_id": "call_1", "output": "42"}
-            ]
-        });
-
-        let request = CursorAgentRequest::from_body(&body).unwrap();
-
-        assert_eq!(request.model, "cursor/sonnet-4");
-        assert_eq!(
-            request.prompt,
-            "System:\nBe concise.\n\nUser:\nHello\n\nAssistant:\nHi\n\nTool result call_1:\n42"
-        );
-    }
-
-    #[test]
-    fn rejects_cursor_tools_without_none_choice() {
-        let body = json!({
-            "model": "cursor/auto",
-            "input": [{"type": "message", "role": "user", "content": "Hello"}],
-            "tool_choice": "auto",
-            "tools": [{"type": "function", "name": "lookup"}]
-        });
-
-        let error = CursorAgentRequest::from_body(&body).unwrap_err();
-
-        assert!(error.to_string().contains("client-supplied tools"));
-    }
-
-    #[test]
-    fn allows_tools_when_tool_choice_is_none() {
-        let body = json!({
-            "model": "cursor/auto",
-            "input": [{"type": "message", "role": "user", "content": "Hello"}],
-            "tool_choice": "none",
-            "tools": [{"type": "function", "name": "lookup"}]
-        });
-
-        let request = CursorAgentRequest::from_body(&body).unwrap();
-
-        assert_eq!(request.prompt, "User:\nHello");
-    }
-
-    #[test]
-    fn rejects_multimodal_cursor_content() {
-        let body = json!({
-            "model": "cursor/auto",
-            "input": [{
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "input_image", "image_url": "data:image/png;base64,AA=="}]
-            }]
-        });
-
-        let error = CursorAgentRequest::from_body(&body).unwrap_err();
-
-        assert!(error.to_string().contains("multimodal inputs"));
-    }
-
-    #[test]
-    fn builds_cursor_agent_args_without_auto_model() {
-        let request = CursorAgentRequest {
-            model: "cursor/auto".to_owned(),
-            prompt: "Hello".to_owned(),
-        };
-        let args = cursor_agent_args(&request, Path::new("/tmp/rotom-cursor"), "json");
-
-        assert!(!args.iter().any(|arg| arg == "--model"));
-        assert!(!args.iter().any(|arg| arg == "Hello"));
-    }
-
-    #[test]
-    fn builds_cursor_agent_args_with_stripped_model() {
-        let request = CursorAgentRequest {
-            model: "cursor/sonnet-4".to_owned(),
-            prompt: "Hello".to_owned(),
-        };
-        let args = cursor_agent_args(&request, Path::new("/tmp/rotom-cursor"), "json");
-        let model_index = args.iter().position(|arg| arg == "--model").unwrap();
-
-        assert_eq!(
-            args.get(model_index + 1).map(String::as_str),
-            Some("sonnet-4")
-        );
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn parses_cursor_agent_json_result() {
-        let stdout = br#"{"type":"result","subtype":"success","is_error":false,"result":"OK","request_id":"req_1","usage":{"inputTokens":10,"outputTokens":2,"cacheReadTokens":3,"cacheWriteTokens":4}}"#;
-        let output =
-            parse_cursor_agent_output(std::process::ExitStatus::from_raw(0), stdout, b"").unwrap();
-
-        assert_eq!(output.text, "OK");
-        assert_eq!(output.request_id.as_deref(), Some("req_1"));
-        assert_eq!(
-            output.usage,
-            Some(Usage {
-                prompt_tokens: 17,
-                completion_tokens: 2,
-                total_tokens: 19
-            })
-        );
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn maps_non_json_auth_output_to_unauthorized() {
-        let stdout = b"Your stored authentication is invalid. Please log in again.";
-        let error = parse_cursor_agent_output(std::process::ExitStatus::from_raw(0), stdout, b"")
-            .unwrap_err();
-
-        assert_eq!(error.status_code(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[test]
-    fn response_value_uses_openai_usage_shape() {
-        let body = json!({"model": "cursor/gpt-5", "input": []});
-        let output = CursorAgentOutput {
-            text: "OK".to_owned(),
-            usage: Some(Usage {
-                prompt_tokens: 1,
-                completion_tokens: 2,
-                total_tokens: 3,
-            }),
-            request_id: Some("req_1".to_owned()),
-        };
-
-        let response = response_value(&body, &output);
-
-        assert_eq!(response["id"], "resp_cursor_req_1");
-        assert_eq!(response["output"][0]["content"][0]["text"], "OK");
-        assert_eq!(response["usage"]["input_tokens"], 1);
-    }
+mod cursor_tests {
+    include!("cursor_tests.rs");
 }

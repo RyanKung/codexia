@@ -143,7 +143,7 @@ not pass those fields to Kiro. `tool_choice: "none"` is handled locally by not
 sending tools. Remote image or document URLs are rejected instead of fetched by
 the gateway.
 
-Cursor login uses the official Cursor Agent browser polling flow. It prints a
+Cursor login uses Cursor's browser polling flow. It prints a
 `https://cursor.com/loginDeepControl?...` URL and polls Cursor for the browser
 approval result; it does not start a localhost callback server:
 
@@ -151,20 +151,18 @@ approval result; it does not start a localhost callback server:
 rotom login --cursor
 ```
 
-Cursor runtime support requires the official `cursor-agent` executable. rotom
-looks for `ROTOM_CURSOR_AGENT`, then `~/.local/bin/cursor-agent`, then
-`cursor-agent` on `PATH`. Requests are sent to `cursor-agent --print` with
-`--mode ask`, `--sandbox enabled`, a temporary empty workspace, and
-`CURSOR_AUTH_TOKEN` in the child process environment so the token is not placed
-in argv. Override the empty workspace with `ROTOM_CURSOR_WORKSPACE` only when
-you intentionally want Cursor Agent to see that directory.
+Cursor runtime support talks directly to Cursor's AgentService over
+HTTPS/HTTP2 using the browser-login token. rotom does not spawn or inspect any
+local Cursor binary, does not write Cursor's global
+`~/.cursor/cli-config.json`, and does not grant workspace permissions. Requests
+are sent as text-only ask-mode AgentService runs with a minimal context.
 
-Cursor Agent is an agent runtime, not an OpenAI or Anthropic model API. rotom
+Cursor is an agent runtime, not an OpenAI or Anthropic model API. rotom
 therefore supports text-only chat/messages/responses compatibility for Cursor.
 Client-supplied OpenAI tools are rejected unless `tool_choice` is `none`, and
 multimodal inputs are rejected instead of being silently dropped. Sampling and
-output-length controls are not passed to Cursor Agent because the CLI does not
-expose equivalent flags.
+output-length controls are not passed to Cursor because AgentService does not
+expose equivalent text-only ask-mode fields.
 
 ## Use With SDKs
 
@@ -252,13 +250,10 @@ curl -X POST http://127.0.0.1:14550/v1/auth/refresh \
 
 From the CLI, `rotom refresh` refreshes all saved providers. Use
 `rotom refresh --provider grok`, `rotom refresh --provider kiro`, or
-`rotom refresh --provider cursor` to refresh only one provider. Cursor browser
-tokens currently need a fresh `rotom login --cursor` when they expire because
-the installed Cursor Agent CLI does not expose a browser-token refresh
-endpoint.
+`rotom refresh --provider cursor` to refresh only one provider.
 
-Check the rotom version, token expiry, authentication status, available models,
-and daemon endpoints:
+Check the rotom version, token expiry, authentication status, strongest
+highlight models, and daemon endpoints:
 
 ```bash
 rotom status
@@ -268,8 +263,25 @@ rotom status --provider cursor
 ```
 
 By default, `rotom status` reports every saved provider. Use `--provider` to
-inspect only one provider. When the daemon responds on the configured bind
-address, `rotom status` also prints the local API endpoint URLs.
+inspect only one provider. The highlight list is selected from each provider's
+available models by model family, version number, and capability suffix, so
+live Cursor credentials can affect the Cursor highlights. When the daemon
+responds on the configured bind address, `rotom status` also prints the local
+API endpoint URLs.
+
+List all model ids rotom exposes:
+
+```bash
+rotom models
+rotom models --provider codex
+rotom models --provider grok
+rotom models --provider kiro
+rotom models --provider cursor
+```
+
+`rotom models` is the full registry view. It works offline for built-in
+provider lists. When Cursor credentials are available, it fetches Cursor's live
+model registry; otherwise Cursor falls back to compatibility aliases.
 
 Fetch status data over HTTP:
 
@@ -320,7 +332,9 @@ rotom daemon status
 systemctl --user status rotom.service
 ```
 
-The daemon runs `rotom serve` with the options passed at install time:
+The daemon runs `rotom serve` with the options passed at install time. If
+`--api-key` is provided, rotom stores it in `~/.rotom/config.json` instead of
+embedding the secret in the launchd/systemd service definition:
 
 ```bash
 rotom daemon install \
@@ -355,6 +369,7 @@ Kiro exposes the validated Kiro model registry:
 
 ```text
 auto
+claude-opus-4.8
 claude-opus-4.7
 claude-opus-4.6
 claude-sonnet-4.6
@@ -369,7 +384,9 @@ glm-5
 qwen3-coder-next
 ```
 
-Cursor exposes the Cursor Agent model registry:
+Cursor model availability is account-dependent. `rotom models --provider
+cursor` fetches the live Cursor model registry after login; without Cursor
+credentials it falls back to these compatibility aliases:
 
 ```text
 cursor/auto
@@ -406,9 +423,10 @@ requests, so they should be treated as Codex compatibility no-ops rather than
 effective sampling or output-length controls. Grok Responses requests preserve
 the supported controls that xAI accepts, including `temperature`, `top_p`,
 `max_output_tokens`, `stop`, `text`, `include`, and `parallel_tool_calls`.
-Cursor requests are adapted through `cursor-agent`; unsupported controls are
-not forwarded, and OpenAI-compatible tools or multimodal content are rejected
-unless they can be represented safely in text-only ask mode.
+Cursor requests are adapted directly to Cursor AgentService's HTTP/2 Connect
+protocol; unsupported controls are not forwarded, and OpenAI-compatible tools
+or multimodal content are rejected unless they can be represented safely in
+text-only ask mode.
 
 `/v1/responses` uses provider-specific creation paths. Codex keeps the
 historical local replay behavior for existing OpenClaw and agent clients, so
@@ -473,8 +491,8 @@ discovery, PKCE, manual callback paste, and xAI Responses requests under
 and exchanges social callbacks at
 `https://prod.us-east-1.auth.desktop.kiro.dev/oauth/token`. Cursor login uses
 `https://cursor.com/loginDeepControl` with polling at
-`https://api2.cursor.sh/auth/poll`, and runtime calls are delegated to the
-locally installed Cursor Agent CLI.
+`https://api2.cursor.sh/auth/poll`, and runtime calls use Cursor
+AgentService's HTTP/2 Connect protocol directly.
 
 ## Disclaimer
 

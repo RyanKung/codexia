@@ -1,8 +1,8 @@
 use super::{
     AppConfig, Cli, Command, DEFAULT_MODEL_FALLBACK, bind_from_config, build_update_command,
     credential_subject, daemon_endpoint_lines, format_login_provider_choice, format_models,
-    new_provider_daemon_restart_hint, parse_login_provider_choice, provider_model_lines,
-    resolve_model_fallback, resolve_status_providers, rotom_version_line, token_expiry_message,
+    new_provider_daemon_restart_hint, parse_login_provider_choice, resolve_model_fallback,
+    resolve_status_providers, rotom_version_line, token_expiry_message,
 };
 use clap::Parser;
 use rotom::config::{Credentials, Provider, now_unix};
@@ -128,15 +128,6 @@ fn formats_status_version_line() {
         rotom_version_line(),
         format!("rotom: {}", env!("CARGO_PKG_VERSION"))
     );
-}
-
-#[test]
-fn formats_status_model_lines_for_provider() {
-    let lines = provider_model_lines(Provider::Kiro);
-
-    assert_eq!(lines.first().map(String::as_str), Some("  auto"));
-    assert!(lines.iter().any(|line| line == "  claude-sonnet-4.5"));
-    assert!(lines.iter().any(|line| line == "  qwen3-coder-next"));
 }
 
 #[test]
@@ -285,18 +276,31 @@ fn filters_status_provider_when_requested() {
 
 #[test]
 fn rejects_missing_status_provider() {
-    assert!(
-        resolve_status_providers(
-            vec![Credentials {
-                provider: Provider::Codex,
-                access_token: "access".into(),
-                refresh_token: "refresh".into(),
-                expires_at: now_unix() + 90,
-                account_id: "account".into(),
-            }],
-            Some(Provider::Grok),
-        )
-        .is_err()
+    let error = resolve_status_providers(
+        vec![Credentials {
+            provider: Provider::Codex,
+            access_token: "access".into(),
+            refresh_token: "refresh".into(),
+            expires_at: now_unix() + 90,
+            account_id: "account".into(),
+        }],
+        Some(Provider::Grok),
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "configuration error: not logged in for provider grok; run `rotom login --provider grok` first"
+    );
+}
+
+#[test]
+fn rejects_status_without_any_saved_provider() {
+    let error = resolve_status_providers(Vec::new(), Some(Provider::Grok)).unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "configuration error: not logged in; run `rotom login` first"
     );
 }
 
