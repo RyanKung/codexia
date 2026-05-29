@@ -113,6 +113,7 @@ async fn run_cursor_agent(body: &Value, credentials: &Credentials) -> Result<Cur
     command
         .args(&args)
         .env("CURSOR_AUTH_TOKEN", &credentials.access_token)
+        .env("NO_OPEN_BROWSER", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -349,7 +350,7 @@ fn parse_cursor_agent_output(
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join("\n");
-    if !status.success() {
+    if !message.is_empty() || !status.success() {
         return Err(cursor_agent_error(&message));
     }
 
@@ -364,9 +365,13 @@ fn cursor_agent_error(message: &str) -> Error {
     } else {
         message.trim()
     };
-    let status = if message.contains("Authentication required")
-        || message.contains("CURSOR_AUTH_TOKEN")
-        || message.contains("Invalid auth")
+    let lowercase_message = message.to_ascii_lowercase();
+    let status = if lowercase_message.contains("authentication required")
+        || lowercase_message.contains("cursor_auth_token")
+        || lowercase_message.contains("invalid auth")
+        || lowercase_message.contains("authentication is invalid")
+        || lowercase_message.contains("please log in")
+        || lowercase_message.contains("not logged in")
     {
         StatusCode::UNAUTHORIZED
     } else {
@@ -716,6 +721,16 @@ mod tests {
                 total_tokens: 19
             })
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn maps_non_json_auth_output_to_unauthorized() {
+        let stdout = b"Your stored authentication is invalid. Please log in again.";
+        let error = parse_cursor_agent_output(std::process::ExitStatus::from_raw(0), stdout, b"")
+            .unwrap_err();
+
+        assert_eq!(error.status_code(), StatusCode::UNAUTHORIZED);
     }
 
     #[test]
