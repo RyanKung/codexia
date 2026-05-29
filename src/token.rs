@@ -149,7 +149,7 @@ impl OAuthClient {
             Self::Codex(client) => client.refresh_token(refresh_token).await,
             Self::Grok(client) => client.refresh_token(refresh_token).await,
             Self::Kiro(client) => client.refresh_token(refresh_token).await,
-            Self::Cursor(client) => client.refresh_token(refresh_token).await,
+            Self::Cursor(client) => client.refresh_token(refresh_token),
         }
     }
 }

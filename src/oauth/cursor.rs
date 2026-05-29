@@ -129,7 +129,7 @@ impl CursorOAuthClient {
     /// refresh endpoint. It re-exchanges a User API key when one is available,
     /// so browser-login credentials must currently be renewed by logging in
     /// again when the access token expires.
-    pub async fn refresh_token(&self, _refresh_token: &str) -> Result<Credentials> {
+    pub fn refresh_token(&self, _refresh_token: &str) -> Result<Credentials> {
         Err(Error::oauth(
             "Cursor browser-login refresh is not implemented; run `rotom login --provider cursor` again when the token expires",
         ))
@@ -313,13 +313,16 @@ mod tests {
             flow.authorize_url.as_str().split('?').next().unwrap(),
             "https://cursor.com/loginDeepControl"
         );
-        assert_eq!(pairs.get("mode").map(|value| value.as_ref()), Some("login"));
         assert_eq!(
-            pairs.get("redirectTarget").map(|value| value.as_ref()),
+            pairs.get("mode").map(std::borrow::Cow::as_ref),
+            Some("login")
+        );
+        assert_eq!(
+            pairs.get("redirectTarget").map(std::borrow::Cow::as_ref),
             Some("cli")
         );
         assert_eq!(
-            pairs.get("uuid").map(|value| value.as_ref()),
+            pairs.get("uuid").map(std::borrow::Cow::as_ref),
             Some(flow.state.as_str())
         );
         assert_eq!(flow.state.len(), 36);

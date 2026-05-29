@@ -942,11 +942,7 @@ async fn refresh_credentials(credentials: &Credentials) -> Result<Credentials> {
                 .refresh_token(&credentials.refresh_token)
                 .await
         }
-        Provider::Cursor => {
-            CursorOAuthClient::default()
-                .refresh_token(&credentials.refresh_token)
-                .await
-        }
+        Provider::Cursor => CursorOAuthClient::default().refresh_token(&credentials.refresh_token),
     }
 }
 

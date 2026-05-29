@@ -2,6 +2,7 @@ use crate::{
     Error, Result,
     codex::{
         convert::to_codex_request,
+        cursor,
         events::{
             collect_output, collect_response_value, event_error, event_tool_call, finish_reason,
             is_done_event, normalize_incomplete_result_finish_reason,
@@ -117,7 +118,7 @@ impl CodexClient {
             return self.complete_kiro_chat(request, credentials).await;
         }
         if self.provider == Provider::Cursor {
-            return Err(cursor_runtime_not_implemented());
+            return cursor::complete_chat(request, credentials).await;
         }
 
         let id = chat_completion_id();
@@ -163,7 +164,7 @@ impl CodexClient {
             return self.stream_kiro_chat(request, credentials).await;
         }
         if self.provider == Provider::Cursor {
-            return Err(cursor_runtime_not_implemented());
+            return Ok(cursor::stream_chat(request, credentials.clone()));
         }
 
         let id = chat_completion_id();
@@ -251,7 +252,7 @@ impl CodexClient {
             return kiro::collect_response_value(response, request).await;
         }
         if self.provider == Provider::Cursor {
-            return Err(cursor_runtime_not_implemented());
+            return cursor::complete_response(&request, credentials).await;
         }
 
         let response = self.send_body(&request, credentials).await?;
@@ -279,7 +280,7 @@ impl CodexClient {
             return Ok(kiro::response_event_stream(response, request));
         }
         if self.provider == Provider::Cursor {
-            return Err(cursor_runtime_not_implemented());
+            return Ok(cursor::response_event_stream(request, credentials.clone()));
         }
 
         let response = self.send_body(&request, credentials).await?;
@@ -541,13 +542,6 @@ fn unsupported_response_resource(provider: Provider, operation: &str) -> Error {
             "{} upstream does not support Responses resource {operation}",
             provider.display_name()
         ),
-    )
-}
-
-fn cursor_runtime_not_implemented() -> Error {
-    Error::upstream_with_status(
-        reqwest::StatusCode::NOT_IMPLEMENTED,
-        "Cursor runtime support requires the Cursor Agent ConnectRPC protocol and is not wired yet",
     )
 }
 

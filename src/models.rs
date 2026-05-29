@@ -41,7 +41,6 @@ pub const CURSOR_MODELS: &[&str] = &[
     "cursor/gpt-5",
     "cursor/sonnet-4",
     "cursor/sonnet-4-thinking",
-    "cursor/opus",
 ];
 
 /// Resolves the default model identifiers into a trimmed, de-duplicated list.

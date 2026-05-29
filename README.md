@@ -7,7 +7,7 @@
 [![CI](https://github.com/RyanKung/rotom/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/RyanKung/rotom/actions/workflows/ci.yml)
 [![Release](https://github.com/RyanKung/rotom/actions/workflows/release.yml/badge.svg?branch=master)](https://github.com/RyanKung/rotom/actions/workflows/release.yml)
 
-Use Codex or Grok OAuth from tools that expect OpenAI- or
+Use Codex, Grok, Kiro, or Cursor OAuth from tools that expect OpenAI- or
 Anthropic-compatible APIs.
 
 rotom is a local Rust gateway for Claude Code, OpenAI SDKs, Anthropic SDKs, and
@@ -47,10 +47,10 @@ claude
 ```
 
 `login` lists the available OAuth providers and starts the selected flow. Use
-`rotom login --provider openai`, `rotom login --provider grok`, or
-`rotom login --kiro` to skip the prompt. Complete the login in a browser, then
-paste the full redirected URL from the browser address bar, for example
-`http://localhost:1455/auth/callback?code=...&state=...`. This matches
+`rotom login --provider openai`, `rotom login --provider grok`,
+`rotom login --kiro`, or `rotom login --cursor` to skip the prompt. Codex and
+Grok ask you to paste the full redirected URL from the browser address bar, for
+example `http://localhost:1455/auth/callback?code=...&state=...`. This matches
 OpenClaw's remote/headless fallback and does not require your gateway host to
 be reachable from the public internet.
 
@@ -96,6 +96,7 @@ rotom models
 rotom models --provider openai
 rotom models --provider grok
 rotom models --provider kiro
+rotom models --provider cursor
 ```
 
 Kiro login uses Kiro's own portal-style callback format and stores the result
@@ -141,6 +142,29 @@ does not expose upstream fields for `temperature`, `top_p`, `max_tokens`,
 not pass those fields to Kiro. `tool_choice: "none"` is handled locally by not
 sending tools. Remote image or document URLs are rejected instead of fetched by
 the gateway.
+
+Cursor login uses the official Cursor Agent browser polling flow. It prints a
+`https://cursor.com/loginDeepControl?...` URL and polls Cursor for the browser
+approval result; it does not start a localhost callback server:
+
+```bash
+rotom login --cursor
+```
+
+Cursor runtime support requires the official `cursor-agent` executable. rotom
+looks for `ROTOM_CURSOR_AGENT`, then `~/.local/bin/cursor-agent`, then
+`cursor-agent` on `PATH`. Requests are sent to `cursor-agent --print` with
+`--mode ask`, `--sandbox enabled`, a temporary empty workspace, and
+`CURSOR_AUTH_TOKEN` in the child process environment so the token is not placed
+in argv. Override the empty workspace with `ROTOM_CURSOR_WORKSPACE` only when
+you intentionally want Cursor Agent to see that directory.
+
+Cursor Agent is an agent runtime, not an OpenAI or Anthropic model API. rotom
+therefore supports text-only chat/messages/responses compatibility for Cursor.
+Client-supplied OpenAI tools are rejected unless `tool_choice` is `none`, and
+multimodal inputs are rejected instead of being silently dropped. Sampling and
+output-length controls are not passed to Cursor Agent because the CLI does not
+expose equivalent flags.
 
 ## Use With SDKs
 
@@ -227,8 +251,11 @@ curl -X POST http://127.0.0.1:14550/v1/auth/refresh \
 ```
 
 From the CLI, `rotom refresh` refreshes all saved providers. Use
-`rotom refresh --provider grok` or `rotom refresh --provider kiro` to refresh
-only one provider.
+`rotom refresh --provider grok`, `rotom refresh --provider kiro`, or
+`rotom refresh --provider cursor` to refresh only one provider. Cursor browser
+tokens currently need a fresh `rotom login --cursor` when they expire because
+the installed Cursor Agent CLI does not expose a browser-token refresh
+endpoint.
 
 Check the rotom version, token expiry, authentication status, available models,
 and daemon endpoints:
@@ -237,6 +264,7 @@ and daemon endpoints:
 rotom status
 rotom status --provider grok
 rotom status --provider kiro
+rotom status --provider cursor
 ```
 
 By default, `rotom status` reports every saved provider. Use `--provider` to
@@ -341,6 +369,15 @@ glm-5
 qwen3-coder-next
 ```
 
+Cursor exposes the Cursor Agent model registry:
+
+```text
+cursor/auto
+cursor/gpt-5
+cursor/sonnet-4
+cursor/sonnet-4-thinking
+```
+
 Credentials are stored at `~/.rotom/auth.json` by default. Override with
 `--auth-file`, `ROTOM_AUTH_FILE`, or `ROTOM_HOME`.
 
@@ -369,6 +406,9 @@ requests, so they should be treated as Codex compatibility no-ops rather than
 effective sampling or output-length controls. Grok Responses requests preserve
 the supported controls that xAI accepts, including `temperature`, `top_p`,
 `max_output_tokens`, `stop`, `text`, `include`, and `parallel_tool_calls`.
+Cursor requests are adapted through `cursor-agent`; unsupported controls are
+not forwarded, and OpenAI-compatible tools or multimodal content are rejected
+unless they can be represented safely in text-only ask mode.
 
 `/v1/responses` uses provider-specific creation paths. Codex keeps the
 historical local replay behavior for existing OpenClaw and agent clients, so
@@ -431,12 +471,15 @@ exchange at `https://auth.openai.com/oauth/token`, and Codex requests to
 discovery, PKCE, manual callback paste, and xAI Responses requests under
 `https://api.x.ai/v1`. Kiro OAuth uses PKCE with `https://app.kiro.dev/signin`
 and exchanges social callbacks at
-`https://prod.us-east-1.auth.desktop.kiro.dev/oauth/token`.
+`https://prod.us-east-1.auth.desktop.kiro.dev/oauth/token`. Cursor login uses
+`https://cursor.com/loginDeepControl` with polling at
+`https://api2.cursor.sh/auth/poll`, and runtime calls are delegated to the
+locally installed Cursor Agent CLI.
 
 ## Disclaimer
 
 rotom is an unofficial compatibility tool. It is not affiliated with,
-endorsed by, or supported by OpenAI, Anthropic, xAI, or Kiro.
+endorsed by, or supported by OpenAI, Anthropic, xAI, Kiro, or Cursor.
 
 You are responsible for making sure your usage complies with the terms,
 policies, account restrictions, and data-handling obligations that apply to
