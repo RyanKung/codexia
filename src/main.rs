@@ -828,10 +828,18 @@ async fn login_cursor(
 ) -> Result<()> {
     let client = CursorOAuthClient::new(http);
     let flow = client.create_authorization_flow()?;
-    println!(
-        "Open this URL to authenticate with Cursor:\n{}\n",
-        flow.authorize_url
-    );
+    if open_browser_url(flow.authorize_url.as_str()) {
+        println!("Signing in with the browser...");
+        println!(
+            "If your browser didn't open, open this URL to authenticate with Cursor:\n{}\n",
+            flow.authorize_url
+        );
+    } else {
+        println!(
+            "Open this URL to authenticate with Cursor:\n{}\n",
+            flow.authorize_url
+        );
+    }
     println!("After login, leave this command running; rotom will poll Cursor for the result.");
 
     let credentials = client.wait_for_browser_login(&flow).await?;
@@ -845,6 +853,37 @@ async fn login_cursor(
         println!("{}", new_provider_daemon_restart_hint(Provider::Cursor));
     }
     Ok(())
+}
+
+fn open_browser_url(url: &str) -> bool {
+    if std::env::var_os("NO_OPEN_BROWSER").is_some() {
+        return false;
+    }
+
+    open_browser_command(url)
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(target_os = "macos")]
+fn open_browser_command(url: &str) -> ProcessCommand {
+    let mut command = ProcessCommand::new("open");
+    command.arg(url);
+    command
+}
+
+#[cfg(target_os = "windows")]
+fn open_browser_command(url: &str) -> ProcessCommand {
+    let mut command = ProcessCommand::new("cmd");
+    command.args(["/C", "start", "", url]);
+    command
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_browser_command(url: &str) -> ProcessCommand {
+    let mut command = ProcessCommand::new("xdg-open");
+    command.arg(url);
+    command
 }
 
 async fn login_kiro(store: AuthStore, http: Client, show_daemon_restart_hint: bool) -> Result<()> {
