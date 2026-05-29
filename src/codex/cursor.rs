@@ -20,7 +20,7 @@ use std::{
     process::Stdio,
     time::Duration,
 };
-use tokio::{process::Command, time::timeout};
+use tokio::{io::AsyncWriteExt, process::Command, time::timeout};
 
 const CURSOR_AGENT_ENV: &str = "ROTOM_CURSOR_AGENT";
 const CURSOR_AGENT_WORKSPACE_ENV: &str = "ROTOM_CURSOR_WORKSPACE";
@@ -114,14 +114,33 @@ async fn run_cursor_agent(body: &Value, credentials: &Credentials) -> Result<Cur
         .args(&args)
         .env("CURSOR_AUTH_TOKEN", &credentials.access_token)
         .env("NO_OPEN_BROWSER", "1")
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
 
-    let output = timeout(CURSOR_AGENT_TIMEOUT, command.output())
+    let mut child = command.spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        match write_cursor_agent_prompt(&mut stdin, &request.prompt).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    let output = timeout(CURSOR_AGENT_TIMEOUT, child.wait_with_output())
         .await
         .map_err(|_| Error::upstream("Cursor Agent timed out"))??;
     parse_cursor_agent_output(output.status, &output.stdout, &output.stderr)
+}
+
+async fn write_cursor_agent_prompt(
+    stdin: &mut tokio::process::ChildStdin,
+    prompt: &str,
+) -> std::io::Result<()> {
+    stdin.write_all(prompt.as_bytes()).await?;
+    stdin.write_all(b"\n").await?;
+    stdin.shutdown().await
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -541,21 +560,11 @@ fn cursor_agent_args(
         args.push("--model".to_owned());
         args.push(model);
     }
-    args.push(request.prompt.clone());
     args
 }
 
 fn redacted_cursor_agent_args(args: &[String]) -> Vec<String> {
-    args.iter()
-        .enumerate()
-        .map(|(index, value)| {
-            if index + 1 == args.len() {
-                "<prompt>".to_owned()
-            } else {
-                value.clone()
-            }
-        })
-        .collect()
+    args.to_vec()
 }
 
 fn cursor_agent_model_arg(model: &str) -> Option<String> {
@@ -686,7 +695,7 @@ mod tests {
         let args = cursor_agent_args(&request, Path::new("/tmp/rotom-cursor"), "json");
 
         assert!(!args.iter().any(|arg| arg == "--model"));
-        assert_eq!(args.last().map(String::as_str), Some("Hello"));
+        assert!(!args.iter().any(|arg| arg == "Hello"));
     }
 
     #[test]
