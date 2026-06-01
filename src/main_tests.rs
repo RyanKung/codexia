@@ -67,6 +67,7 @@ fn parses_bind_cidr_membership() {
 }
 
 #[test]
+#[cfg(unix)]
 fn expands_loopback_cidr_bind_host_to_local_interface() {
     let addrs = parse_bind_hosts("127.0.0.0/8", 14550).unwrap();
 
@@ -78,6 +79,7 @@ fn expands_loopback_cidr_bind_host_to_local_interface() {
 }
 
 #[test]
+#[cfg(unix)]
 fn parses_cidr_cli_bind_address() {
     let addrs = parse_bind_addresses("127.0.0.0/8:14550").unwrap();
 
@@ -85,6 +87,18 @@ fn parses_cidr_cli_bind_address() {
         addrs
             .iter()
             .any(|addr| addr.to_string() == "127.0.0.1:14550")
+    );
+}
+
+#[test]
+#[cfg(not(unix))]
+fn rejects_cidr_bind_hosts_without_interface_enumeration() {
+    let error = parse_bind_hosts("127.0.0.0/8", 14550).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("CIDR bind selectors require Unix local interface enumeration")
     );
 }
 
