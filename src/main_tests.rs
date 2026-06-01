@@ -1,8 +1,10 @@
+#[cfg(unix)]
+use super::parse_bind_addresses;
 use super::{
     AppConfig, Cli, Command, DEFAULT_MODEL_FALLBACK, Ipv4Cidr, bind_from_config,
     build_update_command, credential_subject, daemon_endpoint_lines, format_bind_addresses,
     format_login_provider_choice, format_models, new_provider_daemon_restart_hint,
-    parse_bind_addresses, parse_bind_hosts, parse_login_provider_choice, resolve_model_fallback,
+    parse_bind_hosts, parse_login_provider_choice, resolve_model_fallback,
     resolve_status_providers, rotom_version_line, token_expiry_message,
 };
 use clap::Parser;
