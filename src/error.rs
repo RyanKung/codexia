@@ -59,9 +59,10 @@ impl Error {
 
     /// Creates an upstream error with the provided message.
     pub fn upstream(message: impl Into<String>) -> Self {
+        let message = message.into();
         Self::Upstream {
-            status: StatusCode::BAD_GATEWAY,
-            message: message.into(),
+            status: infer_upstream_status(&message),
+            message,
         }
     }
 
@@ -104,6 +105,20 @@ impl Error {
     }
 }
 
+fn infer_upstream_status(message: &str) -> StatusCode {
+    let normalized = message.to_ascii_lowercase();
+    if normalized.contains("input exceeds")
+        && (normalized.contains("context window") || normalized.contains("context length"))
+    {
+        return StatusCode::PAYLOAD_TOO_LARGE;
+    }
+    if normalized.contains("context window") && normalized.contains("too large") {
+        return StatusCode::PAYLOAD_TOO_LARGE;
+    }
+
+    StatusCode::BAD_GATEWAY
+}
+
 impl IntoResponse for Error {
     fn into_response(self) -> axum::response::Response {
         let status = self.status_code();
@@ -116,5 +131,26 @@ impl IntoResponse for Error {
             }
         }));
         (status, body).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upstream_context_window_errors_are_payload_too_large() {
+        let error = Error::upstream(
+            "Your input exceeds the context window of this model. Please adjust your input and try again.",
+        );
+
+        assert_eq!(error.status_code(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[test]
+    fn upstream_unknown_errors_remain_bad_gateway() {
+        let error = Error::upstream("temporary upstream outage");
+
+        assert_eq!(error.status_code(), StatusCode::BAD_GATEWAY);
     }
 }
