@@ -162,14 +162,14 @@ Cursor runtime support talks directly to Cursor's AgentService over
 HTTPS/HTTP2 using the browser-login token. rotom does not spawn or inspect any
 local Cursor binary, does not write Cursor's global
 `~/.cursor/cli-config.json`, and does not grant workspace permissions. Requests
-are sent as text-only ask-mode AgentService runs with a minimal context.
+are sent as ask-mode AgentService runs with a minimal context.
 
 Cursor is an agent runtime, not an OpenAI or Anthropic model API. rotom
-therefore supports text-only chat/messages/responses compatibility for Cursor.
-Client-supplied OpenAI tools are rejected unless `tool_choice` is `none`, and
-multimodal inputs are rejected instead of being silently dropped. Sampling and
-output-length controls are not passed to Cursor because AgentService does not
-expose equivalent text-only ask-mode fields.
+therefore forwards text chat/messages/responses to Cursor and preserves
+OpenAI-style tool metadata for the surrounding agent harness. Multimodal inputs
+are rejected instead of being silently dropped. Sampling and output-length
+controls are not passed to Cursor because AgentService does not expose
+equivalent ask-mode fields.
 
 ## Use With SDKs
 

@@ -23,7 +23,21 @@ fn builds_text_prompt_from_responses_body() {
 }
 
 #[test]
-fn rejects_cursor_tools_without_none_choice() {
+fn allows_cursor_tools_with_required_choice() {
+    let body = json!({
+        "model": "cursor/auto",
+        "input": [{"type": "message", "role": "user", "content": "Hello"}],
+        "tool_choice": "required",
+        "tools": [{"type": "function", "name": "lookup"}]
+    });
+
+    let request = CursorRequest::from_body(&body).unwrap();
+
+    assert_eq!(request.prompt, "User:\nHello");
+}
+
+#[test]
+fn allows_tools_when_tool_choice_is_auto() {
     let body = json!({
         "model": "cursor/auto",
         "input": [{"type": "message", "role": "user", "content": "Hello"}],
@@ -31,9 +45,9 @@ fn rejects_cursor_tools_without_none_choice() {
         "tools": [{"type": "function", "name": "lookup"}]
     });
 
-    let error = CursorRequest::from_body(&body).unwrap_err();
+    let request = CursorRequest::from_body(&body).unwrap();
 
-    assert!(error.to_string().contains("client-supplied tools"));
+    assert_eq!(request.prompt, "User:\nHello");
 }
 
 #[test]
@@ -64,6 +78,26 @@ fn rejects_multimodal_cursor_content() {
     let error = CursorRequest::from_body(&body).unwrap_err();
 
     assert!(error.to_string().contains("multimodal inputs"));
+}
+
+#[test]
+fn ignores_cursor_tool_progress_frames_without_treating_them_as_interaction() {
+    let message = AgentServerMessage {
+        interaction_update: Some(InteractionUpdate {
+            tool_call_started: Some(EmptyMessage {}),
+            tool_call_completed: Some(EmptyMessage {}),
+            tool_call_delta: Some(EmptyMessage {}),
+            shell_output_delta: Some(EmptyMessage {}),
+            ..Default::default()
+        }),
+        exec_server_message: None,
+        conversation_checkpoint_update: None,
+        kv_server_message: None,
+        exec_server_control_message: None,
+        interaction_query: None,
+    };
+
+    assert!(!cursor_frame_requires_interaction(&message));
 }
 
 #[test]

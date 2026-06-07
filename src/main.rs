@@ -602,7 +602,7 @@ async fn status(store: AuthStore, provider: Option<String>) -> Result<()> {
     println!("{}", rotom_version_line());
     for provider in providers {
         println!();
-        render_provider_status(&store, provider, http.clone()).await?;
+        render_provider_status(&store, provider, http.clone()).await;
     }
 
     if let Some(base_url) = running_daemon_base_url(&http).await {
@@ -621,9 +621,38 @@ fn rotom_version_line() -> String {
     format!("rotom: {}", env!("CARGO_PKG_VERSION"))
 }
 
-async fn render_provider_status(store: &AuthStore, provider: Provider, http: Client) -> Result<()> {
+async fn render_provider_status(store: &AuthStore, provider: Provider, http: Client) {
     let token_manager = TokenManager::new_for_provider(store.clone(), provider, http);
-    let credentials = token_manager.credentials().await?;
+    let snapshot = token_manager.credentials_snapshot().await;
+    let credentials = match token_manager.credentials().await {
+        Ok(credentials) => credentials,
+        Err(error) => {
+            eprintln!(
+                "warning: failed to refresh {} credentials: {error}",
+                provider.display_name()
+            );
+            let Some(credentials) = snapshot else {
+                println!("provider: {}", provider);
+                println!("token: unavailable");
+                println!("status: refresh failed");
+                println!("highlight_models:");
+                for line in model_lines(provider_model_ids(provider)) {
+                    println!("{line}");
+                }
+                return;
+            };
+            let models = provider_model_ids_for_credentials(provider, &credentials).await;
+            let highlights = highlight_model_ids_for_provider(provider, &models);
+            println!("provider: {}", credentials.provider);
+            println!("token: refresh failed ({})", credential_subject(&credentials));
+            println!("status: refresh failed");
+            println!("highlight_models:");
+            for line in model_lines(highlights) {
+                println!("{line}");
+            }
+            return;
+        }
+    };
     let models = provider_model_ids_for_credentials(provider, &credentials).await;
     let highlights = highlight_model_ids_for_provider(provider, &models);
     println!("provider: {}", credentials.provider);
@@ -633,7 +662,6 @@ async fn render_provider_status(store: &AuthStore, provider: Provider, http: Cli
     for line in model_lines(highlights) {
         println!("{line}");
     }
-    Ok(())
 }
 
 async fn provider_model_ids_for_credentials(

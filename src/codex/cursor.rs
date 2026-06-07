@@ -686,17 +686,7 @@ fn cursor_turn_usage(message: &AgentServerMessage) -> Option<Usage> {
 }
 
 const fn cursor_frame_requires_interaction(message: &AgentServerMessage) -> bool {
-    if message.interaction_query.is_some() {
-        return true;
-    }
-    let Some(update) = message.interaction_update.as_ref() else {
-        return false;
-    };
-    update.partial_tool_call.is_some()
-        || update.tool_call_started.is_some()
-        || update.tool_call_completed.is_some()
-        || update.tool_call_delta.is_some()
-        || update.shell_output_delta.is_some()
+    message.interaction_query.is_some()
 }
 
 const fn cursor_frame_kind(message: &AgentServerMessage) -> &'static str {

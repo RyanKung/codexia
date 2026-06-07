@@ -1,20 +1,4 @@
-fn reject_client_tools(body: &Value) -> Result<()> {
-    let has_tools = body
-        .get("tools")
-        .and_then(Value::as_array)
-        .is_some_and(|tools| !tools.is_empty());
-    let tool_choice_none = body
-        .get("tool_choice")
-        .and_then(Value::as_str)
-        .is_some_and(|value| value == "none");
-
-    if has_tools && !tool_choice_none {
-        return Err(Error::upstream_with_status(
-            StatusCode::NOT_IMPLEMENTED,
-            "Cursor provider does not support OpenAI-compatible client-supplied tools",
-        ));
-    }
-
+fn reject_client_tools(_body: &Value) -> Result<()> {
     Ok(())
 }
 

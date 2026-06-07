@@ -305,10 +305,26 @@ async fn refresh(store: AuthStore, provider: Option<String>) -> Result<()> {
         if all.is_empty() {
             return Err(Error::config("not logged in; run `rotom login` first"));
         }
+        let mut failed = false;
         for credentials in all {
-            let refreshed = refresh_credentials(&credentials).await?;
-            store.save(&refreshed)?;
-            println!("refreshed {}", credential_subject(&refreshed));
+            match refresh_credentials(&credentials).await {
+                Ok(refreshed) => {
+                    store.save(&refreshed)?;
+                    println!("refreshed {}", credential_subject(&refreshed));
+                }
+                Err(error) => {
+                    failed = true;
+                    eprintln!(
+                        "warning: failed to refresh {}: {error}",
+                        credential_subject(&credentials)
+                    );
+                }
+            }
+        }
+        if failed {
+            return Err(Error::oauth(
+                "one or more provider refreshes failed; rerun `rotom refresh --provider <name>` to retry the failed account",
+            ));
         }
         return Ok(());
     };
