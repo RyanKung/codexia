@@ -1,5 +1,8 @@
-fn reject_client_tools(_body: &Value) -> Result<()> {
-    Ok(())
+fn body_has_client_tools(body: &Value) -> bool {
+    body
+        .get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| !tools.is_empty())
 }
 
 fn input_item_prompt_section(item: &Value) -> Result<Option<String>> {
@@ -85,25 +88,15 @@ fn response_value(body: &Value, output: &CursorOutput) -> Value {
         .get("model")
         .and_then(Value::as_str)
         .unwrap_or("cursor/auto");
-    let message_id = format!("msg_{id}");
     let usage = output.usage.as_ref().map(usage_value);
+    let response_output = response_output_items(&id, output);
     json!({
         "id": id,
         "object": "response",
         "created_at": created_at,
         "status": "completed",
         "model": model,
-        "output": [{
-            "id": message_id,
-            "type": "message",
-            "role": "assistant",
-            "status": "completed",
-            "content": [{
-                "type": "output_text",
-                "text": output.text,
-                "annotations": []
-            }]
-        }],
+        "output": response_output,
         "usage": usage,
     })
 }
@@ -114,82 +107,153 @@ fn response_events(body: &Value, output: &CursorOutput) -> Vec<JsonSseEvent> {
         .get("id")
         .and_then(Value::as_str)
         .unwrap_or("resp_cursor");
-    let item = response
+    let mut events = vec![named_event(
+        "response.created",
+        json!({
+            "type": "response.created",
+            "response": {
+                "id": response_id,
+                "object": "response",
+                "created_at": response.get("created_at").cloned().unwrap_or_else(|| json!(now_unix())),
+                "status": "in_progress",
+                "model": response.get("model").cloned().unwrap_or_else(|| json!("cursor/auto")),
+                "output": []
+            }
+        }),
+    )];
+
+    for (output_index, item) in response
         .get("output")
         .and_then(Value::as_array)
-        .and_then(|items| items.first())
-        .cloned()
-        .unwrap_or_else(|| json!({"id": format!("msg_{response_id}"), "type": "message"}));
-    let item_id = item
-        .get("id")
-        .and_then(Value::as_str)
-        .unwrap_or("msg_cursor");
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let output_index = u32::try_from(output_index).unwrap_or(u32::MAX);
+        let item_id = item
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("cursor_item");
+        match item.get("type").and_then(Value::as_str) {
+            Some("function_call") => {
+                let name = item.get("name").and_then(Value::as_str).unwrap_or("tool");
+                let arguments = item
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let call_id = item
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or(item_id);
+                events.push(named_event(
+                    "response.output_item.added",
+                    json!({
+                        "type": "response.output_item.added",
+                        "output_index": output_index,
+                        "item": {
+                            "id": item_id,
+                            "type": "function_call",
+                            "status": "in_progress",
+                            "call_id": call_id,
+                            "name": name,
+                            "arguments": ""
+                        }
+                    }),
+                ));
+                if !arguments.is_empty() {
+                    events.push(named_event(
+                        "response.function_call_arguments.delta",
+                        json!({
+                            "type": "response.function_call_arguments.delta",
+                            "output_index": output_index,
+                            "item_id": item_id,
+                            "delta": arguments,
+                        }),
+                    ));
+                }
+                events.push(named_event(
+                    "response.function_call_arguments.done",
+                    json!({
+                        "type": "response.function_call_arguments.done",
+                        "output_index": output_index,
+                        "item_id": item_id,
+                        "name": name,
+                        "arguments": arguments,
+                    }),
+                ));
+                events.push(named_event(
+                    "response.output_item.done",
+                    json!({
+                        "type": "response.output_item.done",
+                        "output_index": output_index,
+                        "item": item,
+                    }),
+                ));
+            }
+            _ => {
+                let text = item
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .and_then(|parts| parts.first())
+                    .and_then(|part| part.get("text"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                events.push(named_event(
+                    "response.output_item.added",
+                    json!({
+                        "type": "response.output_item.added",
+                        "output_index": output_index,
+                        "item": {
+                            "id": item_id,
+                            "type": "message",
+                            "role": "assistant",
+                            "status": "in_progress",
+                            "content": []
+                        }
+                    }),
+                ));
+                if !text.is_empty() {
+                    events.push(named_event(
+                        "response.output_text.delta",
+                        json!({
+                            "type": "response.output_text.delta",
+                            "output_index": output_index,
+                            "item_id": item_id,
+                            "content_index": 0,
+                            "delta": text,
+                        }),
+                    ));
+                    events.push(named_event(
+                        "response.output_text.done",
+                        json!({
+                            "type": "response.output_text.done",
+                            "output_index": output_index,
+                            "item_id": item_id,
+                            "content_index": 0,
+                            "text": text,
+                        }),
+                    ));
+                }
+                events.push(named_event(
+                    "response.output_item.done",
+                    json!({
+                        "type": "response.output_item.done",
+                        "output_index": output_index,
+                        "item": item,
+                    }),
+                ));
+            }
+        }
+    }
 
-    vec![
-        named_event(
-            "response.created",
-            json!({
-                "type": "response.created",
-                "response": {
-                    "id": response_id,
-                    "object": "response",
-                    "created_at": response.get("created_at").cloned().unwrap_or_else(|| json!(now_unix())),
-                    "status": "in_progress",
-                    "model": response.get("model").cloned().unwrap_or_else(|| json!("cursor/auto")),
-                    "output": []
-                }
-            }),
-        ),
-        named_event(
-            "response.output_item.added",
-            json!({
-                "type": "response.output_item.added",
-                "output_index": 0,
-                "item": {
-                    "id": item_id,
-                    "type": "message",
-                    "role": "assistant",
-                    "status": "in_progress",
-                    "content": []
-                }
-            }),
-        ),
-        named_event(
-            "response.output_text.delta",
-            json!({
-                "type": "response.output_text.delta",
-                "output_index": 0,
-                "item_id": item_id,
-                "content_index": 0,
-                "delta": output.text,
-            }),
-        ),
-        named_event(
-            "response.output_text.done",
-            json!({
-                "type": "response.output_text.done",
-                "output_index": 0,
-                "item_id": item_id,
-                "content_index": 0,
-                "text": output.text,
-            }),
-        ),
-        named_event(
-            "response.output_item.done",
-            json!({
-                "type": "response.output_item.done",
-                "output_index": 0,
-                "item": item,
-            }),
-        ),
-        named_event(
-            "response.completed",
-            json!({
-                "type": "response.completed",
-                "response": response,
-            }),
-        ),
-    ]
+    events.push(named_event(
+        "response.completed",
+        json!({
+            "type": "response.completed",
+            "response": response,
+        }),
+    ));
+    events
 }
 
 fn named_event(event: &str, value: Value) -> JsonSseEvent {
@@ -216,4 +280,34 @@ fn usage_value(usage: &Usage) -> Value {
         "output_tokens": usage.completion_tokens,
         "total_tokens": usage.total_tokens,
     })
+}
+
+fn response_output_items(response_id: &str, output: &CursorOutput) -> Vec<Value> {
+    let mut items = Vec::new();
+    if !output.text.is_empty() || output.tool_calls.is_empty() {
+        items.push(json!({
+            "id": format!("msg_{response_id}"),
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{
+                "type": "output_text",
+                "text": output.text,
+                "annotations": []
+            }]
+        }));
+    }
+    let tool_output_base = items.len();
+    for (index, tool_call) in output.tool_calls.iter().enumerate() {
+        let output_index = tool_output_base.saturating_add(index);
+        items.push(json!({
+            "id": format!("fc_{response_id}_{output_index}"),
+            "type": "function_call",
+            "status": "completed",
+            "call_id": tool_call.id,
+            "name": tool_call.function.name,
+            "arguments": tool_call.function.arguments
+        }));
+    }
+    items
 }

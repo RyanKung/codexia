@@ -116,7 +116,65 @@ struct AgentServerMessage {
     #[prost(message, optional, tag = "5")]
     exec_server_control_message: Option<EmptyMessage>,
     #[prost(message, optional, tag = "7")]
-    interaction_query: Option<EmptyMessage>,
+    interaction_query: Option<InteractionQuery>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct InteractionQuery {
+    #[prost(uint32, tag = "1")]
+    id: u32,
+    #[prost(message, optional, tag = "3")]
+    ask_question_interaction_query: Option<AskQuestionInteractionQuery>,
+    #[prost(message, optional, tag = "9")]
+    web_fetch_request_query: Option<WebFetchRequestQuery>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct AskQuestionInteractionQuery {
+    #[prost(message, optional, tag = "1")]
+    args: Option<AskQuestionArgs>,
+    #[prost(string, tag = "2")]
+    tool_call_id: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct AskQuestionArgs {
+    #[prost(string, tag = "1")]
+    title: String,
+    #[prost(message, repeated, tag = "2")]
+    questions: Vec<AskQuestionQuestion>,
+    #[prost(bool, optional, tag = "5")]
+    run_async: Option<bool>,
+    #[prost(string, optional, tag = "6")]
+    async_original_tool_call_id: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct AskQuestionQuestion {
+    #[prost(string, tag = "1")]
+    id: String,
+    #[prost(string, tag = "2")]
+    prompt: String,
+    #[prost(message, repeated, tag = "3")]
+    options: Vec<AskQuestionOption>,
+    #[prost(bool, optional, tag = "4")]
+    allow_multiple: Option<bool>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct AskQuestionOption {
+    #[prost(string, tag = "1")]
+    id: String,
+    #[prost(string, tag = "2")]
+    label: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct WebFetchRequestQuery {
+    #[prost(message, optional, tag = "1")]
+    args: Option<WebFetchArgs>,
+    #[prost(bool, optional, tag = "2")]
+    skip_approval: Option<bool>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -126,25 +184,25 @@ struct ExecServerMessage {
     #[prost(string, tag = "15")]
     exec_id: String,
     #[prost(message, optional, tag = "2")]
-    shell_args: Option<EmptyMessage>,
+    shell_args: Option<ShellArgs>,
     #[prost(message, optional, tag = "3")]
-    write_args: Option<EmptyMessage>,
+    write_args: Option<WriteArgs>,
     #[prost(message, optional, tag = "4")]
-    delete_args: Option<EmptyMessage>,
+    delete_args: Option<DeleteArgs>,
     #[prost(message, optional, tag = "5")]
-    grep_args: Option<EmptyMessage>,
+    grep_args: Option<GrepArgs>,
     #[prost(message, optional, tag = "7")]
-    read_args: Option<EmptyMessage>,
+    read_args: Option<ReadArgs>,
     #[prost(message, optional, tag = "8")]
-    ls_args: Option<EmptyMessage>,
+    ls_args: Option<LsArgs>,
     #[prost(message, optional, tag = "9")]
     diagnostics_args: Option<EmptyMessage>,
     #[prost(message, optional, tag = "10")]
-    request_context_args: Option<EmptyMessage>,
+    request_context_args: Option<RequestContextArgs>,
     #[prost(message, optional, tag = "11")]
     mcp_args: Option<EmptyMessage>,
     #[prost(message, optional, tag = "14")]
-    shell_stream_args: Option<EmptyMessage>,
+    shell_stream_args: Option<ShellArgs>,
     #[prost(message, optional, tag = "16")]
     background_shell_spawn_args: Option<EmptyMessage>,
     #[prost(message, optional, tag = "17")]
@@ -152,7 +210,7 @@ struct ExecServerMessage {
     #[prost(message, optional, tag = "18")]
     read_mcp_resource_exec_args: Option<EmptyMessage>,
     #[prost(message, optional, tag = "20")]
-    fetch_args: Option<EmptyMessage>,
+    fetch_args: Option<WebFetchArgs>,
     #[prost(message, optional, tag = "21")]
     record_screen_args: Option<EmptyMessage>,
     #[prost(message, optional, tag = "22")]
@@ -173,6 +231,126 @@ struct ExecServerMessage {
     mcp_state_exec_args: Option<EmptyMessage>,
     #[prost(message, optional, tag = "37")]
     subagent_await_args: Option<EmptyMessage>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct ShellArgs {
+    #[prost(string, tag = "1")]
+    command: String,
+    #[prost(string, tag = "2")]
+    working_directory: String,
+    #[prost(uint32, optional, tag = "3")]
+    timeout: Option<u32>,
+    #[prost(string, tag = "4")]
+    tool_call_id: String,
+    #[prost(string, repeated, tag = "5")]
+    simple_commands: Vec<String>,
+    #[prost(bool, optional, tag = "12")]
+    skip_approval: Option<bool>,
+    #[prost(string, optional, tag = "15")]
+    description: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct WriteArgs {
+    #[prost(string, tag = "1")]
+    path: String,
+    #[prost(string, tag = "2")]
+    file_text: String,
+    #[prost(string, tag = "3")]
+    tool_call_id: String,
+    #[prost(bool, optional, tag = "4")]
+    return_file_content_after_write: Option<bool>,
+    #[prost(string, optional, tag = "6")]
+    encoding_hint: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct DeleteArgs {
+    #[prost(string, tag = "1")]
+    path: String,
+    #[prost(string, tag = "2")]
+    tool_call_id: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct GrepArgs {
+    #[prost(string, tag = "1")]
+    pattern: String,
+    #[prost(string, optional, tag = "2")]
+    path: Option<String>,
+    #[prost(string, optional, tag = "3")]
+    glob: Option<String>,
+    #[prost(string, optional, tag = "4")]
+    output_mode: Option<String>,
+    #[prost(int32, optional, tag = "5")]
+    context_before: Option<i32>,
+    #[prost(int32, optional, tag = "6")]
+    context_after: Option<i32>,
+    #[prost(int32, optional, tag = "7")]
+    context: Option<i32>,
+    #[prost(bool, optional, tag = "8")]
+    case_insensitive: Option<bool>,
+    #[prost(string, optional, tag = "9")]
+    type_name: Option<String>,
+    #[prost(int32, optional, tag = "10")]
+    head_limit: Option<i32>,
+    #[prost(bool, optional, tag = "11")]
+    multiline: Option<bool>,
+    #[prost(string, optional, tag = "12")]
+    sort: Option<String>,
+    #[prost(bool, optional, tag = "13")]
+    sort_ascending: Option<bool>,
+    #[prost(string, tag = "14")]
+    tool_call_id: String,
+    #[prost(int32, optional, tag = "16")]
+    offset: Option<i32>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct ReadArgs {
+    #[prost(string, tag = "1")]
+    path: String,
+    #[prost(string, tag = "2")]
+    tool_call_id: String,
+    #[prost(int32, optional, tag = "4")]
+    offset: Option<i32>,
+    #[prost(uint32, optional, tag = "5")]
+    limit: Option<u32>,
+    #[prost(string, optional, tag = "6")]
+    encoding_hint: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct LsArgs {
+    #[prost(string, tag = "1")]
+    path: String,
+    #[prost(string, repeated, tag = "2")]
+    ignore: Vec<String>,
+    #[prost(string, tag = "3")]
+    tool_call_id: String,
+    #[prost(uint32, optional, tag = "5")]
+    timeout_ms: Option<u32>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct RequestContextArgs {
+    #[prost(string, optional, tag = "2")]
+    notes_session_id: Option<String>,
+    #[prost(string, optional, tag = "3")]
+    workspace_id: Option<String>,
+    #[prost(string, optional, tag = "4")]
+    read_only_pinned_tree_sha: Option<String>,
+    #[prost(string, optional, tag = "5")]
+    read_only_plugin_cache_root: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct WebFetchArgs {
+    #[prost(string, tag = "1")]
+    url: String,
+    #[prost(string, tag = "2")]
+    tool_call_id: String,
 }
 
 #[derive(Clone, PartialEq, Message)]

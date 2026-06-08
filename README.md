@@ -166,10 +166,11 @@ are sent as ask-mode AgentService runs with a minimal context.
 
 Cursor is an agent runtime, not an OpenAI or Anthropic model API. rotom
 therefore forwards text chat/messages/responses to Cursor and preserves
-OpenAI-style tool metadata for the surrounding agent harness. Multimodal inputs
-are rejected instead of being silently dropped. Sampling and output-length
-controls are not passed to Cursor because AgentService does not expose
-equivalent ask-mode fields.
+OpenAI-style tool metadata at the API boundary. Cursor's `GetUsableModels`
+response does not currently expose a dedicated tool-capability field, so rotom
+does not infer support from `maxMode`. Multimodal inputs are rejected instead
+of being silently dropped. Sampling and output-length controls are not passed
+to Cursor because AgentService does not expose equivalent ask-mode fields.
 
 ## Use With SDKs
 
@@ -435,8 +436,15 @@ the supported controls that xAI accepts, including `temperature`, `top_p`,
 `max_output_tokens`, `stop`, `text`, `include`, and `parallel_tool_calls`.
 Cursor requests are adapted directly to Cursor AgentService's HTTP/2 Connect
 protocol; unsupported controls are not forwarded, and OpenAI-compatible tools
-or multimodal content are rejected unless they can be represented safely in
-text-only ask mode.
+are preserved as request metadata rather than inferred from `maxMode`. Cursor
+`exec_server_message` frames are surfaced as OpenAI-compatible `function_call`
+items, and supported interactive queries such as `ask_question` and
+`web_fetch_request` are exposed through the same compatibility layer.
+Multimodal content is rejected unless it can be represented safely in
+text-only agent input. rotom defaults Cursor requests to `agent.v1.AgentMode`
+`AGENT (1)` instead of `ASK (2)`. You can override that with
+`ROTOM_CURSOR_AGENT_MODE=agent|ask|plan|debug|triage|project|multitask` (or
+`0-7`) when you need to probe a specific Cursor mode.
 
 `/v1/responses` uses provider-specific creation paths. Codex keeps the
 historical local replay behavior for existing OpenClaw and agent clients, so

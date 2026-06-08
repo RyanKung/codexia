@@ -568,6 +568,11 @@ fn update(version: Option<&str>) -> Result<()> {
             Some(version) => println!("updated rotom to version {version}"),
             None => println!("updated rotom to the latest published release"),
         }
+        match daemon::restart_loaded() {
+            Ok(true) => println!("reloaded the installed rotom daemon"),
+            Ok(false) => {}
+            Err(error) => eprintln!("warning: failed to reload rotom daemon after update: {error}"),
+        }
         Ok(())
     } else {
         Err(Error::upstream(format!(
@@ -644,7 +649,10 @@ async fn render_provider_status(store: &AuthStore, provider: Provider, http: Cli
             let models = provider_model_ids_for_credentials(provider, &credentials).await;
             let highlights = highlight_model_ids_for_provider(provider, &models);
             println!("provider: {}", credentials.provider);
-            println!("token: refresh failed ({})", credential_subject(&credentials));
+            println!(
+                "token: refresh failed ({})",
+                credential_subject(&credentials)
+            );
             println!("status: refresh failed");
             println!("highlight_models:");
             for line in model_lines(highlights) {

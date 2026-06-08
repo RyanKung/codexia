@@ -63,12 +63,17 @@ pub fn start() -> Result<()> {
         Platform::MacOs => {
             let plist = launchd_plist_path()?;
             let domain = launchd_domain()?;
+            let target = launchd_service_target(&domain);
             if !plist.exists() {
                 return Err(Error::config(
                     "daemon is not installed; run `rotom daemon install` first",
                 ));
             }
-            run_command("launchctl", ["bootstrap", &domain, path_str(&plist)?])?;
+            if launchd_service_loaded(&target)? {
+                run_command("launchctl", ["kickstart", "-k", &target])?;
+            } else {
+                run_command("launchctl", ["bootstrap", &domain, path_str(&plist)?])?;
+            }
             Ok(())
         }
         Platform::Linux => systemctl(["start", SYSTEMD_UNIT]),
@@ -104,6 +109,32 @@ pub fn restart() -> Result<()> {
             run_command("launchctl", ["kickstart", "-k", &target])
         }
         Platform::Linux => systemctl(["restart", SYSTEMD_UNIT]),
+    }
+}
+
+/// Restarts the daemon only when the macOS LaunchAgent is already installed and loaded.
+///
+/// # Errors
+///
+/// Returns an error when launchd queries or the restart action itself fails.
+pub fn restart_loaded() -> Result<bool> {
+    match platform()? {
+        Platform::MacOs => {
+            let plist = launchd_plist_path()?;
+            if !plist.exists() {
+                return Ok(false);
+            }
+
+            let domain = launchd_domain()?;
+            let target = launchd_service_target(&domain);
+            if launchd_service_loaded(&target)? {
+                run_command("launchctl", ["kickstart", "-k", &target])?;
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+        Platform::Linux => Ok(false),
     }
 }
 
@@ -375,6 +406,25 @@ fn launchd_domain() -> Result<String> {
 
 fn launchd_service_target(domain: &str) -> String {
     format!("{domain}/{LAUNCHD_LABEL}")
+}
+
+fn launchd_service_loaded(target: &str) -> Result<bool> {
+    let output = Command::new("launchctl").args(["print", target]).output()?;
+
+    if output.status.success() {
+        return Ok(true);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if is_launchctl_service_missing(&stderr) {
+        return Ok(false);
+    }
+
+    Err(Error::config(format!(
+        "launchctl print failed with status {}: {}",
+        output.status,
+        stderr.trim()
+    )))
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
