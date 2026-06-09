@@ -120,6 +120,7 @@ struct AgentServerMessage {
 }
 
 #[derive(Clone, PartialEq, Message)]
+#[allow(clippy::struct_field_names)]
 struct InteractionQuery {
     #[prost(uint32, tag = "1")]
     id: u32,

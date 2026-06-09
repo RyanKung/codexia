@@ -459,6 +459,7 @@ fn decodes_cursor_text_delta_frames() {
 
 #[tokio::test]
 #[ignore = "live Cursor probe; run with cargo test cursor_tests::live_cursor_tool_probe -- --ignored --nocapture"]
+#[allow(clippy::too_many_lines)]
 async fn live_cursor_tool_probe() {
     let store = AuthStore::from_default_path().unwrap();
     let credentials = store
@@ -614,6 +615,7 @@ async fn live_cursor_tool_probe() {
 
 #[tokio::test]
 #[ignore = "live Cursor mode probe; run with cargo test live_cursor_mode_probe -- --ignored --nocapture"]
+#[allow(clippy::too_many_lines)]
 async fn live_cursor_mode_probe() {
     let store = AuthStore::from_default_path().unwrap();
     let credentials = store
@@ -623,9 +625,9 @@ async fn live_cursor_mode_probe() {
     let client = CursorApiClient::new(&credentials);
     let models = client.get_usable_models().await.unwrap();
     let requested_model = "cursor/claude-opus-4-8-thinking-high-fast";
-    let modes = [0, 1, 2, 3, 4, 5, 6];
+    let agent_modes = [0, 1, 2, 3, 4, 5, 6];
 
-    for mode in modes {
+    for mode in agent_modes {
         let outcome = tokio::time::timeout(std::time::Duration::from_secs(20), async {
             let model = select_cursor_model(requested_model, &models).unwrap();
             let request = CursorRequest {
@@ -729,6 +731,7 @@ async fn live_cursor_mode_probe() {
 
 #[tokio::test]
 #[ignore = "live Cursor env mode probe; run with ROTOM_CURSOR_AGENT_MODE=1 cargo test live_cursor_env_mode_probe -- --ignored --nocapture"]
+#[allow(clippy::too_many_lines)]
 async fn live_cursor_env_mode_probe() {
     let store = AuthStore::from_default_path().unwrap();
     let credentials = store

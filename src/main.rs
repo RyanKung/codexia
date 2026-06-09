@@ -637,7 +637,7 @@ async fn render_provider_status(store: &AuthStore, provider: Provider, http: Cli
                 provider.display_name()
             );
             let Some(credentials) = snapshot else {
-                println!("provider: {}", provider);
+                println!("provider: {provider}");
                 println!("token: unavailable");
                 println!("status: refresh failed");
                 println!("highlight_models:");

@@ -112,7 +112,7 @@ pub fn restart() -> Result<()> {
     }
 }
 
-/// Restarts the daemon only when the macOS LaunchAgent is already installed and loaded.
+/// Restarts the daemon only when the macOS `LaunchAgent` is already installed and loaded.
 ///
 /// # Errors
 ///

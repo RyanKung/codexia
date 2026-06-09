@@ -818,11 +818,10 @@ fn cursor_frame_action(message: &AgentServerMessage) -> CursorFrameAction {
         return CursorFrameAction::None;
     };
 
-    if let Some(tool_call) = cursor_interaction_tool_call(query) {
-        CursorFrameAction::ToolCall(tool_call)
-    } else {
-        CursorFrameAction::UnsupportedInteraction(cursor_interaction_query_kind(query))
-    }
+    cursor_interaction_tool_call(query).map_or_else(
+        || CursorFrameAction::UnsupportedInteraction(cursor_interaction_query_kind(query)),
+        CursorFrameAction::ToolCall,
+    )
 }
 
 fn cursor_exec_tool_call(exec: &ExecServerMessage) -> Option<ToolCall> {
@@ -859,7 +858,7 @@ fn cursor_exec_tool_call(exec: &ExecServerMessage) -> Option<ToolCall> {
     Some(cursor_function_tool_call(
         cursor_tool_call_id(exec, tool_call_id),
         name,
-        arguments,
+        &arguments,
     ))
 }
 
@@ -868,7 +867,7 @@ fn cursor_interaction_tool_call(query: &InteractionQuery) -> Option<ToolCall> {
         return Some(cursor_function_tool_call(
             cursor_interaction_tool_call_id(query.id, &ask.tool_call_id),
             "ask_question",
-            ask_question_args_value(ask.args.as_ref()),
+            &ask_question_args_value(ask.args.as_ref()),
         ));
     }
     if let Some(fetch) = query.web_fetch_request_query.as_ref() {
@@ -881,13 +880,13 @@ fn cursor_interaction_tool_call(query: &InteractionQuery) -> Option<ToolCall> {
                     .map_or("", |args| args.tool_call_id.as_str()),
             ),
             "web_fetch_request",
-            web_fetch_request_query_value(fetch),
+            &web_fetch_request_query_value(fetch),
         ));
     }
     None
 }
 
-fn cursor_function_tool_call(id: String, name: &str, arguments: Value) -> ToolCall {
+fn cursor_function_tool_call(id: String, name: &str, arguments: &Value) -> ToolCall {
     ToolCall {
         id,
         kind: "function".to_owned(),
