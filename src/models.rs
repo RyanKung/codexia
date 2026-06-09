@@ -287,7 +287,9 @@ fn is_lightweight_highlight_variant(id: &str) -> bool {
 }
 
 fn kiro_family_rank(id: &str) -> Option<u16> {
-    if id.starts_with("claude-opus-") || id == "opus" {
+    if id.starts_with("claude-fable-") {
+        Some(105)
+    } else if id.starts_with("claude-opus-") || id == "opus" {
         Some(95)
     } else if id.starts_with("claude-sonnet-") {
         Some(85)
@@ -301,7 +303,9 @@ fn kiro_family_rank(id: &str) -> Option<u16> {
 }
 
 fn cursor_family_rank(id: &str) -> Option<u16> {
-    if id.contains("claude") && id.contains("opus") {
+    if id.contains("claude") && id.contains("fable") {
+        Some(120)
+    } else if id.contains("claude") && id.contains("opus") {
         Some(110)
     } else if id.starts_with("gpt-") {
         Some(105)
@@ -369,6 +373,8 @@ fn highlight_group_key(provider: Provider, id: &str) -> String {
     let normalized = id.strip_prefix("cursor/").unwrap_or(id);
     if normalized.starts_with("gpt-") {
         "cursor:gpt".to_owned()
+    } else if normalized.contains("claude") && normalized.contains("fable") {
+        "cursor:claude-fable".to_owned()
     } else if normalized.contains("claude") && normalized.contains("opus") {
         "cursor:claude-opus".to_owned()
     } else if normalized.contains("claude") && normalized.contains("sonnet")
@@ -458,15 +464,26 @@ mod tests {
 
     #[test]
     fn highlights_kiro_models_by_version_and_family() {
-        let ids = resolve_model_ids_for_provider(Provider::Kiro);
+        let ids = [
+            "auto",
+            "claude-fable-5",
+            "claude-opus-4.8",
+            "claude-opus-4.7",
+            "claude-opus-4.6",
+            "claude-sonnet-4.6",
+            "qwen3-coder-next",
+        ]
+        .into_iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
 
         assert_eq!(
             highlight_model_ids_for_provider(Provider::Kiro, &ids),
             vec![
+                "claude-fable-5".to_owned(),
                 "claude-opus-4.8".to_owned(),
                 "claude-opus-4.7".to_owned(),
                 "claude-opus-4.6".to_owned(),
-                "claude-sonnet-4.6".to_owned(),
             ]
         );
     }
@@ -479,6 +496,8 @@ mod tests {
             "cursor/gpt-5.3-codex",
             "cursor/gpt-5.3-codex-high",
             "cursor/gpt-5.3-codex-xhigh",
+            "cursor/claude-fable-5",
+            "cursor/claude-fable-5-fast",
             "cursor/claude-4-opus",
             "cursor/claude-opus-4-8-thinking-max",
             "cursor/claude-4.6-sonnet-medium-thinking",
@@ -492,10 +511,10 @@ mod tests {
         assert_eq!(
             highlight_model_ids_for_provider(Provider::Cursor, &ids),
             vec![
+                "cursor/claude-fable-5".to_owned(),
                 "cursor/claude-opus-4-8-thinking-max".to_owned(),
                 "cursor/gpt-5.3-codex-xhigh".to_owned(),
                 "cursor/claude-4.6-sonnet-medium-thinking".to_owned(),
-                "cursor/composer-2.5".to_owned(),
             ]
         );
     }
