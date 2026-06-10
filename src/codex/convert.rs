@@ -341,7 +341,8 @@ const fn should_include_instructions(
     match provider {
         Provider::Codex => true,
         Provider::Grok => !instructions.is_empty() && request.previous_response_id.is_none(),
-        Provider::Kiro | Provider::Cursor => !instructions.is_empty(),
+        Provider::Kiro => !instructions.is_empty(),
+        Provider::Cursor => false,
     }
 }
 
@@ -811,6 +812,24 @@ mod tests {
         let body = responses_to_upstream_request(Provider::Grok, &request, &input).unwrap();
 
         assert_eq!(body["instructions"], "be terse");
+    }
+
+    #[test]
+    fn cursor_responses_requests_do_not_forward_instructions() {
+        let request: ResponsesRequest = serde_json::from_value(json!({
+            "model": "cursor/auto",
+            "instructions": "be terse",
+            "input": "hello"
+        }))
+        .unwrap();
+        let input = vec![json!({
+            "role": "user",
+            "content": [{"type": "input_text", "text": "hello"}]
+        })];
+
+        let body = responses_to_upstream_request(Provider::Cursor, &request, &input).unwrap();
+
+        assert!(body.get("instructions").is_none());
     }
 
     #[test]

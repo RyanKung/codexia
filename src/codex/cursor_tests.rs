@@ -1,6 +1,7 @@
 use super::*;
 use serde_json::json;
 use crate::config::{AuthStore, Provider};
+use std::collections::HashMap;
 
 #[test]
 fn builds_text_prompt_from_responses_body() {
@@ -19,7 +20,7 @@ fn builds_text_prompt_from_responses_body() {
     assert_eq!(request.model, "cursor/claude-4-sonnet");
     assert_eq!(
         request.prompt,
-        "System:\nBe concise.\n\nUser:\nHello\n\nAssistant:\nHi\n\nTool result call_1:\n42"
+        "User:\nHello\n\nAssistant:\nHi\n\nTool result call_1:\n42"
     );
 }
 
@@ -36,6 +37,8 @@ fn preserves_cursor_tools_in_request_body() {
 
     assert_eq!(request.model, "cursor/auto");
     assert!(request.has_client_tools);
+    assert_eq!(request.client_tools.len(), 1);
+    assert_eq!(request.client_tools[0].name, "lookup");
     assert!(request.prompt.contains("Hello"));
 }
 
@@ -128,12 +131,15 @@ fn ignores_cursor_tool_progress_frames_without_treating_them_as_interaction() {
         interaction_query: None,
     };
 
-    assert!(matches!(cursor_frame_action(&message), CursorFrameAction::None));
+    assert!(matches!(
+        cursor_frame_action(&message, &cursor_test_stream_context()),
+        CursorFrameAction::None
+    ));
     assert_eq!(cursor_probe_signal(&message), None);
 }
 
 #[test]
-fn maps_cursor_exec_frame_to_function_call() {
+fn rejects_cursor_exec_frames_as_unsupported_tools() {
     let message = AgentServerMessage {
         interaction_update: None,
         exec_server_message: Some(ExecServerMessage {
@@ -178,27 +184,271 @@ fn maps_cursor_exec_frame_to_function_call() {
         interaction_query: None,
     };
 
-    let CursorFrameAction::ToolCall(tool_call) = cursor_frame_action(&message) else {
-        panic!("expected exec frame to map to a tool call");
-    };
-
-    assert_eq!(tool_call.id, "call_abc");
-    assert_eq!(tool_call.function.name, "shell_stream");
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&tool_call.function.arguments).unwrap(),
-        json!({
-            "command": "printf probe",
-            "description": "probe shell",
-            "simple_commands": ["printf probe"],
-            "skip_approval": true,
-            "timeout": 30000,
-            "working_directory": "/tmp"
-        })
-    );
+    assert!(matches!(
+        cursor_frame_action(&message, &cursor_test_stream_context()),
+        CursorFrameAction::UnsupportedTool("shell_stream_args")
+    ));
 }
 
 #[test]
-fn maps_ask_question_interaction_query_to_function_call() {
+fn declines_builtin_grep_with_steering_reason() {
+    let exec = ExecServerMessage {
+        id: 9,
+        exec_id: "exec_grep".to_owned(),
+        grep_args: Some(GrepArgs {
+            pattern: "beta".to_owned(),
+            tool_call_id: "call_grep".to_owned(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let message = cursor_builtin_exec_decline(&exec).expect("grep should be declined");
+    let exec_client = message.exec_client_message.expect("exec client message");
+    assert_eq!(exec_client.id, 9);
+    assert_eq!(exec_client.exec_id.as_deref(), Some("exec_grep"));
+    let error = exec_client
+        .grep_result
+        .expect("grep result")
+        .error
+        .expect("grep error");
+    assert_eq!(error.error, CURSOR_BUILTIN_TOOL_DECLINE_REASON);
+}
+
+#[test]
+fn declines_builtin_read_ls_write_delete_with_paths() {
+    let read = cursor_builtin_exec_decline(&ExecServerMessage {
+        read_args: Some(ReadArgs {
+            path: "/tmp/x".to_owned(),
+            tool_call_id: "c".to_owned(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .and_then(|m| m.exec_client_message)
+    .and_then(|m| m.read_result)
+    .and_then(|r| r.error)
+    .expect("read error");
+    assert_eq!(read.path, "/tmp/x");
+    assert_eq!(read.error, CURSOR_BUILTIN_TOOL_DECLINE_REASON);
+
+    let ls = cursor_builtin_exec_decline(&ExecServerMessage {
+        ls_args: Some(LsArgs {
+            path: "/tmp".to_owned(),
+            tool_call_id: "c".to_owned(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .and_then(|m| m.exec_client_message)
+    .and_then(|m| m.ls_result)
+    .and_then(|r| r.error)
+    .expect("ls error");
+    assert_eq!(ls.path, "/tmp");
+
+    let write = cursor_builtin_exec_decline(&ExecServerMessage {
+        write_args: Some(WriteArgs {
+            path: "/tmp/out".to_owned(),
+            tool_call_id: "c".to_owned(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .and_then(|m| m.exec_client_message)
+    .and_then(|m| m.write_result)
+    .and_then(|r| r.error)
+    .expect("write error");
+    assert_eq!(write.path, "/tmp/out");
+
+    let delete = cursor_builtin_exec_decline(&ExecServerMessage {
+        delete_args: Some(DeleteArgs {
+            path: "/tmp/gone".to_owned(),
+            tool_call_id: "c".to_owned(),
+        }),
+        ..Default::default()
+    })
+    .and_then(|m| m.exec_client_message)
+    .and_then(|m| m.delete_result)
+    .and_then(|r| r.error)
+    .expect("delete error");
+    assert_eq!(delete.path, "/tmp/gone");
+}
+
+#[test]
+fn declines_builtin_shell_variants_and_encodes() {
+    let shell = ExecServerMessage {
+        id: 1,
+        shell_args: Some(ShellArgs {
+            command: "cat one.txt".to_owned(),
+            working_directory: "/tmp".to_owned(),
+            tool_call_id: "c".to_owned(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let message = cursor_builtin_exec_decline(&shell).expect("shell declined");
+    assert!(!message.encode_to_vec().is_empty());
+    let rejected = message
+        .exec_client_message
+        .expect("ecm")
+        .shell_result
+        .expect("shell result")
+        .rejected
+        .expect("rejected");
+    assert_eq!(rejected.command, "cat one.txt");
+    assert_eq!(rejected.working_directory, "/tmp");
+    assert_eq!(rejected.reason, CURSOR_BUILTIN_TOOL_DECLINE_REASON);
+
+    let stream = ExecServerMessage {
+        id: 2,
+        shell_stream_args: Some(ShellArgs {
+            command: "ls".to_owned(),
+            tool_call_id: "c".to_owned(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let reason = cursor_builtin_exec_decline(&stream)
+        .and_then(|m| m.exec_client_message)
+        .and_then(|m| m.shell_stream)
+        .and_then(|s| s.rejected)
+        .map(|r| r.reason)
+        .expect("shell stream rejected");
+    assert_eq!(reason, CURSOR_BUILTIN_TOOL_DECLINE_REASON);
+}
+
+#[test]
+fn does_not_decline_bridged_mcp_tool_call() {
+    let exec = ExecServerMessage {
+        mcp_args: Some(McpArgs {
+            name: "rotom-tools-BrewCoffee".to_owned(),
+            args: HashMap::new(),
+            tool_call_id: "c".to_owned(),
+            provider_identifier: ROTOM_CURSOR_MCP_PROVIDER.to_owned(),
+            tool_name: "BrewCoffee".to_owned(),
+        }),
+        ..Default::default()
+    };
+    assert!(cursor_builtin_exec_decline(&exec).is_none());
+}
+
+#[test]
+fn builds_rotom_mcp_tool_metadata_from_client_tools() {
+    let request = CursorRequest::from_body(&json!({
+        "model": "cursor/auto",
+        "input": [{"type": "message", "role": "user", "content": "Brew a latte"}],
+        "tools": [{
+            "type": "function",
+            "name": "BrewCoffee",
+            "description": "Brews coffee drinks.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "drink": {"type": "string"}
+                },
+                "required": ["drink"]
+            }
+        }]
+    }))
+    .unwrap();
+    let model = CursorModel {
+        model_id: "claude-4-sonnet".to_owned(),
+        display_model_id: "claude-4-sonnet".to_owned(),
+        display_name: "Sonnet 4".to_owned(),
+        display_name_short: "Sonnet".to_owned(),
+        aliases: vec![],
+        max_mode: Some(false),
+    };
+
+    let message = build_agent_client_message_with_mode(
+        &request,
+        &model,
+        "conv_1",
+        "msg_1",
+        CURSOR_AGENT_MODE_AGENT,
+    );
+    let run_request = message.run_request.expect("run request");
+    let mcp_tools = run_request.mcp_tools.expect("mcp tools");
+    let tool = mcp_tools.tools.first().expect("first mcp tool");
+    let request_context = run_request
+        .action
+        .and_then(|action| action.user_message_action)
+        .and_then(|action| action.request_context)
+        .expect("request context");
+
+    assert_eq!(tool.provider_identifier, ROTOM_CURSOR_MCP_PROVIDER);
+    assert_eq!(tool.tool_name, "BrewCoffee");
+    assert_eq!(tool.name, "rotom-tools-BrewCoffee");
+    assert_eq!(request_context.mcp_tools.len(), 1);
+    assert_eq!(request_context.mcp_instructions.len(), 1);
+    assert!(run_request.mcp_file_system_options.is_some());
+}
+
+#[test]
+fn converts_rotom_mcp_exec_frames_into_tool_calls() {
+    let mut args = HashMap::new();
+    args.insert(
+        "drink".to_owned(),
+        json_to_proto_value(&json!("latte")),
+    );
+    args.insert("size".to_owned(), json_to_proto_value(&json!("large")));
+    let message = AgentServerMessage {
+        interaction_update: None,
+        exec_server_message: Some(ExecServerMessage {
+            id: 9,
+            exec_id: "exec_mcp_1".to_owned(),
+            shell_args: None,
+            write_args: None,
+            delete_args: None,
+            grep_args: None,
+            read_args: None,
+            ls_args: None,
+            diagnostics_args: None,
+            request_context_args: None,
+            mcp_args: Some(McpArgs {
+                name: "rotom-tools-BrewCoffee".to_owned(),
+                args,
+                tool_call_id: "call_brew_1".to_owned(),
+                provider_identifier: ROTOM_CURSOR_MCP_PROVIDER.to_owned(),
+                tool_name: "BrewCoffee".to_owned(),
+            }),
+            shell_stream_args: None,
+            background_shell_spawn_args: None,
+            list_mcp_resources_exec_args: None,
+            read_mcp_resource_exec_args: None,
+            fetch_args: None,
+            record_screen_args: None,
+            computer_use_args: None,
+            write_shell_stdin_args: None,
+            execute_hook_args: None,
+            subagent_args: None,
+            redacted_read_args: None,
+            force_background_shell_args: None,
+            force_background_subagent_args: None,
+            mcp_state_exec_args: None,
+            subagent_await_args: None,
+        }),
+        conversation_checkpoint_update: None,
+        kv_server_message: None,
+        exec_server_control_message: None,
+        interaction_query: None,
+    };
+
+    match cursor_frame_action(&message, &cursor_test_stream_context()) {
+        CursorFrameAction::ToolCall(tool_call, _) => {
+            assert_eq!(tool_call.id, "call_brew_1");
+            assert_eq!(tool_call.function.name, "BrewCoffee");
+            assert_eq!(
+                serde_json::from_str::<Value>(&tool_call.function.arguments).unwrap(),
+                json!({"drink": "latte", "size": "large"})
+            );
+        }
+        _ => panic!("expected a bridged tool call"),
+    }
+}
+
+#[test]
+fn rejects_ask_question_interaction_query_as_unsupported_tool() {
     let message = AgentServerMessage {
         interaction_update: None,
         exec_server_message: None,
@@ -242,40 +492,14 @@ fn maps_ask_question_interaction_query_to_function_call() {
         }),
     };
 
-    let CursorFrameAction::ToolCall(tool_call) = cursor_frame_action(&message) else {
-        panic!("expected ask_question interaction to map to a tool call");
-    };
-
-    assert_eq!(tool_call.id, "ask_call_1");
-    assert_eq!(tool_call.function.name, "ask_question");
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&tool_call.function.arguments).unwrap(),
-        json!({
-            "title": "Need input",
-            "questions": [
-                {
-                    "id": "color",
-                    "prompt": "Pick a color",
-                    "options": [
-                        {"id": "red", "label": "Red"},
-                        {"id": "blue", "label": "Blue"}
-                    ],
-                    "allow_multiple": false
-                },
-                {
-                    "id": "notes",
-                    "prompt": "Add notes",
-                    "allow_multiple": true
-                }
-            ],
-            "run_async": true,
-            "async_original_tool_call_id": "orig_call"
-        })
-    );
+    assert!(matches!(
+        cursor_frame_action(&message, &cursor_test_stream_context()),
+        CursorFrameAction::UnsupportedTool("ask_question_interaction_query")
+    ));
 }
 
 #[test]
-fn maps_web_fetch_interaction_query_to_function_call() {
+fn rejects_web_fetch_interaction_query_as_unsupported_tool() {
     let message = AgentServerMessage {
         interaction_update: None,
         exec_server_message: None,
@@ -295,19 +519,10 @@ fn maps_web_fetch_interaction_query_to_function_call() {
         }),
     };
 
-    let CursorFrameAction::ToolCall(tool_call) = cursor_frame_action(&message) else {
-        panic!("expected web_fetch interaction to map to a tool call");
-    };
-
-    assert_eq!(tool_call.id, "fetch_call_1");
-    assert_eq!(tool_call.function.name, "web_fetch_request");
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&tool_call.function.arguments).unwrap(),
-        json!({
-            "url": "https://example.com",
-            "skip_approval": true
-        })
-    );
+    assert!(matches!(
+        cursor_frame_action(&message, &cursor_test_stream_context()),
+        CursorFrameAction::UnsupportedTool("web_fetch_request_query")
+    ));
 }
 
 #[test]
@@ -515,6 +730,7 @@ async fn live_cursor_tool_probe() {
                 model: requested_model.clone(),
                 prompt: "Use the terminal tool to run `printf cursor_tool_probe` and then reply with exactly PROBE_OK.".to_owned(),
                 has_client_tools: false,
+                client_tools: Vec::new(),
             };
             let request_id = format!("probe-{}", requested_model.replace('/', "_"));
             let conversation_id = cursor_uuid();
@@ -634,6 +850,7 @@ async fn live_cursor_mode_probe() {
                 model: requested_model.to_owned(),
                 prompt: "Use the terminal tool to run `printf cursor_mode_probe` and then reply with exactly MODE_OK.".to_owned(),
                 has_client_tools: false,
+                client_tools: Vec::new(),
             };
             let request_id = format!(
                 "probe-{}-mode-{}",
@@ -749,6 +966,7 @@ async fn live_cursor_env_mode_probe() {
             model: requested_model.to_owned(),
             prompt: "Use the terminal tool to run `printf cursor_env_mode_probe` and then reply with exactly MODE_OK.".to_owned(),
             has_client_tools: false,
+            client_tools: Vec::new(),
         };
         let request_id = format!(
             "probe-{}-env-mode-{}",
@@ -841,42 +1059,8 @@ async fn live_cursor_env_mode_probe() {
     );
 }
 
-#[test]
-fn response_events_emit_function_call_items() {
-    let body = json!({"model": "cursor/auto", "input": []});
-    let output = CursorOutput {
-        text: String::new(),
-        tool_calls: vec![ToolCall {
-            id: "call_1".to_owned(),
-            kind: "function".to_owned(),
-            function: FunctionCall {
-                name: "shell_stream".to_owned(),
-                arguments: "{\"command\":\"printf hi\"}".to_owned(),
-            },
-        }],
-        usage: None,
-        request_id: Some("req_tool".to_owned()),
-    };
-
-    let events = response_events(&body, &output);
-
-    assert!(
-        events.iter().any(|event| {
-            event.event.as_deref() == Some("response.output_item.done")
-                && event.value["item"]["type"] == "function_call"
-                && event.value["item"]["name"] == "shell_stream"
-        })
-    );
-    assert!(
-        events.iter().any(|event| {
-            event.event.as_deref() == Some("response.completed")
-                && event.value["response"]["output"][0]["type"] == "function_call"
-        })
-    );
-}
-
 #[tokio::test]
-#[ignore = "live Cursor tool output probe; run with ROTOM_CURSOR_AGENT_MODE=1 cargo test live_cursor_tool_output_probe -- --ignored --nocapture"]
+#[ignore = "live Cursor unsupported tool probe; run with ROTOM_CURSOR_AGENT_MODE=1 cargo test live_cursor_tool_output_probe -- --ignored --nocapture"]
 async fn live_cursor_tool_output_probe() {
     let store = AuthStore::from_default_path().unwrap();
     let credentials = store
@@ -892,17 +1076,91 @@ async fn live_cursor_tool_output_probe() {
         }]
     });
 
-    let output = tokio::time::timeout(std::time::Duration::from_secs(30), run_cursor_api(&body, &credentials))
+    let error = tokio::time::timeout(std::time::Duration::from_secs(30), run_cursor_api(&body, &credentials))
         .await
         .expect("Cursor tool output probe timed out")
-        .expect("Cursor tool output probe failed");
+        .expect_err("Cursor tool output probe should reject Cursor tool frames");
 
+    let message = error.to_string();
+    eprintln!("cursor unsupported tool probe: {message}");
+    assert!(message.contains("unsupported tool response type"));
+}
+
+#[tokio::test]
+#[ignore = "live Cursor MCP tool roundtrip probe; run with cargo test live_cursor_mcp_tool_roundtrip_probe -- --ignored --nocapture"]
+async fn live_cursor_mcp_tool_roundtrip_probe() {
+    let store = AuthStore::from_default_path().unwrap();
+    let credentials = store
+        .load_provider(Provider::Cursor)
+        .unwrap()
+        .expect("Cursor credentials are required for the live probe");
+    let tool = json!({
+        "type": "function",
+        "name": "BrewCoffee",
+        "description": "Brews a coffee drink and returns an order id.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "drink": {"type": "string"},
+                "milk": {"type": "string"},
+                "size": {"type": "string"}
+            },
+            "required": ["drink", "milk", "size"],
+            "additionalProperties": false
+        }
+    });
+    let first_body = json!({
+        "model": "cursor/claude-fable-5-thinking-max",
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{
+                "type": "input_text",
+                "text": "Use the BrewCoffee tool to brew a medium latte with oat milk. Do not answer in plain text; call the tool."
+            }]
+        }],
+        "tools": [tool.clone()]
+    });
+
+    let first_output = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        run_cursor_api(&first_body, &credentials),
+    )
+    .await
+    .expect("first MCP tool probe timed out")
+    .expect("first MCP tool probe failed");
     eprintln!(
-        "cursor tool output probe: tool_calls={} text={}",
-        output.tool_calls.len(),
-        output.text.replace('\n', "\\n")
+        "cursor mcp roundtrip first: text={} tool_calls={:?}",
+        first_output.text.replace('\n', "\\n"),
+        first_output.tool_calls
     );
-    assert!(!output.tool_calls.is_empty(), "expected at least one Cursor tool call");
+    let first_call = first_output
+        .tool_calls
+        .first()
+        .expect("expected Cursor to call BrewCoffee");
+
+    let second_body = json!({
+        "model": "cursor/claude-fable-5-thinking-max",
+        "input": [{
+            "type": "function_call_output",
+            "call_id": first_call.id,
+            "output": "{\"order_id\":\"latte-1\",\"status\":\"ready\"}"
+        }],
+        "tools": [tool]
+    });
+
+    let second_output = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        run_cursor_api(&second_body, &credentials),
+    )
+    .await
+    .expect("second MCP tool probe timed out")
+    .expect("second MCP tool probe failed");
+    eprintln!(
+        "cursor mcp roundtrip second: text={} tool_calls={:?}",
+        second_output.text.replace('\n', "\\n"),
+        second_output.tool_calls
+    );
 }
 
 #[test]

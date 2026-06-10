@@ -1,10 +1,3 @@
-fn body_has_client_tools(body: &Value) -> bool {
-    body
-        .get("tools")
-        .and_then(Value::as_array)
-        .is_some_and(|tools| !tools.is_empty())
-}
-
 fn input_item_prompt_section(item: &Value) -> Result<Option<String>> {
     match item.get("type").and_then(Value::as_str) {
         Some("message") | None => message_prompt_section(item),

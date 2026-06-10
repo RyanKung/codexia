@@ -920,6 +920,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "prost-types"
+version = "0.13.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52c2c1bf36ddb1a1c396b3601a3cec27c2462e45f07c386894ec3ccf5332bd16"
+dependencies = [
+ "prost",
+]
+
+[[package]]
 name = "quinn"
 version = "0.11.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1076,7 +1085,7 @@ dependencies = [
 
 [[package]]
 name = "rotom"
-version = "1.5.5"
+version = "1.5.6"
 dependencies = [
  "async-stream",
  "axum",
@@ -1088,6 +1097,7 @@ dependencies = [
  "hex",
  "libc",
  "prost",
+ "prost-types",
  "rand",
  "reqwest",
  "rusqlite",

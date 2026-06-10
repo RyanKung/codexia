@@ -2,8 +2,32 @@
 struct AgentClientMessage {
     #[prost(message, optional, tag = "1")]
     run_request: Option<AgentRunRequest>,
+    #[prost(message, optional, tag = "2")]
+    exec_client_message: Option<ExecClientMessage>,
+    #[prost(message, optional, tag = "3")]
+    kv_client_message: Option<KvClientMessage>,
+    #[prost(message, optional, tag = "4")]
+    conversation_action: Option<ConversationAction>,
+    #[prost(message, optional, tag = "5")]
+    exec_client_control_message: Option<ExecClientControlMessage>,
     #[prost(message, optional, tag = "7")]
     client_heartbeat: Option<ClientHeartbeat>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct BidiRequestId {
+    #[prost(string, tag = "1")]
+    request_id: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct BidiAppendRequest {
+    #[prost(string, tag = "1")]
+    data: String,
+    #[prost(message, optional, tag = "2")]
+    request_id: Option<BidiRequestId>,
+    #[prost(int64, tag = "3")]
+    append_seqno: i64,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -23,6 +47,8 @@ struct AgentRunRequest {
     mcp_tools: Option<McpTools>,
     #[prost(string, optional, tag = "5")]
     conversation_id: Option<String>,
+    #[prost(message, optional, tag = "6")]
+    mcp_file_system_options: Option<McpFileSystemOptions>,
     #[prost(bool, optional, tag = "12")]
     exclude_workspace_context: Option<bool>,
     #[prost(string, optional, tag = "16")]
@@ -42,12 +68,67 @@ struct ConversationStateStructure {
 }
 
 #[derive(Clone, PartialEq, Message)]
-struct McpTools {}
+struct McpTools {
+    #[prost(message, repeated, tag = "1")]
+    tools: Vec<McpToolDefinition>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct McpToolDefinition {
+    #[prost(string, tag = "1")]
+    name: String,
+    #[prost(string, tag = "2")]
+    description: String,
+    #[prost(message, optional, tag = "3")]
+    input_schema: Option<::prost_types::Value>,
+    #[prost(string, tag = "4")]
+    provider_identifier: String,
+    #[prost(string, tag = "5")]
+    tool_name: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct McpInstructions {
+    #[prost(string, tag = "1")]
+    server_name: String,
+    #[prost(string, tag = "2")]
+    instructions: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct McpFileSystemOptions {
+    #[prost(bool, optional, tag = "1")]
+    enabled: Option<bool>,
+    #[prost(string, optional, tag = "2")]
+    workspace_project_dir: Option<String>,
+    #[prost(message, repeated, tag = "3")]
+    descriptors: Vec<McpDescriptor>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct McpDescriptor {
+    #[prost(string, tag = "1")]
+    server_name: String,
+    #[prost(string, tag = "2")]
+    server_identifier: String,
+    #[prost(string, optional, tag = "3")]
+    folder_path: Option<String>,
+    #[prost(string, optional, tag = "4")]
+    server_use_instructions: Option<String>,
+}
 
 #[derive(Clone, PartialEq, Message)]
 struct ConversationAction {
     #[prost(message, optional, tag = "1")]
     user_message_action: Option<UserMessageAction>,
+    #[prost(message, optional, tag = "2")]
+    resume_action: Option<ResumeAction>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct ResumeAction {
+    #[prost(message, optional, tag = "2")]
+    request_context: Option<RequestContext>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -112,7 +193,7 @@ struct AgentServerMessage {
     #[prost(message, optional, tag = "3")]
     conversation_checkpoint_update: Option<EmptyMessage>,
     #[prost(message, optional, tag = "4")]
-    kv_server_message: Option<EmptyMessage>,
+    kv_server_message: Option<KvServerMessage>,
     #[prost(message, optional, tag = "5")]
     exec_server_control_message: Option<EmptyMessage>,
     #[prost(message, optional, tag = "7")]
@@ -201,7 +282,7 @@ struct ExecServerMessage {
     #[prost(message, optional, tag = "10")]
     request_context_args: Option<RequestContextArgs>,
     #[prost(message, optional, tag = "11")]
-    mcp_args: Option<EmptyMessage>,
+    mcp_args: Option<McpArgs>,
     #[prost(message, optional, tag = "14")]
     shell_stream_args: Option<ShellArgs>,
     #[prost(message, optional, tag = "16")]
@@ -430,6 +511,10 @@ struct EmptyMessage {}
 struct RequestContext {
     #[prost(message, optional, tag = "4")]
     env: Option<RequestContextEnv>,
+    #[prost(message, repeated, tag = "7")]
+    mcp_tools: Vec<McpToolDefinition>,
+    #[prost(message, repeated, tag = "14")]
+    mcp_instructions: Vec<McpInstructions>,
     #[prost(bool, optional, tag = "17")]
     web_search_enabled: Option<bool>,
     #[prost(bool, optional, tag = "19")]
@@ -470,6 +555,8 @@ struct RequestContextEnv {
     sandbox_enabled: bool,
     #[prost(string, tag = "10")]
     time_zone: String,
+    #[prost(string, optional, tag = "11")]
+    workspace_project_dir: Option<String>,
     #[prost(bool, optional, tag = "14")]
     sandbox_supported: Option<bool>,
     #[prost(bool, optional, tag = "18")]
@@ -480,6 +567,273 @@ struct RequestContextEnv {
     is_working_dir_home_dir: Option<bool>,
     #[prost(string, optional, tag = "21")]
     process_working_directory: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct McpArgs {
+    #[prost(string, tag = "1")]
+    name: String,
+    #[prost(map = "string, message", tag = "2")]
+    args: std::collections::HashMap<String, ::prost_types::Value>,
+    #[prost(string, tag = "3")]
+    tool_call_id: String,
+    #[prost(string, tag = "4")]
+    provider_identifier: String,
+    #[prost(string, tag = "5")]
+    tool_name: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct ExecClientMessage {
+    #[prost(uint32, tag = "1")]
+    id: u32,
+    #[prost(message, optional, tag = "2")]
+    shell_result: Option<ShellResult>,
+    #[prost(message, optional, tag = "3")]
+    write_result: Option<WriteResult>,
+    #[prost(message, optional, tag = "4")]
+    delete_result: Option<DeleteResult>,
+    #[prost(message, optional, tag = "5")]
+    grep_result: Option<GrepResult>,
+    #[prost(message, optional, tag = "7")]
+    read_result: Option<ReadResult>,
+    #[prost(message, optional, tag = "29")]
+    redacted_read_result: Option<ReadResult>,
+    #[prost(message, optional, tag = "8")]
+    ls_result: Option<LsResult>,
+    #[prost(message, optional, tag = "9")]
+    diagnostics_result: Option<DiagnosticsResult>,
+    #[prost(message, optional, tag = "10")]
+    request_context_result: Option<RequestContextExecResult>,
+    #[prost(message, optional, tag = "11")]
+    mcp_result: Option<McpResult>,
+    #[prost(message, optional, tag = "14")]
+    shell_stream: Option<ShellStream>,
+    #[prost(message, optional, tag = "20")]
+    fetch_result: Option<FetchResult>,
+    #[prost(string, optional, tag = "15")]
+    exec_id: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct ShellResult {
+    #[prost(message, optional, tag = "4")]
+    rejected: Option<ShellRejected>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct ShellRejected {
+    #[prost(string, tag = "1")]
+    command: String,
+    #[prost(string, tag = "2")]
+    working_directory: String,
+    #[prost(string, tag = "3")]
+    reason: String,
+    #[prost(bool, tag = "4")]
+    is_readonly: bool,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct ShellStream {
+    #[prost(message, optional, tag = "5")]
+    rejected: Option<ShellRejected>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct GrepResult {
+    #[prost(message, optional, tag = "2")]
+    error: Option<GrepError>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct GrepError {
+    #[prost(string, tag = "1")]
+    error: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct ReadResult {
+    #[prost(message, optional, tag = "2")]
+    error: Option<ReadError>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct ReadError {
+    #[prost(string, tag = "1")]
+    path: String,
+    #[prost(string, tag = "2")]
+    error: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct LsResult {
+    #[prost(message, optional, tag = "2")]
+    error: Option<LsError>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct LsError {
+    #[prost(string, tag = "1")]
+    path: String,
+    #[prost(string, tag = "2")]
+    error: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct WriteResult {
+    #[prost(message, optional, tag = "5")]
+    error: Option<WriteError>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct WriteError {
+    #[prost(string, tag = "1")]
+    path: String,
+    #[prost(string, tag = "2")]
+    error: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct DeleteResult {
+    #[prost(message, optional, tag = "7")]
+    error: Option<DeleteError>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct DeleteError {
+    #[prost(string, tag = "1")]
+    path: String,
+    #[prost(string, tag = "2")]
+    error: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct DiagnosticsResult {
+    #[prost(message, optional, tag = "2")]
+    error: Option<DiagnosticsError>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct DiagnosticsError {
+    #[prost(string, tag = "1")]
+    path: String,
+    #[prost(string, tag = "2")]
+    error: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct FetchResult {
+    #[prost(message, optional, tag = "2")]
+    error: Option<FetchError>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct FetchError {
+    #[prost(string, tag = "1")]
+    url: String,
+    #[prost(string, tag = "2")]
+    error: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct ExecClientControlMessage {
+    #[prost(message, optional, tag = "1")]
+    stream_close: Option<ExecClientStreamClose>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct ExecClientStreamClose {
+    #[prost(uint32, tag = "1")]
+    id: u32,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct McpResult {
+    #[prost(message, optional, tag = "1")]
+    success: Option<McpSuccess>,
+    #[prost(message, optional, tag = "2")]
+    error: Option<McpError>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct McpError {
+    #[prost(string, tag = "1")]
+    error: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct McpSuccess {
+    #[prost(message, repeated, tag = "1")]
+    content: Vec<McpToolResultContentItem>,
+    #[prost(bool, optional, tag = "2")]
+    is_error: Option<bool>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct McpToolResultContentItem {
+    #[prost(message, optional, tag = "1")]
+    text: Option<McpTextContent>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct McpTextContent {
+    #[prost(string, tag = "1")]
+    text: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct KvServerMessage {
+    #[prost(uint32, tag = "1")]
+    id: u32,
+    #[prost(message, optional, tag = "2")]
+    get_blob_args: Option<KvGetBlobArgs>,
+    #[prost(message, optional, tag = "3")]
+    set_blob_args: Option<KvSetBlobArgs>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct KvGetBlobArgs {
+    #[prost(bytes = "vec", tag = "1")]
+    blob_id: Vec<u8>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct KvSetBlobArgs {
+    #[prost(bytes = "vec", tag = "1")]
+    blob_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    blob_data: Vec<u8>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct KvClientMessage {
+    #[prost(uint32, tag = "1")]
+    id: u32,
+    #[prost(message, optional, tag = "2")]
+    get_blob_result: Option<KvGetBlobResult>,
+    #[prost(message, optional, tag = "3")]
+    set_blob_result: Option<KvSetBlobResult>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct KvGetBlobResult {
+    #[prost(bytes = "vec", optional, tag = "1")]
+    data: Option<Vec<u8>>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct KvSetBlobResult {}
+
+#[derive(Clone, PartialEq, Message)]
+struct RequestContextExecResult {
+    #[prost(message, optional, tag = "1")]
+    success: Option<RequestContextSuccess>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct RequestContextSuccess {
+    #[prost(message, optional, tag = "1")]
+    request_context: Option<RequestContext>,
 }
 
 fn minimal_request_context() -> RequestContext {
@@ -493,12 +847,15 @@ fn minimal_request_context() -> RequestContext {
             shell: std::env::var("SHELL").unwrap_or_default(),
             sandbox_enabled: false,
             time_zone: std::env::var("TZ").unwrap_or_default(),
+            workspace_project_dir: cwd.clone(),
             sandbox_supported: Some(false),
             secret_redaction_enabled: Some(false),
             computer_use_supported: Some(false),
             is_working_dir_home_dir: Some(false),
             process_working_directory: cwd,
         }),
+        mcp_tools: Vec::new(),
+        mcp_instructions: Vec::new(),
         web_search_enabled: Some(false),
         repository_info_should_query_prod: Some(false),
         web_fetch_enabled: Some(false),

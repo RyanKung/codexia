@@ -162,15 +162,22 @@ Cursor runtime support talks directly to Cursor's AgentService over
 HTTPS/HTTP2 using the browser-login token. rotom does not spawn or inspect any
 local Cursor binary, does not write Cursor's global
 `~/.cursor/cli-config.json`, and does not grant workspace permissions. Requests
-are sent as ask-mode AgentService runs with a minimal context.
+default to agent-mode AgentService runs, configurable through
+`ROTOM_CURSOR_AGENT_MODE`.
 
-Cursor is an agent runtime, not an OpenAI or Anthropic model API. rotom
-therefore forwards text chat/messages/responses to Cursor and preserves
-OpenAI-style tool metadata at the API boundary. Cursor's `GetUsableModels`
-response does not currently expose a dedicated tool-capability field, so rotom
-does not infer support from `maxMode`. Multimodal inputs are rejected instead
-of being silently dropped. Sampling and output-length controls are not passed
-to Cursor because AgentService does not expose equivalent ask-mode fields.
+Cursor is an agent runtime, not a plain model API, so client-side tools are
+bridged rather than executed by rotom. Tools supplied in OpenAI/Anthropic
+requests are advertised to Cursor as an in-process MCP server (`rotom-tools`).
+When the model calls one, rotom surfaces it back as a standard
+`tool_call`/`tool_use` item so the calling agent (Claude Code, etc.) executes it
+locally, then feeds the returned tool result into the same AgentService stream.
+Cursor also injects its own built-in agent tools (shell, read, list, grep, edit,
+write, ...) that the bridge cannot run; rotom tells the model it operates in a
+remote environment where those built-ins are unavailable, and if the model still
+calls one, rotom returns a declined tool result steering it back to the bridged
+tools. Multimodal inputs are rejected instead of being silently dropped, and
+sampling/output-length controls are not forwarded because AgentService exposes
+no equivalent fields.
 
 ## Use With SDKs
 
@@ -435,11 +442,13 @@ effective sampling or output-length controls. Grok Responses requests preserve
 the supported controls that xAI accepts, including `temperature`, `top_p`,
 `max_output_tokens`, `stop`, `text`, `include`, and `parallel_tool_calls`.
 Cursor requests are adapted directly to Cursor AgentService's HTTP/2 Connect
-protocol; unsupported controls are not forwarded, and OpenAI-compatible tools
-are preserved as request metadata rather than inferred from `maxMode`. Cursor
-`exec_server_message` frames are surfaced as OpenAI-compatible `function_call`
-items, and supported interactive queries such as `ask_question` and
-`web_fetch_request` are exposed through the same compatibility layer.
+protocol; unsupported controls are not forwarded. OpenAI/Anthropic client tools
+are bridged to Cursor through an in-process `rotom-tools` MCP server and surfaced
+back as standard tool calls for the client to execute (see the Cursor runtime
+notes above). Cursor's own built-in agent tools are not executed by rotom:
+built-in `exec_server_message` tools (shell, read, list, grep, write, ...) are
+declined with guidance that steers the model back to the bridged tools, while
+interactive queries such as `ask_question` and `web_fetch_request` are rejected.
 Multimodal content is rejected unless it can be represented safely in
 text-only agent input. rotom defaults Cursor requests to `agent.v1.AgentMode`
 `AGENT (1)` instead of `ASK (2)`. You can override that with

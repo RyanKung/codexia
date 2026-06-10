@@ -581,6 +581,9 @@ fn anthropic_user_block_items(blocks: &[ContentBlock]) -> Vec<Value> {
             if let Some(cache_control) = &block.cache_control {
                 item["cache_control"] = cache_control.clone();
             }
+            if let Some(is_error) = block.is_error {
+                item["is_error"] = Value::Bool(is_error);
+            }
             items.push(item);
         } else if let Some(part) = anthropic_user_content_part(block) {
             parts.push(part);

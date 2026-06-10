@@ -1,6 +1,6 @@
 [package]
 name = "rotom"
-version = "1.5.5"
+version = "1.5.6"
 edition = "2024"
 rust-version = "1.86"
 description = "OpenAI- and Anthropic-compatible local API gateway backed by OAuth providers."
@@ -33,6 +33,7 @@ futures-util = "0.3"
 hex = "0.4"
 libc = "0.2"
 prost = "0.13"
+prost-types = "0.13"
 rand = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["http2", "json", "rustls-tls", "stream"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
