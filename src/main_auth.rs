@@ -95,6 +95,10 @@ fn resolve_served_providers(
         return Ok(vec![value.parse()?]);
     }
 
+    if let Some(provider) = config.and_then(|item| item.provider) {
+        return Ok(vec![provider]);
+    }
+
     let mut providers = store
         .load_all()?
         .into_iter()

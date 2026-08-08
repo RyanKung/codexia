@@ -5,11 +5,44 @@ use super::{
     build_update_command, credential_subject, daemon_endpoint_lines, format_bind_addresses,
     format_login_provider_choice, format_models, new_provider_daemon_restart_hint,
     parse_bind_hosts, parse_login_provider_choice, resolve_model_fallback,
-    resolve_status_providers, rotom_version_line, token_expiry_message,
+    resolve_served_providers, resolve_status_providers, rotom_version_line, token_expiry_message,
 };
 use clap::Parser;
-use rotom::config::{Credentials, Provider, now_unix};
+use rotom::config::{AuthStore, Credentials, Provider, now_unix};
 use rotom::timefmt::format_duration;
+use std::{
+    fs,
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+struct TestAuthStore {
+    store: AuthStore,
+    path: PathBuf,
+}
+
+impl TestAuthStore {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "rotom-main-test-{}-{}.json",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        Self {
+            store: AuthStore::new(path.clone()),
+            path,
+        }
+    }
+}
+
+impl Drop for TestAuthStore {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
 
 #[test]
 fn reuses_shared_duration_formatting() {
@@ -159,6 +192,60 @@ fn prefers_explicit_model_fallback_over_default() {
         resolve_model_fallback(None, Some(&config)),
         Some("gpt-5.4".into())
     );
+}
+
+#[test]
+fn served_provider_prefers_cli_provider() {
+    let auth = TestAuthStore::new();
+    save_provider_credentials(&auth.store, Provider::Codex);
+    save_provider_credentials(&auth.store, Provider::Cursor);
+    let config = AppConfig {
+        provider: Some(Provider::Cursor),
+        ..AppConfig::default()
+    };
+
+    let providers =
+        resolve_served_providers(&auth.store, Some("grok".into()), Some(&config)).unwrap();
+
+    assert_eq!(providers, [Provider::Grok]);
+}
+
+#[test]
+fn served_provider_prefers_config_provider_over_saved_providers() {
+    let auth = TestAuthStore::new();
+    save_provider_credentials(&auth.store, Provider::Codex);
+    save_provider_credentials(&auth.store, Provider::Cursor);
+    let config = AppConfig {
+        provider: Some(Provider::Codex),
+        ..AppConfig::default()
+    };
+
+    let providers = resolve_served_providers(&auth.store, None, Some(&config)).unwrap();
+
+    assert_eq!(providers, [Provider::Codex]);
+}
+
+#[test]
+fn served_provider_uses_saved_providers_without_selection() {
+    let auth = TestAuthStore::new();
+    save_provider_credentials(&auth.store, Provider::Cursor);
+    save_provider_credentials(&auth.store, Provider::Codex);
+
+    let providers = resolve_served_providers(&auth.store, None, None).unwrap();
+
+    assert_eq!(providers, [Provider::Codex, Provider::Cursor]);
+}
+
+fn save_provider_credentials(store: &AuthStore, provider: Provider) {
+    store
+        .save(&Credentials {
+            provider,
+            access_token: "access".into(),
+            refresh_token: "refresh".into(),
+            expires_at: now_unix() + 90,
+            account_id: String::new(),
+        })
+        .unwrap();
 }
 
 #[test]
