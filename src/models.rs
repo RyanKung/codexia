@@ -13,6 +13,9 @@ pub const OPENCLAW_CODEX_MODELS: &[&str] = &[
     "gpt-5.4",
     "gpt-5.4-mini",
     "gpt-5.5",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
 ];
 
 /// Default Grok model identifiers exposed by the project.
@@ -210,13 +213,7 @@ fn highlight_model_rank(provider: Provider, id: &str) -> Option<ModelRank> {
 
     let (major, minor) = strongest_version(normalized)?;
     let family = match provider {
-        Provider::Codex => {
-            if normalized.starts_with("gpt-") {
-                80
-            } else {
-                return None;
-            }
-        }
+        Provider::Codex => codex_family_rank(normalized)?,
         Provider::Grok => {
             if normalized.starts_with("grok-") {
                 80
@@ -284,6 +281,22 @@ fn is_lightweight_highlight_variant(id: &str) -> bool {
         || id.contains("-flash")
         || id.contains("-nano")
         || id.contains("-spark")
+}
+
+fn codex_family_rank(id: &str) -> Option<u16> {
+    if !id.starts_with("gpt-") {
+        return None;
+    }
+
+    if id.starts_with("gpt-5.6-sol") {
+        Some(100)
+    } else if id.starts_with("gpt-5.6-terra") {
+        Some(95)
+    } else if id.starts_with("gpt-5.6-luna") {
+        Some(90)
+    } else {
+        Some(80)
+    }
 }
 
 fn kiro_family_rank(id: &str) -> Option<u16> {
@@ -413,11 +426,14 @@ mod tests {
     }
 
     #[test]
-    fn defaults_include_gpt_55_models() {
+    fn defaults_include_gpt_56_models() {
         let ids = resolve_model_ids();
 
-        assert!(ids.iter().any(|id| id == "gpt-5.5"));
-        assert!(!ids.iter().any(|id| id == "gpt-5.5-mini"));
+        assert!(ids.iter().any(|id| id == "gpt-5.6-sol"));
+        assert!(ids.iter().any(|id| id == "gpt-5.6-terra"));
+        assert!(ids.iter().any(|id| id == "gpt-5.6-luna"));
+        assert!(!ids.iter().any(|id| id == "gpt-5.6"));
+        assert!(!ids.iter().any(|id| id == "gpt-5.6-mini"));
     }
 
     #[test]
@@ -425,7 +441,7 @@ mod tests {
         let ids = resolve_model_ids_for_provider(Provider::Grok);
 
         assert!(ids.iter().any(|id| id == "grok-4.3"));
-        assert!(!ids.iter().any(|id| id == "gpt-5.5"));
+        assert!(!ids.iter().any(|id| id == "gpt-5.6-sol"));
     }
 
     #[test]
@@ -454,10 +470,10 @@ mod tests {
         assert_eq!(
             highlight_model_ids_for_provider(Provider::Codex, &ids),
             vec![
+                "gpt-5.6-sol".to_owned(),
+                "gpt-5.6-terra".to_owned(),
+                "gpt-5.6-luna".to_owned(),
                 "gpt-5.5".to_owned(),
-                "gpt-5.4".to_owned(),
-                "gpt-5.3-codex".to_owned(),
-                "gpt-5.2-codex".to_owned(),
             ]
         );
     }
@@ -549,7 +565,10 @@ mod tests {
         assert_eq!(provider_for_model("xai/grok-4.3"), Provider::Grok);
         assert_eq!(provider_for_model("grok/grok-4.3"), Provider::Grok);
         assert_eq!(provider_for_model("openai-codex/grok-4.3"), Provider::Grok);
-        assert_eq!(provider_for_model("openai-codex/gpt-5.5"), Provider::Codex);
+        assert_eq!(
+            provider_for_model("openai-codex/gpt-5.6-luna"),
+            Provider::Codex
+        );
         assert_eq!(provider_for_model("kiro/auto"), Provider::Kiro);
         assert_eq!(provider_for_model("cursor/gpt-5"), Provider::Cursor);
         assert_eq!(provider_for_model("sonnet-4"), Provider::Cursor);
@@ -574,7 +593,7 @@ mod tests {
                 .map(|model| model.owned_by)
         };
 
-        assert_eq!(owner_for("gpt-5.5"), Some("openai-codex"));
+        assert_eq!(owner_for("gpt-5.6-sol"), Some("openai-codex"));
         assert_eq!(owner_for("grok-4.3"), Some("xai"));
         assert_eq!(owner_for("auto"), Some("kiro"));
         assert_eq!(owner_for("cursor/gpt-5"), Some("cursor"));
