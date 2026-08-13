@@ -1098,15 +1098,14 @@ fn cursor_builtin_exec_decline(exec: &ExecServerMessage) -> Option<AgentClientMe
                 error: reason,
             }),
         });
-    } else if let Some(fetch) = exec.fetch_args.as_ref() {
+    } else {
+        let fetch = exec.fetch_args.as_ref()?;
         message.fetch_result = Some(FetchResult {
             error: Some(FetchError {
                 url: fetch.url.clone(),
                 error: reason,
             }),
         });
-    } else {
-        return None;
     }
 
     Some(AgentClientMessage {
