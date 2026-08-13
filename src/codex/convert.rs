@@ -386,7 +386,8 @@ fn clamp_reasoning_effort(model: &str, effort: &str) -> String {
     if (id.starts_with("gpt-5.2")
         || id.starts_with("gpt-5.3")
         || id.starts_with("gpt-5.4")
-        || id.starts_with("gpt-5.5"))
+        || id.starts_with("gpt-5.5")
+        || id.starts_with("gpt-5.6"))
         && effort == "minimal"
     {
         "low".to_owned()
@@ -486,7 +487,7 @@ mod tests {
     #[test]
     fn does_not_forward_unsupported_sampling_controls() {
         let body = to_codex_request(&request(json!({
-            "model": "gpt-5.5",
+            "model": "gpt-5.6-terra",
             "messages": [{"role": "user", "content": "hello"}],
             "temperature": 0.2,
             "top_p": 0.7,

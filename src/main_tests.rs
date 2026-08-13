@@ -253,6 +253,7 @@ fn formats_models_grouped_by_provider() {
     let output = format_models(&[Provider::Codex, Provider::Grok]);
 
     assert!(output.contains("OpenAI (codex)\n  gpt-5.1"));
+    assert!(output.contains("  gpt-5.6-sol\n"));
     assert!(output.contains("Grok (grok)\n  grok-4.3"));
     assert!(!output.contains("Kiro (kiro)"));
     assert!(output.contains("\n\nGrok (grok)"));
@@ -264,7 +265,7 @@ fn formats_single_provider_models() {
 
     assert!(output.starts_with("Grok (grok)\n"));
     assert!(output.contains("  grok-4\n"));
-    assert!(!output.contains("gpt-5.5"));
+    assert!(!output.contains("gpt-5.6-sol"));
 }
 
 #[test]

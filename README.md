@@ -22,7 +22,7 @@ Claude Code running through Grok and GPT:
   <img src="demos/claude-grok-4.3.gif" alt="Claude Code using grok-4.3 through rotom" width="720">
 </p>
 <p align="center">
-  <img src="demos/claude-gpt-5.5.gif" alt="Claude Code using gpt-5.5 through rotom" width="720">
+  <img src="demos/claude-gpt-5.5.gif" alt="Claude Code using GPT through rotom" width="720">
 </p>
 
 ## Quick Start
@@ -38,7 +38,7 @@ Point Claude Code (or any Anthropic-compatible client) at the gateway:
 ```bash
 export ANTHROPIC_BASE_URL=http://127.0.0.1:14550
 export ANTHROPIC_AUTH_TOKEN=local-secret
-export ANTHROPIC_MODEL="gpt-5.5"
+export ANTHROPIC_MODEL="gpt-5.6-sol"
 
 claude
 ```
@@ -51,7 +51,7 @@ claude -p "Reply with the single word OK"
 
 > Point `ANTHROPIC_BASE_URL` at the server root, **not** `/v1` — clients append
 > `/v1/messages` themselves. `ANTHROPIC_AUTH_TOKEN` is your local `--api-key`,
-> not an upstream token. Use a model that `/v1/models` lists (e.g. `gpt-5.5`).
+> not an upstream token. Use a model that `/v1/models` lists (e.g. `gpt-5.6-sol`).
 
 ## Logging In
 
@@ -86,9 +86,10 @@ rotom models                      # everything rotom exposes
 rotom models --provider grok      # one provider
 ```
 
-Common ids include `gpt-5.5`, `grok-4.3`, Kiro's `claude-*` family, and
-`cursor/auto`. rotom fetches the live registry where the provider supports it
-and falls back to built-in aliases otherwise.
+Common ids include `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`,
+`grok-4.3`, Kiro's `claude-*` family, and `cursor/auto`. rotom fetches the
+live registry where the provider supports it and falls back to built-in aliases
+otherwise.
 
 Unknown Anthropic ids like `claude-sonnet-*` are rewritten to a fallback
 (default `gpt-5.5`). Override with `--model-fallback` or `ROTOM_MODEL_FALLBACK`.
@@ -101,7 +102,7 @@ OpenAI-compatible:
 curl http://127.0.0.1:14550/v1/chat/completions \
   -H 'content-type: application/json' \
   -H 'authorization: Bearer local-secret' \
-  -d '{"model": "gpt-5.5", "messages": [{"role": "user", "content": "hello"}]}'
+  -d '{"model": "gpt-5.6-sol", "messages": [{"role": "user", "content": "hello"}]}'
 ```
 
 Anthropic-compatible:
@@ -111,7 +112,7 @@ curl http://127.0.0.1:14550/v1/messages \
   -H 'content-type: application/json' \
   -H 'x-api-key: local-secret' \
   -H 'anthropic-version: 2023-06-01' \
-  -d '{"model": "gpt-5.5", "max_tokens": 1024, "messages": [{"role": "user", "content": "hello"}]}'
+  -d '{"model": "gpt-5.6-sol", "max_tokens": 1024, "messages": [{"role": "user", "content": "hello"}]}'
 ```
 
 ## Running As a Service
