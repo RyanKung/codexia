@@ -61,7 +61,7 @@ a flag:
 | Provider     | Command                        |
 | ------------ | ------------------------------ |
 | OpenAI/Codex | `rotom login --provider openai`|
-| Grok (xAI)   | `rotom login --provider grok`  |
+| Grok (xAI)   | `rotom login --grok`           |
 | Kiro         | `rotom login --kiro`           |
 | Cursor       | `rotom login --cursor`         |
 

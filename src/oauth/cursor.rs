@@ -8,7 +8,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::time::Duration;
+use std::{error::Error as StdError, time::Duration};
 use tokio::time::sleep;
 use url::Url;
 
@@ -136,16 +136,24 @@ impl CursorOAuthClient {
     /// Returns an error when Cursor rejects the refresh token, requests logout,
     /// or returns an access token without a usable JWT expiry.
     pub async fn refresh_token(&self, refresh_token: &str) -> Result<Credentials> {
+        let token_url = Url::parse(&self.api_base_url)?.join(CURSOR_TOKEN_PATH)?;
         let response = self
             .http
-            .post(Url::parse(&self.api_base_url)?.join(CURSOR_TOKEN_PATH)?)
+            .post(token_url.clone())
             .header("content-type", "application/json")
             .json(&serde_json::json!({
                 "grant_type": "refresh_token",
                 "refresh_token": refresh_token,
             }))
             .send()
-            .await?;
+            .await
+            .map_err(|error| {
+                Error::oauth(cursor_request_error_message(
+                    "token refresh",
+                    &token_url,
+                    &error,
+                ))
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -192,8 +200,10 @@ impl CursorOAuthClient {
                 Err(error) => {
                     transient_failures = transient_failures.saturating_add(1);
                     if transient_failures >= 3 {
-                        return Err(Error::oauth(format!(
-                            "Cursor login polling request failed: {error}"
+                        return Err(Error::oauth(cursor_request_error_message(
+                            "login polling",
+                            &poll_url,
+                            &error,
                         )));
                     }
                     self.sleep_before_next_poll(attempt).await;
@@ -267,6 +277,28 @@ fn cursor_poll_url(api_base_url: &str, uuid: &str, verifier: &str) -> Result<Url
         .append_pair("uuid", uuid)
         .append_pair("verifier", verifier);
     Ok(url)
+}
+
+fn cursor_request_error_message(operation: &str, url: &Url, error: &reqwest::Error) -> String {
+    let mut message = format!("Cursor {operation} request to {url} failed: {error}");
+    let mut source = error.source();
+    let mut sources = Vec::new();
+    while let Some(error) = source {
+        let text = error.to_string();
+        if !text.is_empty() && !sources.iter().any(|item| item == &text) {
+            sources.push(text);
+        }
+        source = error.source();
+    }
+    if !sources.is_empty() {
+        message.push_str("; source: ");
+        message.push_str(&sources.join(": "));
+    }
+    if error.is_connect() || error.is_timeout() {
+        let host = url.host_str().unwrap_or("Cursor API");
+        message.push_str(&format!(". Check DNS/proxy/VPN access to {host}."));
+    }
+    message
 }
 
 fn base64url_random(rng: &mut impl RngCore, len: usize) -> String {
@@ -434,6 +466,26 @@ mod tests {
         assert_eq!(credentials.refresh_token, "refresh-token");
         assert_eq!(credentials.expires_at, 1_893_456_000);
         assert_eq!(credentials.account_id, "cursor-user");
+    }
+
+    #[tokio::test]
+    async fn cursor_login_poll_error_mentions_network_diagnostics() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let client =
+            CursorOAuthClient::new_with_endpoints(Client::new(), "https://cursor.com", base_url, 3);
+        let flow = super::super::AuthorizationFlow {
+            verifier: "verifier-test".to_owned(),
+            state: "uuid-test".to_owned(),
+            authorize_url: Url::parse("https://cursor.com/loginDeepControl").unwrap(),
+        };
+
+        let error = client.wait_for_browser_login(&flow).await.unwrap_err();
+        let message = error.to_string();
+
+        assert!(message.contains("OAuth error: Cursor login polling request to"));
+        assert!(message.contains("Check DNS/proxy/VPN access to 127.0.0.1."));
     }
 
     #[tokio::test]

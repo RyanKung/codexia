@@ -10,9 +10,13 @@ fn resolve_model_fallback(
 fn resolve_login_provider(
     store: &AuthStore,
     provider: Option<String>,
+    grok: bool,
     kiro: bool,
     cursor: bool,
 ) -> Result<Provider> {
+    if grok {
+        return Ok(Provider::Grok);
+    }
     if kiro {
         return Ok(Provider::Kiro);
     }

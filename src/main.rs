@@ -145,15 +145,23 @@ enum Command {
         provider: Option<String>,
         #[arg(
             long,
+            alias = "Grok",
             action = ArgAction::SetTrue,
-            conflicts_with = "provider",
+            conflicts_with_all = ["provider", "kiro", "cursor"],
+            help = "Authenticate with Grok"
+        )]
+        grok: bool,
+        #[arg(
+            long,
+            action = ArgAction::SetTrue,
+            conflicts_with_all = ["provider", "grok", "cursor"],
             help = "Authenticate with Kiro without scanning local Kiro credential stores"
         )]
         kiro: bool,
         #[arg(
             long,
             action = ArgAction::SetTrue,
-            conflicts_with_all = ["provider", "kiro"],
+            conflicts_with_all = ["provider", "grok", "kiro"],
             help = "Authenticate with Cursor's browser polling flow"
         )]
         cursor: bool,
@@ -415,12 +423,13 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Login {
             auth_file,
             provider,
+            grok,
             kiro,
             cursor,
             originator,
         } => {
             let store = auth_store(auth_file)?;
-            let provider = resolve_login_provider(&store, provider, kiro, cursor)?;
+            let provider = resolve_login_provider(&store, provider, grok, kiro, cursor)?;
             login(store, provider, &originator).await
         }
         Command::Config { command } => config_command(command.as_ref()),

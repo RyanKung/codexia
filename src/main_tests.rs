@@ -314,6 +314,35 @@ fn parses_login_provider_choices() {
 }
 
 #[test]
+fn parses_grok_login_flag() {
+    let cli = Cli::try_parse_from(["rotom", "login", "--grok"]).unwrap();
+
+    let Command::Login { grok, provider, .. } = cli.command else {
+        panic!("expected login command");
+    };
+    assert!(grok);
+    assert!(provider.is_none());
+}
+
+#[test]
+fn parses_grok_login_flag_legacy_case_alias() {
+    let cli = Cli::try_parse_from(["rotom", "login", "--Grok"]).unwrap();
+
+    let Command::Login { grok, provider, .. } = cli.command else {
+        panic!("expected login command");
+    };
+    assert!(grok);
+    assert!(provider.is_none());
+}
+
+#[test]
+fn rejects_grok_login_flag_with_other_provider_selection() {
+    assert!(Cli::try_parse_from(["rotom", "login", "--grok", "--provider", "codex"]).is_err());
+    assert!(Cli::try_parse_from(["rotom", "login", "--grok", "--kiro"]).is_err());
+    assert!(Cli::try_parse_from(["rotom", "login", "--grok", "--cursor"]).is_err());
+}
+
+#[test]
 fn parses_kiro_login_flag() {
     let cli = Cli::try_parse_from(["rotom", "login", "--kiro"]).unwrap();
 
@@ -327,6 +356,7 @@ fn parses_kiro_login_flag() {
 #[test]
 fn rejects_kiro_login_flag_with_provider() {
     assert!(Cli::try_parse_from(["rotom", "login", "--kiro", "--provider", "grok"]).is_err());
+    assert!(Cli::try_parse_from(["rotom", "login", "--kiro", "--grok"]).is_err());
 }
 
 #[test]
@@ -346,6 +376,7 @@ fn parses_cursor_login_flag() {
 #[test]
 fn rejects_cursor_login_flag_with_kiro_or_provider() {
     assert!(Cli::try_parse_from(["rotom", "login", "--cursor", "--kiro"]).is_err());
+    assert!(Cli::try_parse_from(["rotom", "login", "--cursor", "--grok"]).is_err());
     assert!(Cli::try_parse_from(["rotom", "login", "--cursor", "--provider", "grok"]).is_err());
 }
 
