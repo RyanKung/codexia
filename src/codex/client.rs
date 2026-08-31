@@ -30,7 +30,9 @@ use std::pin::Pin;
 pub use crate::codex::upstream::DEFAULT_CODEX_BASE_URL;
 pub use crate::codex::upstream::{
     ResponseCreationStrategy, ResponseResourceCapabilities, ResponseResourceCapability,
-    codex_headers, grok_headers, resolve_codex_url, resolve_grok_responses_url,
+    codex_headers, grok_headers, grok_tts_headers, grok_tts_voices_headers, resolve_codex_url,
+    resolve_grok_responses_url, resolve_grok_tts_url, resolve_grok_tts_voices_url,
+    resolve_grok_tts_websocket_url,
 };
 
 #[derive(Clone)]
@@ -331,6 +333,67 @@ impl CodexClient {
         } else {
             serde_json::from_str(&text).map_err(Into::into)
         }
+    }
+
+    /// Sends a native xAI text-to-speech request and returns its raw response.
+    ///
+    /// The response may contain audio bytes or JSON when the request enables
+    /// timestamps, so callers must preserve the upstream content type.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when this client is not configured for Grok or the
+    /// HTTP request fails. xAI status codes and bodies are returned unchanged.
+    pub async fn synthesize_grok_speech(
+        &self,
+        body: &Value,
+        credentials: &Credentials,
+    ) -> Result<Response> {
+        if self.provider != Provider::Grok {
+            return Err(Error::config("text-to-speech requires a Grok upstream"));
+        }
+
+        crate::logging::trace_json("upstream.grok.tts.request", body);
+        let url = resolve_grok_tts_url(&self.base_url);
+        let response = self
+            .http
+            .post(&url)
+            .headers(grok_tts_headers(credentials)?)
+            .json(body)
+            .send()
+            .await?;
+        tracing::trace!(
+            event = "upstream.grok.tts.response_started",
+            url = %url,
+            status = response.status().as_u16()
+        );
+        Ok(response)
+    }
+
+    /// Lists the native built-in xAI text-to-speech voices.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when this client is not configured for Grok or the
+    /// HTTP request fails. xAI status codes and bodies are returned unchanged.
+    pub async fn list_grok_tts_voices(&self, credentials: &Credentials) -> Result<Response> {
+        if self.provider != Provider::Grok {
+            return Err(Error::config("text-to-speech requires a Grok upstream"));
+        }
+
+        let url = resolve_grok_tts_voices_url(&self.base_url);
+        let response = self
+            .http
+            .get(&url)
+            .headers(grok_tts_voices_headers(credentials)?)
+            .send()
+            .await?;
+        tracing::trace!(
+            event = "upstream.grok.tts_voices.response_started",
+            url = %url,
+            status = response.status().as_u16()
+        );
+        Ok(response)
     }
 
     async fn send_chat(
