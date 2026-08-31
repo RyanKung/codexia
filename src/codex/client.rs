@@ -20,20 +20,78 @@ use crate::{
 };
 use futures_util::{Stream, StreamExt};
 use reqwest::{
-    Client, Method, Response,
-    header::{ACCEPT, CONTENT_TYPE, HeaderValue},
+    Client, Method, Response, Upgraded, Version,
+    header::{
+        ACCEPT, CONNECTION, CONTENT_TYPE, HeaderMap, HeaderValue, SEC_WEBSOCKET_ACCEPT,
+        SEC_WEBSOCKET_EXTENSIONS, SEC_WEBSOCKET_KEY, SEC_WEBSOCKET_PROTOCOL, SEC_WEBSOCKET_VERSION,
+        UPGRADE,
+    },
 };
 use serde_json::Value;
 use std::pin::Pin;
+use tokio_tungstenite::{
+    WebSocketStream,
+    tungstenite::{
+        handshake::{client::generate_key, derive_accept_key},
+        protocol::Role,
+    },
+};
+use url::Url;
 
 /// Default upstream base URL for `Codex` response requests.
 pub use crate::codex::upstream::DEFAULT_CODEX_BASE_URL;
 pub use crate::codex::upstream::{
     ResponseCreationStrategy, ResponseResourceCapabilities, ResponseResourceCapability,
-    codex_headers, grok_headers, grok_tts_headers, grok_tts_voices_headers, resolve_codex_url,
-    resolve_grok_responses_url, resolve_grok_tts_url, resolve_grok_tts_voices_url,
-    resolve_grok_tts_websocket_url,
+    codex_headers, grok_headers, grok_tts_headers, grok_tts_voices_headers,
+    grok_tts_websocket_headers, resolve_codex_url, resolve_grok_responses_url,
+    resolve_grok_tts_url, resolve_grok_tts_voices_url, resolve_grok_tts_websocket_url,
 };
+
+/// Established xAI TTS WebSocket carried by the proxy-aware HTTP client.
+pub(crate) type GrokTtsWebSocket = WebSocketStream<Upgraded>;
+
+/// Result of attempting the HTTP upgrade for an xAI TTS WebSocket.
+pub(crate) enum GrokTtsWebSocketConnect {
+    /// The upstream accepted the upgrade and the stream is ready for frames.
+    Connected(GrokTtsWebSocket),
+    /// The upstream returned a normal HTTP error response before upgrading.
+    Rejected(Response),
+}
+
+/// Failure while constructing or validating an xAI TTS WebSocket upgrade.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum GrokTtsWebSocketConnectError {
+    /// The configured WebSocket URL is invalid.
+    #[error("invalid Grok TTS WebSocket URL: {0}")]
+    InvalidUrl(#[source] url::ParseError),
+    /// The configured URL scheme cannot be converted to HTTP for the upgrade request.
+    #[error("unsupported Grok TTS WebSocket URL scheme: {0}")]
+    UnsupportedScheme(String),
+    /// Authentication headers could not be constructed.
+    #[error("invalid Grok TTS WebSocket authentication: {0}")]
+    Authentication(#[source] Error),
+    /// The proxy-aware HTTP request failed before a response arrived.
+    #[error("Grok TTS WebSocket upgrade request failed: {0}")]
+    Request(#[source] reqwest::Error),
+    /// The upstream response did not confirm a WebSocket upgrade.
+    #[error("Grok TTS WebSocket response is missing `Upgrade: websocket`")]
+    MissingUpgrade,
+    /// The upstream response did not include the required connection token.
+    #[error("Grok TTS WebSocket response is missing `Connection: upgrade`")]
+    MissingConnectionUpgrade,
+    /// The upstream response did not authenticate the WebSocket key.
+    #[error("Grok TTS WebSocket response has an invalid `Sec-WebSocket-Accept`")]
+    InvalidAcceptKey,
+    /// The upstream selected an extension that rotom did not offer.
+    #[error("Grok TTS WebSocket response selected an unexpected extension")]
+    UnexpectedExtension,
+    /// The upstream selected a subprotocol that rotom did not offer.
+    #[error("Grok TTS WebSocket response selected an unexpected subprotocol")]
+    UnexpectedSubprotocol,
+    /// Hyper could not return the upgraded byte stream.
+    #[error("Grok TTS WebSocket stream upgrade failed: {0}")]
+    Upgrade(#[source] reqwest::Error),
+}
 
 #[derive(Clone)]
 /// HTTP client wrapper for the `ChatGPT` `Codex` responses backend.
@@ -370,6 +428,53 @@ impl CodexClient {
         Ok(response)
     }
 
+    /// Opens the native xAI TTS WebSocket through the same proxy-aware HTTP client as REST.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when this client is not configured for Grok, the request cannot be sent,
+    /// or the upstream returns an invalid WebSocket handshake.
+    pub(crate) async fn connect_grok_tts_websocket(
+        &self,
+        websocket_url: &str,
+        credentials: &Credentials,
+    ) -> std::result::Result<GrokTtsWebSocketConnect, GrokTtsWebSocketConnectError> {
+        if self.provider != Provider::Grok {
+            return Err(GrokTtsWebSocketConnectError::Authentication(Error::config(
+                "text-to-speech requires a Grok upstream",
+            )));
+        }
+
+        let http_url = websocket_http_upgrade_url(websocket_url)?;
+        let websocket_key = generate_key();
+        let response = self
+            .http
+            .get(http_url)
+            .version(Version::HTTP_11)
+            .headers(
+                grok_tts_websocket_headers(credentials)
+                    .map_err(GrokTtsWebSocketConnectError::Authentication)?,
+            )
+            .header(CONNECTION, "Upgrade")
+            .header(UPGRADE, "websocket")
+            .header(SEC_WEBSOCKET_VERSION, "13")
+            .header(SEC_WEBSOCKET_KEY, &websocket_key)
+            .send()
+            .await
+            .map_err(GrokTtsWebSocketConnectError::Request)?;
+
+        if response.status() != reqwest::StatusCode::SWITCHING_PROTOCOLS {
+            return Ok(GrokTtsWebSocketConnect::Rejected(response));
+        }
+        validate_websocket_upgrade(response.headers(), &websocket_key)?;
+        let upgraded = response
+            .upgrade()
+            .await
+            .map_err(GrokTtsWebSocketConnectError::Upgrade)?;
+        let socket = WebSocketStream::from_raw_socket(upgraded, Role::Client, None).await;
+        Ok(GrokTtsWebSocketConnect::Connected(socket))
+    }
+
     /// Lists the native built-in xAI text-to-speech voices.
     ///
     /// # Errors
@@ -598,6 +703,64 @@ impl CodexClient {
     }
 }
 
+fn websocket_http_upgrade_url(
+    websocket_url: &str,
+) -> std::result::Result<Url, GrokTtsWebSocketConnectError> {
+    let mut url = Url::parse(websocket_url).map_err(GrokTtsWebSocketConnectError::InvalidUrl)?;
+    let http_scheme = match url.scheme() {
+        "wss" | "https" => "https",
+        "ws" | "http" => "http",
+        scheme => {
+            return Err(GrokTtsWebSocketConnectError::UnsupportedScheme(
+                scheme.to_owned(),
+            ));
+        }
+    };
+    url.set_scheme(http_scheme)
+        .map_err(|()| GrokTtsWebSocketConnectError::UnsupportedScheme(url.scheme().to_owned()))?;
+    Ok(url)
+}
+
+fn validate_websocket_upgrade(
+    headers: &HeaderMap,
+    websocket_key: &str,
+) -> std::result::Result<(), GrokTtsWebSocketConnectError> {
+    if !header_contains_token(headers, UPGRADE, "websocket") {
+        return Err(GrokTtsWebSocketConnectError::MissingUpgrade);
+    }
+    if !header_contains_token(headers, CONNECTION, "upgrade") {
+        return Err(GrokTtsWebSocketConnectError::MissingConnectionUpgrade);
+    }
+    let expected_accept = derive_accept_key(websocket_key.as_bytes());
+    if headers
+        .get(SEC_WEBSOCKET_ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        != Some(expected_accept.as_str())
+    {
+        return Err(GrokTtsWebSocketConnectError::InvalidAcceptKey);
+    }
+    if headers.contains_key(SEC_WEBSOCKET_EXTENSIONS) {
+        return Err(GrokTtsWebSocketConnectError::UnexpectedExtension);
+    }
+    if headers.contains_key(SEC_WEBSOCKET_PROTOCOL) {
+        return Err(GrokTtsWebSocketConnectError::UnexpectedSubprotocol);
+    }
+    Ok(())
+}
+
+fn header_contains_token(
+    headers: &HeaderMap,
+    name: reqwest::header::HeaderName,
+    token: &str,
+) -> bool {
+    headers
+        .get_all(name)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .any(|value| value.trim().eq_ignore_ascii_case(token))
+}
+
 fn unsupported_response_resource(provider: Provider, operation: &str) -> Error {
     Error::upstream_with_status(
         reqwest::StatusCode::NOT_IMPLEMENTED,
@@ -673,5 +836,38 @@ mod tests {
             grok.response_creation_strategy(),
             ResponseCreationStrategy::NativeResponses
         );
+    }
+
+    #[test]
+    fn websocket_upgrade_urls_preserve_authority_path_and_query() {
+        let secure =
+            websocket_http_upgrade_url("wss://api.x.ai/v1/tts?language=zh&voice=eve&future=1")
+                .ok()
+                .map(|url| url.to_string());
+        let local = websocket_http_upgrade_url("ws://127.0.0.1:8080/tts?language=en")
+            .ok()
+            .map(|url| url.to_string());
+
+        assert_eq!(
+            secure.as_deref(),
+            Some("https://api.x.ai/v1/tts?language=zh&voice=eve&future=1")
+        );
+        assert_eq!(
+            local.as_deref(),
+            Some("http://127.0.0.1:8080/tts?language=en")
+        );
+        assert!(matches!(
+            websocket_http_upgrade_url("ftp://api.x.ai/v1/tts"),
+            Err(GrokTtsWebSocketConnectError::UnsupportedScheme(_))
+        ));
+    }
+
+    #[test]
+    fn websocket_connection_header_accepts_comma_separated_tokens() {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONNECTION, HeaderValue::from_static("keep-alive, Upgrade"));
+
+        assert!(header_contains_token(&headers, CONNECTION, "upgrade"));
+        assert!(!header_contains_token(&headers, CONNECTION, "websocket"));
     }
 }

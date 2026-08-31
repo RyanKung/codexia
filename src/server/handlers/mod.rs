@@ -3,6 +3,7 @@
 mod response_resources;
 mod responses;
 mod sse;
+mod tts;
 
 use crate::{
     Error,
@@ -12,9 +13,7 @@ use crate::{
         estimate_input_tokens, from_openai_response_value, message_batch_list_response,
     },
     codex::{
-        client::{
-            ResponseCreationStrategy, ResponseResourceCapability, resolve_grok_tts_websocket_url,
-        },
+        client::{ResponseCreationStrategy, ResponseResourceCapability},
         convert::responses_to_upstream_request,
     },
     config::{Credentials, Provider},
@@ -33,18 +32,10 @@ use crate::{
 };
 use axum::{
     Json,
-    body::Body,
-    extract::{
-        Path, RawQuery, State, WebSocketUpgrade,
-        ws::{CloseFrame as DownstreamCloseFrame, Message as DownstreamMessage, WebSocket},
-    },
-    http::{
-        HeaderMap, HeaderName, HeaderValue, StatusCode,
-        header::{AUTHORIZATION, USER_AGENT},
-    },
+    extract::{Path, State},
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use futures_util::{SinkExt, StreamExt};
 use responses::{
     anthropic_responses_request, batch_results_url, build_batch_id, collect_response_input_items,
     compact_response_items, estimate_response_input_tokens, image_generation_responses_request,
@@ -58,20 +49,11 @@ use sse::{
     anthropic_error_response, anthropic_raw_messages_sse_response, openai_raw_responses_sse,
     openai_responses_sse, sse_response,
 };
-use std::time::Duration;
-use tokio::{net::TcpStream, time::timeout};
-use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream, connect_async,
-    tungstenite::{
-        self, Message as UpstreamMessage,
-        client::IntoClientRequest,
-        protocol::{CloseFrame as UpstreamCloseFrame, frame::coding::CloseCode},
-    },
-};
 
 pub use response_resources::{
     cancel_response, delete_response, get_response, list_response_input_items,
 };
+pub use tts::{tts, tts_voices, tts_websocket};
 
 /// Lightweight healthcheck for the local service.
 pub async fn health() -> impl IntoResponse {
@@ -603,279 +585,6 @@ pub async fn image_generations(
         }
         Err(error) => error.into_response(),
     }
-}
-
-/// Proxies the native xAI text-to-speech request shape to the logged-in Grok upstream.
-pub async fn tts(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(request): Json<Value>,
-) -> Response {
-    trace_request("tts", &request);
-    if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
-        return error.into_response();
-    }
-
-    let Some(upstream) = state.upstream_for_provider(Provider::Grok) else {
-        return Error::config(
-            "not logged in for provider grok; run `rotom login --provider grok` first",
-        )
-        .into_response();
-    };
-    let credentials = match upstream.token_manager.credentials().await {
-        Ok(credentials) => credentials,
-        Err(error) => return error.into_response(),
-    };
-
-    match upstream
-        .client
-        .synthesize_grok_speech(&request, &credentials)
-        .await
-    {
-        Ok(response) => proxy_upstream_response(response),
-        Err(error) => error.into_response(),
-    }
-}
-
-const GROK_TTS_WEBSOCKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
-
-/// Proxies the native xAI bidirectional text-to-speech WebSocket protocol.
-pub async fn tts_websocket(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    RawQuery(raw_query): RawQuery,
-    websocket: WebSocketUpgrade,
-) -> Response {
-    if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
-        return error.into_response();
-    }
-
-    let Some(upstream) = state.upstream_for_provider(Provider::Grok) else {
-        return Error::config(
-            "not logged in for provider grok; run `rotom login --provider grok` first",
-        )
-        .into_response();
-    };
-    let credentials = match upstream.token_manager.credentials().await {
-        Ok(credentials) => credentials,
-        Err(error) => return error.into_response(),
-    };
-    let websocket_url =
-        match resolve_grok_tts_websocket_url(upstream.client.base_url(), raw_query.as_deref()) {
-            Ok(url) => url,
-            Err(error) => return error.into_response(),
-        };
-    let mut upstream_request = match websocket_url.as_str().into_client_request() {
-        Ok(request) => request,
-        Err(error) => {
-            return Error::config(format!("invalid Grok TTS WebSocket request: {error}"))
-                .into_response();
-        }
-    };
-    let Ok(authorization) = HeaderValue::from_str(&format!("Bearer {}", credentials.access_token))
-    else {
-        return Error::config("invalid Grok access token header").into_response();
-    };
-    upstream_request
-        .headers_mut()
-        .insert(AUTHORIZATION, authorization);
-    upstream_request
-        .headers_mut()
-        .insert(USER_AGENT, HeaderValue::from_static("rotom"));
-
-    let upstream_socket = match timeout(
-        GROK_TTS_WEBSOCKET_CONNECT_TIMEOUT,
-        connect_async(upstream_request),
-    )
-    .await
-    {
-        Ok(Ok((socket, _response))) => socket,
-        Ok(Err(error)) => return grok_tts_websocket_connect_error(error),
-        Err(_elapsed) => {
-            return Error::upstream_with_status(
-                StatusCode::GATEWAY_TIMEOUT,
-                "Grok TTS WebSocket handshake timed out",
-            )
-            .into_response();
-        }
-    };
-
-    websocket
-        .on_upgrade(move |socket| proxy_grok_tts_websocket(socket, upstream_socket))
-        .into_response()
-}
-
-fn grok_tts_websocket_connect_error(error: tungstenite::Error) -> Response {
-    match error {
-        tungstenite::Error::Http(response) => {
-            let status = response.status();
-            let headers = response.headers().clone();
-            let body = response.body().clone().unwrap_or_default();
-            let mut downstream = Response::new(Body::from(body));
-            *downstream.status_mut() = status;
-            for (name, value) in &headers {
-                if !is_hop_by_hop_header(name) {
-                    downstream.headers_mut().append(name.clone(), value.clone());
-                }
-            }
-            downstream
-        }
-        error => {
-            Error::upstream(format!("Grok TTS WebSocket handshake failed: {error}")).into_response()
-        }
-    }
-}
-
-async fn proxy_grok_tts_websocket(
-    downstream: WebSocket,
-    upstream: WebSocketStream<MaybeTlsStream<TcpStream>>,
-) {
-    let (mut downstream_sender, mut downstream_receiver) = downstream.split();
-    let (mut upstream_sender, mut upstream_receiver) = upstream.split();
-
-    loop {
-        tokio::select! {
-            downstream_message = downstream_receiver.next() => {
-                let Some(downstream_message) = downstream_message else {
-                    let _ = upstream_sender.send(UpstreamMessage::Close(None)).await;
-                    break;
-                };
-                let downstream_message = match downstream_message {
-                    Ok(message) => message,
-                    Err(error) => {
-                        tracing::debug!(error = %error, "Grok TTS downstream WebSocket closed with an error");
-                        let _ = upstream_sender.send(UpstreamMessage::Close(None)).await;
-                        break;
-                    }
-                };
-                let should_flush_downstream = matches!(
-                    &downstream_message,
-                    DownstreamMessage::Ping(_) | DownstreamMessage::Close(_)
-                );
-                let is_close = matches!(&downstream_message, DownstreamMessage::Close(_));
-                if let Some(message) = downstream_to_upstream_message(downstream_message) {
-                    if upstream_sender.send(message).await.is_err() {
-                        break;
-                    }
-                }
-                if should_flush_downstream {
-                    let _ = downstream_sender.flush().await;
-                }
-                if is_close {
-                    break;
-                }
-            }
-            upstream_message = upstream_receiver.next() => {
-                let Some(upstream_message) = upstream_message else {
-                    let _ = downstream_sender.send(DownstreamMessage::Close(None)).await;
-                    break;
-                };
-                let upstream_message = match upstream_message {
-                    Ok(message) => message,
-                    Err(error) => {
-                        tracing::debug!(error = %error, "Grok TTS upstream WebSocket closed with an error");
-                        let _ = downstream_sender.send(DownstreamMessage::Close(None)).await;
-                        break;
-                    }
-                };
-                let should_flush_upstream = matches!(
-                    &upstream_message,
-                    UpstreamMessage::Ping(_) | UpstreamMessage::Close(_)
-                );
-                let is_close = matches!(&upstream_message, UpstreamMessage::Close(_));
-                if let Some(message) = upstream_to_downstream_message(upstream_message) {
-                    if downstream_sender.send(message).await.is_err() {
-                        break;
-                    }
-                }
-                if should_flush_upstream {
-                    let _ = upstream_sender.flush().await;
-                }
-                if is_close {
-                    break;
-                }
-            }
-        }
-    }
-}
-
-fn downstream_to_upstream_message(message: DownstreamMessage) -> Option<UpstreamMessage> {
-    match message {
-        DownstreamMessage::Text(text) => Some(UpstreamMessage::Text(text.to_string().into())),
-        DownstreamMessage::Binary(bytes) => Some(UpstreamMessage::Binary(bytes)),
-        DownstreamMessage::Close(frame) => Some(UpstreamMessage::Close(frame.map(|frame| {
-            UpstreamCloseFrame {
-                code: CloseCode::from(frame.code),
-                reason: frame.reason.to_string().into(),
-            }
-        }))),
-        DownstreamMessage::Ping(_) | DownstreamMessage::Pong(_) => None,
-    }
-}
-
-fn upstream_to_downstream_message(message: UpstreamMessage) -> Option<DownstreamMessage> {
-    match message {
-        UpstreamMessage::Text(text) => Some(DownstreamMessage::Text(text.to_string().into())),
-        UpstreamMessage::Binary(bytes) => Some(DownstreamMessage::Binary(bytes)),
-        UpstreamMessage::Close(frame) => Some(DownstreamMessage::Close(frame.map(|frame| {
-            DownstreamCloseFrame {
-                code: u16::from(frame.code),
-                reason: frame.reason.to_string().into(),
-            }
-        }))),
-        UpstreamMessage::Ping(_) | UpstreamMessage::Pong(_) | UpstreamMessage::Frame(_) => None,
-    }
-}
-
-/// Proxies the native xAI built-in text-to-speech voice list.
-pub async fn tts_voices(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(error) = authorize(&headers, state.api_key.as_deref()) {
-        return error.into_response();
-    }
-
-    let Some(upstream) = state.upstream_for_provider(Provider::Grok) else {
-        return Error::config(
-            "not logged in for provider grok; run `rotom login --provider grok` first",
-        )
-        .into_response();
-    };
-    let credentials = match upstream.token_manager.credentials().await {
-        Ok(credentials) => credentials,
-        Err(error) => return error.into_response(),
-    };
-
-    match upstream.client.list_grok_tts_voices(&credentials).await {
-        Ok(response) => proxy_upstream_response(response),
-        Err(error) => error.into_response(),
-    }
-}
-
-fn proxy_upstream_response(upstream: reqwest::Response) -> Response {
-    let status = upstream.status();
-    let headers = upstream.headers().clone();
-    let mut response = Response::new(Body::from_stream(upstream.bytes_stream()));
-    *response.status_mut() = status;
-    for (name, value) in &headers {
-        if !is_hop_by_hop_header(name) {
-            response.headers_mut().append(name.clone(), value.clone());
-        }
-    }
-    response
-}
-
-fn is_hop_by_hop_header(name: &HeaderName) -> bool {
-    matches!(
-        name.as_str(),
-        "connection"
-            | "keep-alive"
-            | "proxy-authenticate"
-            | "proxy-authorization"
-            | "proxy-connection"
-            | "te"
-            | "trailer"
-            | "transfer-encoding"
-            | "upgrade"
-    )
 }
 
 /// Anthropic-compatible token counting endpoint.

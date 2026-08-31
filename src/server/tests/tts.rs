@@ -225,6 +225,15 @@ fn save_grok_tts_credentials(store: &AuthStore) {
 
 fn grok_tts_state(store: AuthStore, base_url: String, api_key: Option<String>) -> AppState {
     let http = Client::new();
+    grok_tts_state_with_http(store, base_url, api_key, http)
+}
+
+fn grok_tts_state_with_http(
+    store: AuthStore,
+    base_url: String,
+    api_key: Option<String>,
+    http: Client,
+) -> AppState {
     AppState::new_multi_with_model_fallback(
         vec![UpstreamState {
             provider: Provider::Grok,
@@ -472,6 +481,30 @@ async fn grok_tts_websocket_preserves_query_token_and_native_events() {
     assert_eq!(audio_delta["delta"], "SUQz");
     assert_eq!(audio_delta["audio_timestamps"]["graph_chars"][0], "你");
 
+    let text_clear = json!({"type": "text.clear"});
+    socket
+        .send(ClientWebSocketMessage::Text(text_clear.to_string().into()))
+        .await
+        .unwrap();
+    let audio_clear = socket.next().await.unwrap().unwrap().into_text().unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&audio_clear).unwrap(),
+        json!({"type": "audio.clear"})
+    );
+
+    let replacement_delta = json!({"type": "text.delta", "delta": "重新开始"});
+    socket
+        .send(ClientWebSocketMessage::Text(
+            replacement_delta.to_string().into(),
+        ))
+        .await
+        .unwrap();
+    let replacement_audio = socket.next().await.unwrap().unwrap().into_text().unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&replacement_audio).unwrap()["type"],
+        "audio.delta"
+    );
+
     let text_done = json!({"type": "text.done"});
     socket
         .send(ClientWebSocketMessage::Text(text_done.to_string().into()))
@@ -492,7 +525,55 @@ async fn grok_tts_websocket_preserves_query_token_and_native_events() {
     );
     assert_eq!(
         captured.websocket_messages,
-        vec![session_update, text_delta, text_done]
+        vec![
+            session_update,
+            text_delta,
+            text_clear,
+            replacement_delta,
+            text_done
+        ]
+    );
+    drop(captured);
+}
+
+#[tokio::test]
+async fn grok_tts_websocket_uses_the_upstream_http_clients_proxy() {
+    let dir = TempDir::new().unwrap();
+    let store = AuthStore::new(dir.path().join("auth.json"));
+    save_grok_tts_credentials(&store);
+    let captured = Arc::new(Mutex::new(CapturedTts::default()));
+    let forward_proxy_url = spawn_grok_tts_server(captured.clone()).await;
+    let http = Client::builder()
+        .proxy(reqwest::Proxy::http(&forward_proxy_url).unwrap())
+        .build()
+        .unwrap();
+    let state = grok_tts_state_with_http(store, "http://unreachable.invalid".into(), None, http);
+    let proxy_url = spawn_grok_tts_proxy(state).await;
+    let (mut socket, response) = connect_async(format!("{proxy_url}/v1/tts?language=en"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+
+    socket
+        .send(ClientWebSocketMessage::Text(
+            json!({"type": "text.delta", "delta": "proxied"})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    let audio_delta = socket.next().await.unwrap().unwrap().into_text().unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&audio_delta).unwrap()["type"],
+        "audio.delta"
+    );
+    socket.close(None).await.unwrap();
+
+    let captured = captured.lock().await;
+    assert_eq!(captured.websocket_queries, vec!["language=en"]);
+    assert_eq!(
+        captured.websocket_authorizations,
+        vec!["Bearer grok_access"]
     );
     drop(captured);
 }

@@ -164,7 +164,9 @@ The gateway passes through `text.delta`, `text.done`, `text.clear`, and
 `audio.clear`, `session.updated`, and `error` events. The connection remains
 open across multiple utterances. If local `--api-key` protection is enabled,
 the WebSocket client must send that local key in the handshake; rotom replaces
-it with the saved Grok credential upstream.
+it with the saved Grok credential upstream. The upstream WebSocket upgrade uses
+the same HTTP client as REST and honors standard `HTTP_PROXY`, `HTTPS_PROXY`,
+`ALL_PROXY`, and `NO_PROXY` environment settings.
 
 ## Running As a Service
 

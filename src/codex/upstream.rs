@@ -382,6 +382,15 @@ pub fn grok_tts_voices_headers(credentials: &Credentials) -> Result<HeaderMap> {
     Ok(headers)
 }
 
+/// Builds HTTP headers for an authenticated xAI TTS WebSocket upgrade.
+///
+/// # Errors
+///
+/// Returns an error when the bearer token cannot be represented as a header.
+pub fn grok_tts_websocket_headers(credentials: &Credentials) -> Result<HeaderMap> {
+    grok_auth_headers(credentials)
+}
+
 fn grok_auth_headers(credentials: &Credentials) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -534,6 +543,11 @@ mod tests {
         assert_eq!(voices["authorization"], "Bearer token");
         assert_eq!(voices["accept"], "application/json");
         assert!(!voices.contains_key("content-type"));
+
+        let websocket = grok_tts_websocket_headers(&credentials).unwrap();
+        assert_eq!(websocket["authorization"], "Bearer token");
+        assert!(!websocket.contains_key("content-type"));
+        assert!(!websocket.contains_key("accept"));
     }
 
     #[test]
