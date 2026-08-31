@@ -175,7 +175,7 @@ enum Command {
     },
     #[command(
         about = "Serve the OpenAI- and Anthropic-compatible HTTP API",
-        long_about = "Serve OpenAI- and Anthropic-compatible endpoints backed by the selected provider, including /v1/models, /v1/chat/completions, /v1/responses, Responses resource compatibility routes, /v1/messages, /v1/messages/count_tokens, /v1/messages/batches, and /v1/auth/refresh."
+        long_about = "Serve OpenAI- and Anthropic-compatible endpoints backed by the selected provider, plus Grok-native REST and WebSocket /v1/tts and /v1/tts/voices when Grok credentials are available. Other routes include /v1/models, /v1/chat/completions, /v1/responses, Responses resource compatibility routes, /v1/messages, /v1/messages/count_tokens, /v1/messages/batches, and /v1/auth/refresh."
     )]
     Serve {
         #[arg(

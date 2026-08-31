@@ -265,6 +265,49 @@ pub fn resolve_grok_responses_url(base_url: &str) -> String {
     }
 }
 
+/// Resolves a configured xAI base URL into the native TTS endpoint.
+#[must_use]
+pub fn resolve_grok_tts_url(base_url: &str) -> String {
+    let normalized = base_url.trim_end_matches('/');
+    if normalized.ends_with("/tts") {
+        normalized.to_owned()
+    } else {
+        format!("{normalized}/tts")
+    }
+}
+
+/// Resolves a configured xAI base URL into the native streaming TTS WebSocket endpoint.
+///
+/// The provided raw query string is preserved so new xAI connection options can pass through
+/// without requiring a gateway release.
+///
+/// # Errors
+///
+/// Returns an error when the configured base URL is invalid or does not use an HTTP or WebSocket
+/// scheme.
+pub fn resolve_grok_tts_websocket_url(base_url: &str, raw_query: Option<&str>) -> Result<String> {
+    let mut url = url::Url::parse(&resolve_grok_tts_url(base_url))?;
+    let websocket_scheme = match url.scheme() {
+        "https" | "wss" => "wss",
+        "http" | "ws" => "ws",
+        scheme => {
+            return Err(Error::config(format!(
+                "unsupported Grok TTS WebSocket URL scheme: {scheme}"
+            )));
+        }
+    };
+    url.set_scheme(websocket_scheme)
+        .map_err(|()| Error::config("invalid Grok TTS WebSocket URL scheme"))?;
+    url.set_query(raw_query.filter(|query| !query.is_empty()));
+    Ok(url.into())
+}
+
+/// Resolves a configured xAI base URL into the built-in TTS voices endpoint.
+#[must_use]
+pub fn resolve_grok_tts_voices_url(base_url: &str) -> String {
+    format!("{}/voices", resolve_grok_tts_url(base_url))
+}
+
 /// Appends an opaque response id to a provider Responses collection URL.
 #[must_use]
 pub fn resolve_response_resource_url(responses_url: &str, response_id: &str) -> String {
@@ -314,6 +357,47 @@ pub fn grok_headers(credentials: &Credentials) -> Result<HeaderMap> {
     headers.insert(USER_AGENT, HeaderValue::from_static("rotom"));
     headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    Ok(headers)
+}
+
+/// Builds HTTP headers for authenticated xAI TTS generation requests.
+///
+/// # Errors
+///
+/// Returns an error when the bearer token cannot be represented as a header.
+pub fn grok_tts_headers(credentials: &Credentials) -> Result<HeaderMap> {
+    let mut headers = grok_auth_headers(credentials)?;
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    Ok(headers)
+}
+
+/// Builds HTTP headers for authenticated xAI TTS voice-list requests.
+///
+/// # Errors
+///
+/// Returns an error when the bearer token cannot be represented as a header.
+pub fn grok_tts_voices_headers(credentials: &Credentials) -> Result<HeaderMap> {
+    let mut headers = grok_auth_headers(credentials)?;
+    headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+    Ok(headers)
+}
+
+/// Builds HTTP headers for an authenticated xAI TTS WebSocket upgrade.
+///
+/// # Errors
+///
+/// Returns an error when the bearer token cannot be represented as a header.
+pub fn grok_tts_websocket_headers(credentials: &Credentials) -> Result<HeaderMap> {
+    grok_auth_headers(credentials)
+}
+
+fn grok_auth_headers(credentials: &Credentials) -> Result<HeaderMap> {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        AUTHORIZATION,
+        header_value(&format!("Bearer {}", credentials.access_token))?,
+    );
+    headers.insert(USER_AGENT, HeaderValue::from_static("rotom"));
     Ok(headers)
 }
 
@@ -410,6 +494,60 @@ mod tests {
             resolve_codex_url("https://example.com/codex/responses"),
             "https://example.com/codex/responses"
         );
+    }
+
+    #[test]
+    fn resolves_grok_tts_url_variants() {
+        assert_eq!(
+            resolve_grok_tts_url("https://api.x.ai/v1"),
+            "https://api.x.ai/v1/tts"
+        );
+        assert_eq!(
+            resolve_grok_tts_url("https://api.x.ai/v1/tts/"),
+            "https://api.x.ai/v1/tts"
+        );
+        assert_eq!(
+            resolve_grok_tts_voices_url("https://api.x.ai/v1"),
+            "https://api.x.ai/v1/tts/voices"
+        );
+        assert_eq!(
+            resolve_grok_tts_websocket_url(
+                "https://api.x.ai/v1",
+                Some("language=zh&voice=eve&future=1")
+            )
+            .unwrap(),
+            "wss://api.x.ai/v1/tts?language=zh&voice=eve&future=1"
+        );
+        assert_eq!(
+            resolve_grok_tts_websocket_url("http://127.0.0.1:8080/tts/", None).unwrap(),
+            "ws://127.0.0.1:8080/tts"
+        );
+    }
+
+    #[test]
+    fn builds_grok_tts_headers_without_sse_accept() {
+        let credentials = Credentials {
+            provider: Provider::Grok,
+            access_token: "token".into(),
+            refresh_token: String::new(),
+            expires_at: 1,
+            account_id: String::new(),
+        };
+
+        let generation = grok_tts_headers(&credentials).unwrap();
+        assert_eq!(generation["authorization"], "Bearer token");
+        assert_eq!(generation["content-type"], "application/json");
+        assert!(!generation.contains_key("accept"));
+
+        let voices = grok_tts_voices_headers(&credentials).unwrap();
+        assert_eq!(voices["authorization"], "Bearer token");
+        assert_eq!(voices["accept"], "application/json");
+        assert!(!voices.contains_key("content-type"));
+
+        let websocket = grok_tts_websocket_headers(&credentials).unwrap();
+        assert_eq!(websocket["authorization"], "Bearer token");
+        assert!(!websocket.contains_key("content-type"));
+        assert!(!websocket.contains_key("accept"));
     }
 
     #[test]

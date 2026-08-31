@@ -164,6 +164,12 @@ impl AppState {
     pub(crate) fn default_upstream(&self) -> Option<&UpstreamState> {
         self.upstreams.first()
     }
+
+    pub(crate) fn upstream_for_provider(&self, provider: Provider) -> Option<&UpstreamState> {
+        self.upstreams
+            .iter()
+            .find(|upstream| upstream.provider == provider)
+    }
 }
 
 fn looks_like_anthropic_model(model: &str) -> bool {
@@ -268,6 +274,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/chat/completions", post(handlers::chat_completions))
         .route("/v1/images/generations", post(handlers::image_generations))
+        .route("/v1/tts", get(handlers::tts_websocket).post(handlers::tts))
+        .route("/v1/tts/voices", get(handlers::tts_voices))
         .layer(middleware::from_fn(log_request_summary))
         .with_state(state)
 }

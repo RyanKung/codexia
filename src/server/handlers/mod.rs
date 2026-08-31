@@ -3,6 +3,7 @@
 mod response_resources;
 mod responses;
 mod sse;
+mod tts;
 
 use crate::{
     Error,
@@ -52,6 +53,7 @@ use sse::{
 pub use response_resources::{
     cancel_response, delete_response, get_response, list_response_input_items,
 };
+pub use tts::{tts, tts_voices, tts_websocket};
 
 /// Lightweight healthcheck for the local service.
 pub async fn health() -> impl IntoResponse {

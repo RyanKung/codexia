@@ -115,6 +115,59 @@ curl http://127.0.0.1:14550/v1/messages \
   -d '{"model": "gpt-5.6-sol", "max_tokens": 1024, "messages": [{"role": "user", "content": "hello"}]}'
 ```
 
+Grok-native text to speech:
+
+```bash
+curl http://127.0.0.1:14550/v1/tts \
+  -H 'content-type: application/json' \
+  -H 'authorization: Bearer local-secret' \
+  -d '{"text":"你好，欢迎使用 rotom。","voice_id":"eve","language":"zh"}' \
+  --output speech.mp3
+```
+
+The TTS route keeps xAI's native request shape, including `output_format`,
+`speed`, `optimize_streaming_latency`, `text_normalization`, `replace`, and
+`with_timestamps`. When `with_timestamps` is enabled the upstream JSON response
+is returned unchanged; otherwise the response body contains the generated
+audio bytes. List built-in voices with `GET /v1/tts/voices`.
+
+For bidirectional streaming, upgrade `GET /v1/tts` to a WebSocket. Query
+parameters and events use xAI's native shape:
+
+```javascript
+// npm install ws
+import fs from "node:fs";
+import WebSocket from "ws";
+
+const ws = new WebSocket(
+  "ws://127.0.0.1:14550/v1/tts?language=zh&voice=eve&codec=mp3",
+  { headers: { Authorization: "Bearer local-secret" } },
+);
+const audio = [];
+
+ws.on("open", () => {
+  ws.send(JSON.stringify({ type: "text.delta", delta: "你好，欢迎使用 rotom。" }));
+  ws.send(JSON.stringify({ type: "text.done" }));
+});
+ws.on("message", (data) => {
+  const event = JSON.parse(data.toString());
+  if (event.type === "audio.delta") audio.push(Buffer.from(event.delta, "base64"));
+  if (event.type === "audio.done") {
+    fs.writeFileSync("speech-stream.mp3", Buffer.concat(audio));
+    ws.close();
+  }
+});
+```
+
+The gateway passes through `text.delta`, `text.done`, `text.clear`, and
+`session.update`, and returns the native `audio.delta`, `audio.done`,
+`audio.clear`, `session.updated`, and `error` events. The connection remains
+open across multiple utterances. If local `--api-key` protection is enabled,
+the WebSocket client must send that local key in the handshake; rotom replaces
+it with the saved Grok credential upstream. The upstream WebSocket upgrade uses
+the same HTTP client as REST and honors standard `HTTP_PROXY`, `HTTPS_PROXY`,
+`ALL_PROXY`, and `NO_PROXY` environment settings.
+
 ## Running As a Service
 
 Run a background daemon instead of `rotom serve`:
@@ -151,6 +204,11 @@ OpenAI:
   input_tokens)
 - `POST /v1/images/generations`
 
+Grok Voice:
+
+- `POST /v1/tts`, `GET /v1/tts` (WebSocket upgrade), `GET /v1/tts/voices`
+- Native xAI request/event shapes and audio/JSON/WebSocket passthrough
+
 Anthropic:
 
 - `GET /v1/models`, `POST /v1/messages`, `POST /v1/messages/count_tokens`
@@ -172,7 +230,9 @@ quietly drops controls the upstream cannot honor.
   not forward them (Codex rejects them upstream). `/v1/responses` keeps a local
   replay behavior for existing clients.
 - **Grok**: uses xAI's native Responses API and forwards supported controls
-  (`temperature`, `top_p`, `max_output_tokens`, `stop`, ...).
+  (`temperature`, `top_p`, `max_output_tokens`, `stop`, ...). Text to speech
+  uses xAI's native REST and bidirectional WebSocket `/v1/tts` shapes and
+  requires saved Grok credentials.
 - **Kiro**: mapped to Kiro's `GenerateAssistantResponse` schema (text, tools,
   tool results, history, inline base64 images/documents). Remote image/document
   URLs are rejected, not fetched.
