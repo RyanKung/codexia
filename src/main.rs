@@ -762,7 +762,7 @@ async fn running_daemon_base_url(http: &Client) -> Option<String> {
 }
 
 fn daemon_endpoint_lines(base_url: &str) -> Vec<String> {
-    const ENDPOINTS: [(&str, &str); 18] = [
+    const ENDPOINTS: [(&str, &str); 20] = [
         ("GET", "/health"),
         ("GET", "/v1/status"),
         ("GET", "/v1/models"),
@@ -781,6 +781,8 @@ fn daemon_endpoint_lines(base_url: &str) -> Vec<String> {
         ("POST", "/v1/messages/batches/{batch_id}/cancel"),
         ("GET", "/v1/messages/batches/{batch_id}/results"),
         ("POST", "/v1/images/generations"),
+        ("GET,POST", "/v1/tts"),
+        ("GET", "/v1/tts/voices"),
     ];
 
     ENDPOINTS
