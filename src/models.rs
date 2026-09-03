@@ -19,7 +19,7 @@ pub const OPENCLAW_CODEX_MODELS: &[&str] = &[
 ];
 
 /// Default Grok model identifiers exposed by the project.
-pub const GROK_MODELS: &[&str] = &["grok-4.3", "grok-4.3-fast", "grok-4"];
+pub const GROK_MODELS: &[&str] = &["grok-4.6", "grok-4.5", "grok-4.3", "grok-build-0.1"];
 
 /// Default Kiro model identifiers exposed by the local Kiro CLI model list.
 pub const KIRO_MODELS: &[&str] = &[
@@ -440,8 +440,31 @@ mod tests {
     fn grok_defaults_include_grok_models() {
         let ids = resolve_model_ids_for_provider(Provider::Grok);
 
-        assert!(ids.iter().any(|id| id == "grok-4.3"));
+        assert_eq!(
+            ids,
+            vec![
+                "grok-4.6".to_owned(),
+                "grok-4.5".to_owned(),
+                "grok-4.3".to_owned(),
+                "grok-build-0.1".to_owned(),
+            ]
+        );
         assert!(!ids.iter().any(|id| id == "gpt-5.6-sol"));
+    }
+
+    #[test]
+    fn highlights_grok_models_by_version() {
+        let ids = resolve_model_ids_for_provider(Provider::Grok);
+
+        assert_eq!(
+            highlight_model_ids_for_provider(Provider::Grok, &ids),
+            vec![
+                "grok-4.6".to_owned(),
+                "grok-4.5".to_owned(),
+                "grok-4.3".to_owned(),
+                "grok-build-0.1".to_owned(),
+            ]
+        );
     }
 
     #[test]
@@ -561,9 +584,9 @@ mod tests {
 
     #[test]
     fn provider_detection_handles_prefixed_grok_models() {
-        assert_eq!(provider_for_model("grok-4.3"), Provider::Grok);
-        assert_eq!(provider_for_model("xai/grok-4.3"), Provider::Grok);
-        assert_eq!(provider_for_model("grok/grok-4.3"), Provider::Grok);
+        assert_eq!(provider_for_model("grok-4.6"), Provider::Grok);
+        assert_eq!(provider_for_model("xai/grok-4.6"), Provider::Grok);
+        assert_eq!(provider_for_model("grok/grok-4.6"), Provider::Grok);
         assert_eq!(provider_for_model("openai-codex/grok-4.3"), Provider::Grok);
         assert_eq!(
             provider_for_model("openai-codex/gpt-5.6-luna"),
@@ -594,7 +617,7 @@ mod tests {
         };
 
         assert_eq!(owner_for("gpt-5.6-sol"), Some("openai-codex"));
-        assert_eq!(owner_for("grok-4.3"), Some("xai"));
+        assert_eq!(owner_for("grok-4.6"), Some("xai"));
         assert_eq!(owner_for("auto"), Some("kiro"));
         assert_eq!(owner_for("cursor/gpt-5"), Some("cursor"));
     }

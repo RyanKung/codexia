@@ -87,7 +87,7 @@ rotom models --provider grok      # one provider
 ```
 
 Common ids include `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`,
-`grok-4.3`, Kiro's `claude-*` family, and `cursor/auto`. rotom fetches the
+`grok-4.6`, Kiro's `claude-*` family, and `cursor/auto`. rotom fetches the
 live registry where the provider supports it and falls back to built-in aliases
 otherwise.
 
